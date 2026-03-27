@@ -8,12 +8,15 @@ import gi
 gi.require_version("Gdk", "4.0")
 gi.require_version("Gtk", "4.0")
 
-from gi.repository import Gdk, GLib, Gtk
+# gi.require_version() above is executable code; all subsequent imports trigger E402.
+from gi.repository import Gdk, GLib, Gtk  # noqa: E402
 
-from voxize.state import State, StateMachine
+from voxize.state import State, StateMachine  # noqa: E402
 
 
-def _draw_fade(area: Gtk.DrawingArea, cr: cairo.Context, w: int, h: int, _data=None) -> None:
+def _draw_fade(
+    area: Gtk.DrawingArea, cr: cairo.Context, w: int, h: int, _data=None
+) -> None:
     """Draw a gradient from window background (top) to transparent (bottom)."""
     r, g, b, a = 30 / 255, 30 / 255, 30 / 255, 0.85
     try:
@@ -204,6 +207,7 @@ class OverlayWindow:
         if self._destroyed:
             return
         import os
+
         file_uri = GLib.filename_to_uri(os.path.join(cwd, "WHISPER.txt"), None)
         # Link color must be set in Pango markup — GtkLabel ignores CSS for
         # link colors (it uses the accent color internally).
@@ -215,11 +219,15 @@ class OverlayWindow:
         )
         self._context_label.set_visible(True)
 
-    def show_session_costs(self, transcription_cost: float | None, cleanup_cost: float | None) -> None:
+    def show_session_costs(
+        self, transcription_cost: float | None, cleanup_cost: float | None
+    ) -> None:
         """Show session costs in the context bar (plain text)."""
         if self._destroyed:
             return
-        t_str = f"${transcription_cost:.4f}" if transcription_cost is not None else "\u2014"
+        t_str = (
+            f"${transcription_cost:.4f}" if transcription_cost is not None else "\u2014"
+        )
         c_str = f"${cleanup_cost:.4f}" if cleanup_cost is not None else "\u2014"
         if transcription_cost is not None or cleanup_cost is not None:
             total = (transcription_cost or 0) + (cleanup_cost or 0)

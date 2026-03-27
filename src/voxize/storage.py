@@ -2,7 +2,7 @@
 
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from gi.repository import Gio
 
@@ -21,7 +21,7 @@ def state_dir() -> str:
 
 def create_session_dir() -> str:
     """Create and return a new session directory named by ISO timestamp."""
-    now = datetime.now(timezone.utc).astimezone()
+    now = datetime.now(UTC).astimezone()
     name = now.strftime("%Y-%m-%dT%H-%M-%S")
     path = os.path.join(state_dir(), name)
     os.makedirs(path, exist_ok=True)
@@ -47,8 +47,12 @@ def prune_sessions(keep: int = _MAX_SESSIONS) -> None:
     except OSError:
         return
 
-    logger.debug("prune_sessions: found=%d keep=%d prune=%d",
-                 len(dirs), keep, max(0, len(dirs) - keep))
+    logger.debug(
+        "prune_sessions: found=%d keep=%d prune=%d",
+        len(dirs),
+        keep,
+        max(0, len(dirs) - keep),
+    )
 
     for name in dirs[keep:]:
         path = os.path.join(base, name)

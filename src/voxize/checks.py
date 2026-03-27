@@ -62,9 +62,7 @@ def get_api_key(service: str) -> str:
     )
     key = result.stdout.strip()
     if not key:
-        raise RuntimeError(
-            f"API key for '{service}' not found in keyring"
-        )
+        raise RuntimeError(f"API key for '{service}' not found in keyring")
     return key
 
 

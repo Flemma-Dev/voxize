@@ -31,13 +31,13 @@ class MicLock:
     def acquire(self) -> None:
         """Acquire the mic lock. Raises MicLockError if another instance holds it."""
         logger.debug("acquire: path=%s", self._path)
-        self._fd = open(self._path, "w")
+        self._fd = open(self._path, "w")  # noqa: SIM115
         try:
             fcntl.flock(self._fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
+        except OSError as exc:
             self._fd.close()
             self._fd = None
-            raise MicLockError("Another Voxize instance is recording")
+            raise MicLockError("Another Voxize instance is recording") from exc
         self._fd.write(str(os.getpid()))
         self._fd.flush()
         logger.debug("acquire: success pid=%d", os.getpid())
@@ -51,7 +51,7 @@ class MicLock:
                 self._fd.close()
             except OSError:
                 pass
-            try:
+            try:  # noqa: SIM105
                 os.unlink(self._path)
             except OSError:
                 pass

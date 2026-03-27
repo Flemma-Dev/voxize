@@ -13,7 +13,7 @@ has an incorrect header but all PCM data is intact and recoverable.
 import logging
 import os
 import struct
-from typing import Callable
+from collections.abc import Callable
 
 import sounddevice as sd
 
@@ -35,20 +35,20 @@ class WavWriter:
 
     def open(self) -> None:
         logger.debug("wav open: path=%s", self._path)
-        self._fd = open(self._path, "wb")
+        self._fd = open(self._path, "wb")  # noqa: SIM115
         # 44-byte RIFF/WAV header with placeholder sizes
         self._fd.write(b"RIFF")
         self._fd.write(struct.pack("<I", 0xFFFFFFFF))  # RIFF chunk size (placeholder)
         self._fd.write(b"WAVE")
         # fmt sub-chunk (16 bytes)
         self._fd.write(b"fmt ")
-        self._fd.write(struct.pack("<I", 16))           # sub-chunk size
-        self._fd.write(struct.pack("<H", 1))             # PCM format
+        self._fd.write(struct.pack("<I", 16))  # sub-chunk size
+        self._fd.write(struct.pack("<H", 1))  # PCM format
         self._fd.write(struct.pack("<H", CHANNELS))
         self._fd.write(struct.pack("<I", SAMPLE_RATE))
         self._fd.write(struct.pack("<I", SAMPLE_RATE * CHANNELS * 2))  # byte rate
         self._fd.write(struct.pack("<H", CHANNELS * 2))  # block align
-        self._fd.write(struct.pack("<H", 16))             # bits per sample
+        self._fd.write(struct.pack("<H", 16))  # bits per sample
         # data sub-chunk
         self._fd.write(b"data")
         self._fd.write(struct.pack("<I", 0xFFFFFFFF))  # data size (placeholder)
@@ -91,13 +91,19 @@ class AudioCapture:
         self._on_chunk(pcm)
         self._chunk_count += 1
         if self._chunk_count % 25 == 0:
-            logger.debug("audio callback: chunk %d, %d bytes",
-                         self._chunk_count, len(pcm))
+            logger.debug(
+                "audio callback: chunk %d, %d bytes", self._chunk_count, len(pcm)
+            )
 
     def start(self) -> None:
         self._wav.open()
-        logger.debug("audio start: rate=%d ch=%d dtype=%s blocksize=%d",
-                      SAMPLE_RATE, CHANNELS, DTYPE, BLOCK_SIZE)
+        logger.debug(
+            "audio start: rate=%d ch=%d dtype=%s blocksize=%d",
+            SAMPLE_RATE,
+            CHANNELS,
+            DTYPE,
+            BLOCK_SIZE,
+        )
         self._stream = sd.RawInputStream(
             samplerate=SAMPLE_RATE,
             channels=CHANNELS,

@@ -51,7 +51,9 @@ class StateMachine:
     def transition(self, new_state: State, *, error: str = "") -> None:
         old = self._state
         allowed = new_state in _ALLOWED[old]
-        logger.debug("transition: %s -> %s allowed=%s", old.name, new_state.name, allowed)
+        logger.debug(
+            "transition: %s -> %s allowed=%s", old.name, new_state.name, allowed
+        )
         if not allowed:
             raise InvalidTransition(f"{old.name} → {new_state.name} is not allowed")
         if new_state == State.ERROR:

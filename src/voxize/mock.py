@@ -81,7 +81,9 @@ class MockTranscription:
 
     def _tick(self) -> bool:
         if self._pos >= len(self._words):
-            self._source = None  # GLib auto-removes; clear to prevent stale source_remove
+            self._source = (
+                None  # GLib auto-removes; clear to prevent stale source_remove
+            )
             return False  # all words emitted, stay "recording"
         sep = " " if self._pos > 0 else ""
         self._on_delta(sep + self._words[self._pos])
@@ -99,7 +101,9 @@ class MockCleanup:
         self._on_delta = None
         self._on_complete = None
 
-    def start(self, transcript: str, on_delta, on_complete, delay_ms: int = 2500) -> None:
+    def start(
+        self, transcript: str, on_delta, on_complete, delay_ms: int = 2500
+    ) -> None:
         self._on_delta = on_delta
         self._on_complete = on_complete
         self._words = _CLEANED.split()
@@ -118,7 +122,9 @@ class MockCleanup:
 
     def _tick(self) -> bool:
         if self._pos >= len(self._words):
-            self._source = None  # GLib auto-removes; clear to prevent stale source_remove
+            self._source = (
+                None  # GLib auto-removes; clear to prevent stale source_remove
+            )
             if self._on_complete:
                 self._on_complete(" ".join(self._words))
             return False

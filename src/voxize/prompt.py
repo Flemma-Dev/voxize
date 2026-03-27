@@ -63,7 +63,7 @@ def _detect_cwd() -> str | None:
 def _get_focused_window_pid() -> int | None:
     """Get the PID of the focused window via GNOME Shell D-Bus extension."""
     try:
-        from gi.repository import Gio, GLib
+        from gi.repository import Gio
 
         proxy = Gio.DBusProxy.new_for_bus_sync(
             Gio.BusType.SESSION,
@@ -125,7 +125,9 @@ def _resolve_tmux_cwd() -> str | None:
     try:
         pane_cmd = subprocess.run(
             ["tmux", "display-message", "-p", "#{pane_current_command}"],
-            capture_output=True, text=True, timeout=2,
+            capture_output=True,
+            text=True,
+            timeout=2,
         )
         if pane_cmd.returncode != 0:
             logger.debug("prompt: tmux display-message failed: %s", pane_cmd.stderr)
@@ -140,7 +142,9 @@ def _resolve_tmux_cwd() -> str | None:
         # Not nvim — use tmux pane's current path
         pane_path = subprocess.run(
             ["tmux", "display-message", "-p", "-F", "#{pane_current_path}"],
-            capture_output=True, text=True, timeout=2,
+            capture_output=True,
+            text=True,
+            timeout=2,
         )
         if pane_path.returncode == 0:
             path = pane_path.stdout.strip()
@@ -159,7 +163,9 @@ def _resolve_nvim_cwd() -> str | None:
         # Get the pane's TTY
         tty_result = subprocess.run(
             ["tmux", "display-message", "-p", "-F", "#{pane_tty}"],
-            capture_output=True, text=True, timeout=2,
+            capture_output=True,
+            text=True,
+            timeout=2,
         )
         if tty_result.returncode != 0:
             return None
@@ -172,7 +178,9 @@ def _resolve_nvim_cwd() -> str | None:
         # Find nvim PID on this TTY
         pgrep_result = subprocess.run(
             ["pgrep", "-t", tty_short, "nvim"],
-            capture_output=True, text=True, timeout=2,
+            capture_output=True,
+            text=True,
+            timeout=2,
         )
         if pgrep_result.returncode != 0 or not pgrep_result.stdout.strip():
             logger.debug("prompt: no nvim PID found on tty %s", tty_short)

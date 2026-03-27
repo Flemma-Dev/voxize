@@ -20,11 +20,12 @@ import gi
 gi.require_version("Gdk", "4.0")
 gi.require_version("Gtk", "4.0")
 
-from gi.repository import Gdk, GLib, Gtk
+# gi.require_version() above is executable code; all subsequent imports trigger E402.
+from gi.repository import Gdk, GLib, Gtk  # noqa: E402
 
-from voxize.mock import MockCleanup, MockTranscription
-from voxize.state import State, StateMachine
-from voxize.ui import OverlayWindow
+from voxize.mock import MockCleanup, MockTranscription  # noqa: E402
+from voxize.state import State, StateMachine  # noqa: E402
+from voxize.ui import OverlayWindow  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -68,8 +69,9 @@ class VoxizeApp(Gtk.Application):
             from voxize.prompt import detect_prompt
 
             self._prompt_cwd, self._prompt = detect_prompt()
-            logger.debug("do_activate: prompt_cwd=%s prompt=%s",
-                          self._prompt_cwd, self._prompt)
+            logger.debug(
+                "do_activate: prompt_cwd=%s prompt=%s", self._prompt_cwd, self._prompt
+            )
 
         # Load CSS theme
         css = Gtk.CssProvider()
@@ -147,10 +149,12 @@ class VoxizeApp(Gtk.Application):
         # Set up session-level file logging
         fh = logging.FileHandler(os.path.join(self._session_dir, "debug.log"))
         fh.setLevel(logging.DEBUG)
-        fh.setFormatter(logging.Formatter(
-            "%(asctime)s.%(msecs)03d %(threadName)-14s %(name)s %(message)s",
-            datefmt="%H:%M:%S",
-        ))
+        fh.setFormatter(
+            logging.Formatter(
+                "%(asctime)s.%(msecs)03d %(threadName)-14s %(name)s %(message)s",
+                datefmt="%H:%M:%S",
+            )
+        )
         logging.getLogger("voxize").addHandler(fh)
         logging.getLogger("voxize").setLevel(logging.DEBUG)
         self._log_handler = fh
@@ -160,7 +164,9 @@ class VoxizeApp(Gtk.Application):
         # Create providers
         logger.debug("_initialize: creating providers")
         self._transcription = RealtimeTranscription(
-            self._api_key, self._session_dir, prompt=self._prompt,
+            self._api_key,
+            self._session_dir,
+            prompt=self._prompt,
         )
         self._audio = AudioCapture(self._session_dir, self._transcription.send_audio)
 
@@ -333,6 +339,7 @@ class VoxizeApp(Gtk.Application):
     def _stop_providers(self, audio, transcription, lock, session_dir) -> None:
         """Background thread: stop real providers, save transcript, copy clipboard."""
         from gi.repository import GLib
+
         from voxize import clipboard
 
         logger.debug("_stop_providers: stopping audio")
@@ -350,8 +357,9 @@ class VoxizeApp(Gtk.Application):
                 transcript = transcription.stop()
         except Exception:
             logger.exception("Failed to stop transcription")
-        logger.debug("_stop_providers: transcription stopped, transcript_len=%d",
-                      len(transcript))
+        logger.debug(
+            "_stop_providers: transcription stopped, transcript_len=%d", len(transcript)
+        )
 
         logger.debug("_stop_providers: releasing lock")
         try:
@@ -377,8 +385,11 @@ class VoxizeApp(Gtk.Application):
     def _start_cleanup(self, transcript: str, transcription_usage=None) -> bool:
         """GTK thread: start cleanup provider (or handle empty transcript)."""
         self._transcription_usage = transcription_usage
-        logger.debug("_start_cleanup: transcript_len=%d empty=%s",
-                      len(transcript), not transcript.strip())
+        logger.debug(
+            "_start_cleanup: transcript_len=%d empty=%s",
+            len(transcript),
+            not transcript.strip(),
+        )
         # Guard against stale callback (e.g., user cancelled during drain)
         if not self._machine or self._machine.state != State.CLEANING:
             return False
@@ -418,9 +429,12 @@ class VoxizeApp(Gtk.Application):
 
     def _teardown_async(self) -> None:
         """Move blocking teardown to a background thread."""
-        logger.debug("_teardown_async: audio=%s transcription=%s lock=%s",
-                      self._audio is not None, self._transcription is not None,
-                      self._lock is not None)
+        logger.debug(
+            "_teardown_async: audio=%s transcription=%s lock=%s",
+            self._audio is not None,
+            self._transcription is not None,
+            self._lock is not None,
+        )
         # Grab references and null them on GTK thread to prevent races
         audio = self._audio
         self._audio = None
@@ -443,8 +457,12 @@ class VoxizeApp(Gtk.Application):
     @staticmethod
     def _teardown_blocking(audio, transcription, lock) -> None:
         """Background thread: stop providers, release lock."""
-        logger.debug("_teardown_blocking: audio=%s transcription=%s lock=%s",
-                      audio is not None, transcription is not None, lock is not None)
+        logger.debug(
+            "_teardown_blocking: audio=%s transcription=%s lock=%s",
+            audio is not None,
+            transcription is not None,
+            lock is not None,
+        )
         try:
             if audio:
                 logger.debug("_teardown_blocking: stopping audio")
@@ -496,9 +514,9 @@ class VoxizeApp(Gtk.Application):
     # ── Session costs ──
 
     # Pricing per million tokens
-    _TRANSCRIBE_INPUT_PRICE = 2.50   # gpt-4o-transcribe
+    _TRANSCRIBE_INPUT_PRICE = 2.50  # gpt-4o-transcribe
     _TRANSCRIBE_OUTPUT_PRICE = 10.00
-    _CLEANUP_INPUT_PRICE = 0.75      # gpt-5.4-mini
+    _CLEANUP_INPUT_PRICE = 0.75  # gpt-5.4-mini
     _CLEANUP_OUTPUT_PRICE = 4.50
 
     def _show_session_costs(self) -> None:
@@ -507,15 +525,17 @@ class VoxizeApp(Gtk.Application):
         if self._transcription_usage:
             inp = self._transcription_usage["input_tokens"]
             out = self._transcription_usage["output_tokens"]
-            t_cost = (inp * self._TRANSCRIBE_INPUT_PRICE
-                      + out * self._TRANSCRIBE_OUTPUT_PRICE) / 1_000_000
+            t_cost = (
+                inp * self._TRANSCRIBE_INPUT_PRICE + out * self._TRANSCRIBE_OUTPUT_PRICE
+            ) / 1_000_000
 
         c_cost = None
         if self._cleanup_usage:
             inp = self._cleanup_usage["input_tokens"]
             out = self._cleanup_usage["output_tokens"]
-            c_cost = (inp * self._CLEANUP_INPUT_PRICE
-                      + out * self._CLEANUP_OUTPUT_PRICE) / 1_000_000
+            c_cost = (
+                inp * self._CLEANUP_INPUT_PRICE + out * self._CLEANUP_OUTPUT_PRICE
+            ) / 1_000_000
 
         if t_cost is not None or c_cost is not None:
             self._ui.show_session_costs(t_cost, c_cost)
@@ -596,7 +616,7 @@ class VoxizeApp(Gtk.Application):
         try:
             devnull = os.open(os.devnull, os.O_RDWR)
             for fd in (0, 1, 2):
-                try:
+                try:  # noqa: SIM105
                     os.dup2(devnull, fd)
                 except OSError:
                     pass
