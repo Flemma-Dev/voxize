@@ -172,6 +172,19 @@ class OverlayWindow:
 
         self._degraded = False
 
+        # Context bar — persistent prompt indicator at the bottom
+        from gi.repository import Pango
+
+        self._context_label = Gtk.Label()
+        self._context_label.add_css_class("context-bar")
+        self._context_label.set_wrap(True)
+        self._context_label.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
+        self._context_label.set_lines(3)
+        self._context_label.set_ellipsize(Pango.EllipsizeMode.END)
+        self._context_label.set_xalign(0)
+        self._context_label.set_visible(False)
+        main.append(self._context_label)
+
     def setup_max_height(self) -> None:
         """Set max text area height based on screen geometry (1/4 screen)."""
         display = Gdk.Display.get_default()
@@ -183,6 +196,24 @@ class OverlayWindow:
         geom = monitors.get_item(0).get_geometry()
         max_h = geom.height // 4 - 50  # reserve ~50px for header
         self._scroll.set_max_content_height(max(100, max_h))
+
+    # ── Context statusbar ──
+
+    def show_prompt_context(self, prompt: str, cwd: str) -> None:
+        """Show a persistent context bar with the active WHISPER.txt prompt."""
+        if self._destroyed:
+            return
+        import os
+        file_uri = GLib.filename_to_uri(os.path.join(cwd, "WHISPER.txt"), None)
+        # Link color must be set in Pango markup — GtkLabel ignores CSS for
+        # link colors (it uses the accent color internally).
+        link_color = "#ffffff80"
+        self._context_label.set_markup(
+            f'<a href="{GLib.markup_escape_text(file_uri)}">'
+            f'<span foreground="{link_color}"><b>WHISPER.txt</b></span></a>'
+            f"  {GLib.markup_escape_text(prompt)}"
+        )
+        self._context_label.set_visible(True)
 
     # ── Text operations ──
 

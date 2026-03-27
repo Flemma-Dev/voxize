@@ -108,3 +108,12 @@ headerbar button {
     color: var(--vox-fg-dim);
     font-size: 0.85em;
 }
+
+/* Context bar — persistent prompt indicator */
+.context-bar {
+    background: transparent;
+    border-top: 1px solid var(--vox-border-dim);
+    padding: 0.3em 0.75em;
+    font-size: 0.8em;
+    color: var(--vox-fg-dim);
+}

@@ -79,8 +79,9 @@ _SYSTEM_PROMPT = (
 class Cleanup:
     """Streams transcript through GPT-5.4 Mini for cleanup."""
 
-    def __init__(self, api_key: str) -> None:
+    def __init__(self, api_key: str, prompt: str | None = None) -> None:
         self._api_key = api_key
+        self._prompt = prompt
         self._thread: threading.Thread | None = None
         self._cancelled = False
 
@@ -126,6 +127,11 @@ class Cleanup:
 
         nonce = secrets.token_hex(8)
         system = _SYSTEM_PROMPT.replace("{nonce}", nonce)
+        if self._prompt:
+            system += (
+                "\n\nThe transcription agent was given the following additional context:\n\n"
+                f"<transcription_context>\n{self._prompt}\n</transcription_context>"
+            )
         user_message = f"<transcription-{nonce}>\n{transcript}\n</transcription-{nonce}>"
 
         client = OpenAI(api_key=self._api_key)

@@ -42,6 +42,7 @@ class VoxizeApp(Gtk.Application):
         self._lock = None
         self._session_dir: str | None = None
         self._api_key: str | None = None
+        self._prompt: str | None = None
         self._audio = None
         self._transcription = None
         self._cleanup = None
@@ -56,6 +57,16 @@ class VoxizeApp(Gtk.Application):
         self._log_handler = None
 
     def do_activate(self) -> None:
+        # Detect transcription prompt BEFORE presenting the window — once our
+        # window takes focus, the D-Bus focused-window query would return our
+        # own PID instead of the window the user was working in.
+        if not _MOCK:
+            from voxize.prompt import detect_prompt
+
+            self._prompt_cwd, self._prompt = detect_prompt()
+            logger.debug("do_activate: prompt_cwd=%s prompt=%s",
+                          self._prompt_cwd, self._prompt)
+
         # Load CSS theme
         css = Gtk.CssProvider()
         css.load_from_string((Path(__file__).parent / "style.css").read_text())
@@ -83,6 +94,9 @@ class VoxizeApp(Gtk.Application):
 
         win.present()
         self._ui.setup_max_height()
+
+        if self._prompt:
+            self._ui.show_prompt_context(self._prompt, self._prompt_cwd)
 
         # Signal handlers — finalize WAV header before exit so the file is
         # a valid WAV (not just raw PCM with a placeholder header).
@@ -137,10 +151,13 @@ class VoxizeApp(Gtk.Application):
         logging.getLogger("voxize").setLevel(logging.DEBUG)
         self._log_handler = fh
         logger.debug("_initialize: file logging active")
+        logger.debug("_initialize: prompt=%s", self._prompt)
 
         # Create providers
         logger.debug("_initialize: creating providers")
-        self._transcription = RealtimeTranscription(self._api_key, self._session_dir)
+        self._transcription = RealtimeTranscription(
+            self._api_key, self._session_dir, prompt=self._prompt,
+        )
         self._audio = AudioCapture(self._session_dir, self._transcription.send_audio)
 
         # Start WebSocket (background thread) — connects while we record
@@ -380,7 +397,7 @@ class VoxizeApp(Gtk.Application):
         else:
             from voxize.cleanup import Cleanup
 
-            self._cleanup = Cleanup(self._api_key)
+            self._cleanup = Cleanup(self._api_key, prompt=self._prompt)
             self._cleanup.start(
                 transcript=transcript,
                 on_delta=self._ui.append_text,

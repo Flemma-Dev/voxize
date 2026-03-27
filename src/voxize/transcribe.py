@@ -35,9 +35,15 @@ _MODEL = "gpt-4o-transcribe"
 class RealtimeTranscription:
     """Streams audio to OpenAI Realtime API and accumulates transcript."""
 
-    def __init__(self, api_key: str, session_dir: str | None = None) -> None:
+    def __init__(
+        self,
+        api_key: str,
+        session_dir: str | None = None,
+        prompt: str | None = None,
+    ) -> None:
         self._api_key = api_key
         self._session_dir = session_dir
+        self._prompt = prompt
         self._on_delta: Callable[[str], None] | None = None
         self._on_error: Callable[[str], None] | None = None
         self._on_ready: Callable[[], None] | None = None
@@ -276,6 +282,7 @@ class RealtimeTranscription:
                 "input_audio_transcription": {
                     "model": _MODEL,
                     "language": "en",
+                    **({"prompt": self._prompt} if self._prompt else {}),
                 },
                 "turn_detection": self._VAD_CONFIG,
                 "input_audio_noise_reduction": {

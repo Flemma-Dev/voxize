@@ -338,6 +338,36 @@ The tool is ready for daily use. Remaining deferred items that could improve the
 - **Audio level meter** — `Gtk.LevelBar` for "am I being heard?" feedback
 - **Fade gradient `lookup_color("vox_bg")` silently fails** — cosmetic, falls back to hardcoded rgba(30,30,30,0.85)
 
+---
+
+### 2026-03-27 — Session 6: Transcription prompt hints (WHISPER.txt)
+
+**Feature**: Detect focused window's project directory and load WHISPER.txt as transcription context.
+
+**New module: `prompt.py`** — Best-effort detection chain, mirroring the old VoxInput `record.sh` logic:
+
+1. **Focused window PID** via `Gio.DBusProxy` D-Bus call to the GNOME Shell Windows extension (`org.gnome.Shell.Extensions.Windows.List`). Returns JSON with window metadata including `focus` and `pid`.
+2. **Working directory resolution** — reads `/proc/{pid}/cmdline` to identify the application:
+   - **Ghostty + tmux → nvim**: `tmux display-message -p '#{pane_current_command}'` → if nvim, `pgrep -t <pane_tty> nvim` → `/proc/{nvim_pid}/cwd`
+   - **Ghostty + tmux → other**: `tmux display-message -p -F '#{pane_current_path}'`
+   - **Other**: `/proc/{pid}/cwd`
+3. **WHISPER.txt**: read from resolved directory, collapse whitespace to single line.
+
+Every step catches exceptions and returns None on failure — never blocks startup.
+
+**Critical timing issue**: prompt detection must run **before `win.present()`** in `do_activate()`. Once our GTK window is presented, it takes focus, and the D-Bus query returns our own PID. The initial implementation placed detection in `_initialize()` (after `GLib.idle_add`, well after present) — debug log showed it resolving Voxize's own process as the focused window.
+
+**Prompt wiring**:
+- **Transcription API**: passed as `input_audio_transcription.prompt` in the `transcription_session.update` config sent on WS connect. Included from the very first message so all audio (including startup burst) is transcribed with prompt context.
+- **Cleanup**: appended as `<transcription_context>` block in the GPT-5.4 Mini system prompt, matching the old record.sh pattern.
+
+**UI: context bar** — persistent `Gtk.Label` at the bottom of the overlay showing the active WHISPER.txt content. Wraps up to 3 lines (`set_lines(3)` + `Pango.EllipsizeMode.END`), then ellipsizes. The filename is a clickable `file://` link via Pango `<a href="">` markup.
+
+Implementation decisions:
+- **Pango link color override**: GTK4's `GtkLabel` ignores CSS for link colors (uses accent color internally). The only reliable override is `<span foreground="#ffffff80">` directly in the Pango markup. `rgba()` syntax is not supported by Pango — only hex colors (with optional alpha via `#RRGGBBAA`).
+- **No libadwaita dependency**: initially tried `Adw.ToastOverlay` for a brief notification, but it cropped badly in the tiny overlay window and took vertical space. Replaced with a plain `Gtk.Label` styled via CSS — no extra dependencies needed.
+- **No new checks.py entries**: tmux/pgrep are system tools that should be present. The entire feature is best-effort with graceful fallbacks at each step.
+
 #### Next
-- Begin daily use. If issues surface, the debugging guide and analysis script are ready.
-- Transcription prompt hints are the highest-value deferred item — would improve accuracy for technical vocabulary.
+- Begin daily use with prompt hints active. Monitor debug.log for detection accuracy.
+- Audio level meter remains the highest-value deferred item.
