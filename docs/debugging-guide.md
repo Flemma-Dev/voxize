@@ -269,6 +269,32 @@ If `qsize` drops to 0 within 1-2 seconds of WS connection, pacing may be too fas
 
 The raw transcript is always copied to the clipboard BEFORE cleanup starts (as a safety net). The user always has the raw text even if cleanup fails.
 
+### Stuck on "Listening..." — wrong audio device
+
+**Symptom:** The overlay stays on "Listening..." indefinitely. No transcription text appears. The user is speaking but nothing happens.
+
+**Diagnosis:**
+1. Check `ws_events.jsonl` — if it only contains `transcription_session.created` and `transcription_session.updated` (no `speech_started` events), the API is receiving audio but not detecting speech.
+2. Check `debug.log` — if `_send_loop` shows hundreds of chunks sent at real-time pace with `qsize=0`, the audio pipeline is working correctly. The problem is the audio content, not delivery.
+3. Inspect the WAV file with `sox`:
+   ```
+   nix shell nixpkgs#sox -- sox ~/.local/state/voxize/<session>/audio.wav -n stat
+   ```
+4. Compare the stats against a known-good session:
+
+| Metric | Working session | Wrong device |
+|---|---|---|
+| Maximum amplitude | 0.05 | 0.43 |
+| RMS amplitude | 0.003 | 0.043 |
+| Rough frequency | 3494 Hz | 57 Hz |
+| Mean amplitude | ~0 (symmetric) | 0.007 (DC-biased) |
+
+A rough frequency of ~57 Hz is electrical hum (mains noise), not human voice (85-300 Hz fundamental). A heavily asymmetric waveform (max amplitude far from zero, min amplitude near zero) indicates DC offset from the wrong input device.
+
+**Root cause:** `sounddevice` uses the system default input device. If GNOME Sound Settings switches the default (e.g., Bluetooth headset connected/disconnected, monitor audio selected), Voxize captures from the wrong device. The audio is technically valid PCM — it records and sends correctly — but it contains no speech for the API to transcribe.
+
+**Fix:** Check GNOME Settings > Sound > Input and ensure the correct microphone is selected before launching Voxize.
+
 ## 6. Debug Log Format and Key Patterns
 
 ### Format

@@ -131,7 +131,7 @@ class OverlayWindow:
 
         self._scroll = Gtk.ScrolledWindow()
         self._scroll.set_child(self._text_view)
-        self._scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        self._scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.EXTERNAL)
         self._scroll.set_propagate_natural_height(True)
         self._scroll.set_max_content_height(250)  # overridden in setup_max_height
 
@@ -459,6 +459,7 @@ class OverlayWindow:
     # ── Pulse animation ──
 
     def _start_pulse(self) -> None:
+        self._stop_pulse()  # idempotent — safe to call when no pulse is running
         self._pulse_dim = False
         self._pulse_source = GLib.timeout_add(600, self._tick_pulse)
 

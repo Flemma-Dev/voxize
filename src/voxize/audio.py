@@ -36,26 +36,27 @@ class WavWriter:
         self._lock = threading.Lock()
 
     def open(self) -> None:
-        logger.debug("wav open: path=%s", self._path)
-        self._fd = open(self._path, "wb")  # noqa: SIM115
-        # 44-byte RIFF/WAV header with placeholder sizes
-        self._fd.write(b"RIFF")
-        self._fd.write(struct.pack("<I", 0xFFFFFFFF))  # RIFF chunk size (placeholder)
-        self._fd.write(b"WAVE")
-        # fmt sub-chunk (16 bytes)
-        self._fd.write(b"fmt ")
-        self._fd.write(struct.pack("<I", 16))  # sub-chunk size
-        self._fd.write(struct.pack("<H", 1))  # PCM format
-        self._fd.write(struct.pack("<H", CHANNELS))
-        self._fd.write(struct.pack("<I", SAMPLE_RATE))
-        self._fd.write(struct.pack("<I", SAMPLE_RATE * CHANNELS * 2))  # byte rate
-        self._fd.write(struct.pack("<H", CHANNELS * 2))  # block align
-        self._fd.write(struct.pack("<H", 16))  # bits per sample
-        # data sub-chunk
-        self._fd.write(b"data")
-        self._fd.write(struct.pack("<I", 0xFFFFFFFF))  # data size (placeholder)
-        self._fd.flush()
-        self._data_bytes = 0
+        with self._lock:
+            logger.debug("wav open: path=%s", self._path)
+            self._fd = open(self._path, "wb")  # noqa: SIM115
+            # 44-byte RIFF/WAV header with placeholder sizes
+            self._fd.write(b"RIFF")
+            self._fd.write(struct.pack("<I", 0xFFFFFFFF))  # RIFF chunk size (placeholder)
+            self._fd.write(b"WAVE")
+            # fmt sub-chunk (16 bytes)
+            self._fd.write(b"fmt ")
+            self._fd.write(struct.pack("<I", 16))  # sub-chunk size
+            self._fd.write(struct.pack("<H", 1))  # PCM format
+            self._fd.write(struct.pack("<H", CHANNELS))
+            self._fd.write(struct.pack("<I", SAMPLE_RATE))
+            self._fd.write(struct.pack("<I", SAMPLE_RATE * CHANNELS * 2))  # byte rate
+            self._fd.write(struct.pack("<H", CHANNELS * 2))  # block align
+            self._fd.write(struct.pack("<H", 16))  # bits per sample
+            # data sub-chunk
+            self._fd.write(b"data")
+            self._fd.write(struct.pack("<I", 0xFFFFFFFF))  # data size (placeholder)
+            self._fd.flush()
+            self._data_bytes = 0
 
     def write(self, pcm: bytes) -> None:
         with self._lock:

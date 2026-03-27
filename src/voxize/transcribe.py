@@ -98,8 +98,6 @@ class RealtimeTranscription:
         self._audio_queue = asyncio.Queue()
         self._done = asyncio.Event()
 
-        self._chunk_count = 0
-
         logger.debug("start: launching WS thread")
         self._thread = threading.Thread(target=self._run, daemon=True, name="voxize-ws")
         self._thread.start()
