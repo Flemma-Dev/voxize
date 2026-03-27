@@ -1,0 +1,93 @@
+/* Voxize overlay theme — dark translucent, as specified in design doc §5 */
+/* Sizing uses em so the UI scales with the system font.               */
+
+window {
+    /* Palette — CSS custom properties, same mechanism libadwaita uses */
+    --vox-bg:         rgba(30, 30, 30, 0.85);
+    --vox-fg:         rgba(255, 255, 255, 0.88);
+    --vox-fg-dim:     rgba(255, 255, 255, 0.5);
+    --vox-border:     rgba(255, 255, 255, 0.08);
+    --vox-border-dim: rgba(255, 255, 255, 0.06);
+    --vox-selection:  rgba(255, 255, 255, 0.2);
+    --vox-red:        #ef4444;
+    --vox-amber:      #f59e0b;
+    --vox-green:      #22c55e;
+
+    /* Override libadwaita's destructive palette with our muted red */
+    --destructive-bg-color: rgba(239, 68, 68, 0.25);
+    --destructive-fg-color: var(--vox-red);
+    --destructive-color:    var(--vox-red);
+
+    --monospace-font-family: monospace;
+
+    background-color: var(--vox-bg);
+    border: 1px solid var(--vox-border);
+    border-radius: 12px;
+    color: var(--vox-fg);
+}
+
+/* HeaderBar — transparent over window bg, with subtle bottom border */
+headerbar {
+    background: transparent;
+    box-shadow: none;
+    border-bottom: 1px solid var(--vox-border-dim);
+    padding: 0.3em 0.6em;
+}
+
+/* Status indicator dot */
+.status-dot {
+    font-size: 0.7em;
+    transition: opacity 400ms ease-in-out;
+}
+
+.status-dot.recording { color: var(--vox-red); }
+.status-dot.cleaning  { color: var(--vox-amber); }
+.status-dot.ready     { color: var(--vox-green); }
+.status-dot.error     { color: var(--vox-red); }
+.status-dot.cancelled { color: var(--vox-fg-dim); }
+.status-dot.dim       { opacity: 0.3; }
+
+/* Status label */
+.status-label {
+    font-weight: bold;
+}
+
+/* Timer */
+.timer-label {
+    color: var(--vox-fg-dim);
+}
+
+/* Kill ScrolledWindow overshoot/undershoot shadows */
+scrolledwindow undershoot,
+scrolledwindow overshoot {
+    background: none;
+    box-shadow: none;
+}
+
+/* Text display */
+textview.text-area {
+    --view-fg-color: var(--vox-fg);
+    --view-bg-color: transparent;
+    background: transparent;
+    transition: opacity 500ms ease-in-out;
+}
+
+textview.text-area.processing {
+    opacity: 0.5;
+}
+
+/* Dim text when window loses focus, matching headerbar backdrop behavior */
+textview.text-area.backdrop {
+    --view-fg-color: var(--vox-fg-dim);
+}
+
+textview.text-area text selection {
+    background-color: var(--vox-selection);
+    color: white;
+}
+
+/* Buttons */
+headerbar button {
+    border-radius: 6px;
+    padding: 0.3em 1em;
+}
