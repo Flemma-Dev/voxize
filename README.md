@@ -68,7 +68,14 @@ Run:
 uv run python -m voxize
 ```
 
-Bind this command to a global hotkey in your desktop settings (e.g., GNOME Settings > Keyboard > Custom Shortcuts).
+To bind Voxize to a global hotkey (e.g., GNOME Settings > Keyboard > Custom Shortcuts), use the full command which can be invoked from any directory:
+
+```sh
+nix develop /path/to/voxize --command bash -c "cd /path/to/voxize && uv run python -m voxize"
+```
+
+> [!TIP]
+> The first `nix develop` invocation evaluates the full shell derivation, which can take several seconds. To avoid this on every hotkey press, use [nix-direnv](https://github.com/nix-community/nix-direnv) — it caches the evaluated dev shell so subsequent entries are near-instant. If you manage your environment with Home Manager, enable it with `programs.direnv.nix-direnv.enable = true`. A proper packaging strategy (e.g., a `writeShellScript` wrapper with pinned dependencies) would eliminate the cold-start cost entirely and is left as an exercise for the reader.
 
 ## How it works
 
