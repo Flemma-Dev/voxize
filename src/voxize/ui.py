@@ -46,6 +46,9 @@ class OverlayWindow:
         self._text_pulse_dim = False
         self._awaiting_cleanup = False
         self._destroyed = False
+        self._ws_ready = False
+        self._speech_active = False
+        self._had_first_text = False
         self._build()
         machine.on_change(self._on_state_change)
 
@@ -183,9 +186,33 @@ class OverlayWindow:
 
     # ── Text operations ──
 
+    def on_ws_ready(self) -> None:
+        """WebSocket session configured — show 'Listening...' status."""
+        if self._destroyed or self._machine.state != State.RECORDING:
+            return
+        self._ws_ready = True
+        if not self._had_first_text:
+            self._status_label.set_text("Listening\u2026")
+
+    def on_speech(self, active: bool) -> None:
+        """VAD speech_started/speech_stopped — tie dot pulse to speech."""
+        if self._destroyed or self._machine.state != State.RECORDING:
+            return
+        self._speech_active = active
+        if active:
+            # Bright dot during speech (remove dim, restart pulse)
+            self._dot.remove_css_class("dim")
+        else:
+            # Dim dot when speech stops — pulse resumes from dim
+            self._dot.add_css_class("dim")
+
     def append_text(self, text: str) -> None:
         if self._destroyed:
             return
+        if not self._had_first_text:
+            self._had_first_text = True
+            if self._machine.state == State.RECORDING:
+                self._status_label.set_text("Recording")
         if self._spinner.get_spinning():
             self._spinner.set_spinning(False)
             self._spinner.set_visible(False)
@@ -271,7 +298,10 @@ class OverlayWindow:
         self._stop_text_pulse()
 
         if new == State.RECORDING:
-            self._status_label.set_text("Recording")
+            self._status_label.set_text("Listening\u2026")
+            self._ws_ready = False
+            self._speech_active = False
+            self._had_first_text = False
             self._timer_seconds = 0
             self._timer_label.set_text("00:00")
             self._timer_label.set_visible(True)
@@ -312,7 +342,11 @@ class OverlayWindow:
 
         elif new == State.CANCELLED:
             self._stop_timer()
-            self._window.close()
+            # Defer window.close() — calling it synchronously from within
+            # machine.transition() nests window destruction inside the
+            # callback chain, which can prevent self.quit() from taking
+            # effect (the main loop never sees the quit flag).
+            GLib.idle_add(self._window.close)
 
         elif new == State.ERROR:
             self._status_label.set_text("Error")
@@ -377,11 +411,17 @@ class OverlayWindow:
         self._dot.remove_css_class("dim")
 
     def _tick_pulse(self) -> bool:
-        self._pulse_dim = not self._pulse_dim
-        if self._pulse_dim:
-            self._dot.add_css_class("dim")
-        else:
+        if self._speech_active:
+            # During active speech, keep dot bright
             self._dot.remove_css_class("dim")
+            self._pulse_dim = False
+        else:
+            # Between speech / waiting — gentle pulse
+            self._pulse_dim = not self._pulse_dim
+            if self._pulse_dim:
+                self._dot.add_css_class("dim")
+            else:
+                self._dot.remove_css_class("dim")
         return True
 
     # ── Text pulse (processing indicator) ──

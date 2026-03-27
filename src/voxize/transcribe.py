@@ -40,6 +40,8 @@ class RealtimeTranscription:
         self._session_dir = session_dir
         self._on_delta: Callable[[str], None] | None = None
         self._on_error: Callable[[str], None] | None = None
+        self._on_ready: Callable[[], None] | None = None
+        self._on_speech: Callable[[bool], None] | None = None
 
         self._loop: asyncio.AbstractEventLoop | None = None
         self._thread: threading.Thread | None = None
@@ -61,10 +63,21 @@ class RealtimeTranscription:
         *,
         on_delta: Callable[[str], None],
         on_error: Callable[[str], None] | None = None,
+        on_ready: Callable[[], None] | None = None,
+        on_speech: Callable[[bool], None] | None = None,
     ) -> None:
-        """Start background thread, connect WebSocket, begin receiving events."""
+        """Start background thread, connect WebSocket, begin receiving events.
+
+        Callbacks (all called on GTK thread via GLib.idle_add):
+            on_delta(text)   — transcription text arrived
+            on_error(msg)    — fatal API/connection error
+            on_ready()       — session configured, accepting audio
+            on_speech(active) — VAD speech_started (True) / speech_stopped (False)
+        """
         self._on_delta = on_delta
         self._on_error = on_error
+        self._on_ready = on_ready
+        self._on_speech = on_speech
         self._running = True
         self._cancelled = False
         self._draining = False
@@ -387,6 +400,23 @@ class RealtimeTranscription:
                 elif etype == "conversation.item.input_audio_transcription.completed":
                     item_id = event.get("item_id", "")
                     logger.debug("_recv: type=%s item_id=%s", etype, item_id)
+
+                elif etype == "input_audio_buffer.speech_started":
+                    logger.debug("_recv: type=%s audio_start_ms=%s",
+                                 etype, event.get("audio_start_ms"))
+                    if self._on_speech and not self._draining:
+                        GLib.idle_add(self._on_speech, True)
+
+                elif etype == "input_audio_buffer.speech_stopped":
+                    logger.debug("_recv: type=%s audio_end_ms=%s",
+                                 etype, event.get("audio_end_ms"))
+                    if self._on_speech and not self._draining:
+                        GLib.idle_add(self._on_speech, False)
+
+                elif etype == "transcription_session.updated":
+                    logger.debug("_recv: type=%s", etype)
+                    if self._on_ready and not self._draining:
+                        GLib.idle_add(self._on_ready)
 
                 elif etype == "error":
                     error = event.get("error", {})

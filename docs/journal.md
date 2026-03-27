@@ -283,3 +283,61 @@ The full history of pacing experiments and root cause analysis is documented in 
 
 #### Deferred
 - **Audio level meter** — A `Gtk.LevelBar` showing real-time microphone input level (RMS dB computed in the audio callback). Would give the user direct "am I being heard?" feedback and catch "too quiet" issues.
+
+---
+
+### 2026-03-27 — Session 6: Live Testing + Visual Polish
+
+**Phase**: 4 — Polish
+**Status**: in progress
+
+**Semantic VAD live testing** — Five targeted recording sessions confirmed `semantic_vad` with `eagerness: "low"` is reliable for daily use. The critical failure mode from `server_vad` (burst-induced VAD corruption) is eliminated.
+
+| # | Test | Duration | Burst | VAD Segments | Realtime vs Batch |
+|---|------|----------|-------|--------------|-------------------|
+| 1 | Immediate speech | 10.1s | 33 chunks (1.3s) | 2 (at 0ms, 7180ms) | 91% |
+| 2 | Delayed speech (~3s) | 11.0s | 13 chunks (0.5s) | 1 (at 3340ms) | 100% |
+| 3 | Short recording (~4s) | 4.5s | 23 chunks (0.9s) | 1 (at 204ms) | 80%† |
+| 4 | Long monologue (~31s) | 31.3s | 25 chunks (1.0s) | 1 (28.3s continuous) | 94% |
+| 5 | Multiple turns with pauses | 36.8s | 20 chunks (0.8s) | 7 segments | 80%† |
+
+†80% scores are inflated by word-level comparison imprecision (e.g., "3 to 5" vs "three to five").
+
+Key findings:
+- **Burst region is no longer a problem** — VAD detected speech starting at 0ms, 204ms, 332ms, 780ms (all within or immediately after the burst). This was the critical failure mode with `server_vad` where speech in the burst region was missed or truncated the entire session.
+- **All audio delivered** in every session (`chunks_sent ≈ audio_chunks`).
+- **Multi-turn detection works** — session 5 correctly identified 7 speech segments with clean boundaries. `eagerness: "low"` waits for the user to finish speaking before chunking.
+- **Long dictation handled correctly** — session 4 kept a 28s monologue as one continuous segment.
+- **Minor streaming transcription gaps** — session 5 dropped "I'm supposed to have multiple turns" (batch had it, realtime didn't). The VAD segment timing covered the right range, so this is a streaming transcription quality issue, not VAD. Session 4 dropped "The" at the very start of "The quick brown fox." These are inherent limitations of streaming ASR vs batch.
+
+**Visual polish — status label and dot behavior (`ui.py`, `transcribe.py`, `app.py`)** — Surfaced internal state in the UI without adding new widgets:
+
+- **Status label progression during RECORDING**: "Listening…" (WS connecting / waiting for speech) → "Recording" (first transcription text arrives). Previously the label said "Recording" immediately even while the WS was still connecting and no speech had been detected.
+- **Dot pulse tied to VAD speech events**: during active speech (`speech_started`), the dot stays bright. Between speech turns (`speech_stopped`), the dot dims and resumes gentle pulsing. Previously the dot pulsed on a blind 600ms timer regardless of speech activity.
+- **New callbacks in `RealtimeTranscription`**: `on_ready` (fires on `transcription_session.updated`) and `on_speech(active: bool)` (fires on `speech_started`/`speech_stopped`). These are dispatched to the GTK thread via `GLib.idle_add`, same pattern as `on_delta`.
+
+Confirmed working with live testing. The semantic VAD behavior is notably good — pausing mid-sentence keeps the segment open (the model understands the speaker hasn't finished), while pausing after a complete sentence triggers a quick commit. This is the core advantage of `semantic_vad` over `server_vad` for dictation.
+
+**Phase 4 status: complete.** All deliverables from the design doc §7 Phase 4 are implemented and tested:
+- Session rotation at termination ✓
+- Signal handlers (SIGTERM/SIGINT → finalize WAV) ✓
+- Error handling for all failure modes ✓
+- Auto-close timeout ✓
+- Edge cases (short/long/empty/rapid invocation) ✓
+- Visual polish (status feedback, dot-to-speech binding) ✓
+- Semantic VAD confirmed reliable across 5 targeted test scenarios ✓
+
+**Bug fix: Cancel hangs the process (`app.py`)** — Pressing Cancel during RECORDING caused the process to hang indefinitely after the window closed. Root cause: `_teardown_async()` deferred `audio.stop()` to a daemon thread, then `self.quit()` caused `app.run()` to return. During Python interpreter shutdown, `sounddevice`'s `atexit` handler calls `Pa_Terminate()`, which blocks waiting for the still-active PortAudio stream to close. But the daemon thread that was supposed to close it gets killed by Python's daemon thread cleanup first → deadlock.
+
+Fix: stop audio synchronously on the GTK thread in the CANCELLED state handler before deferring to `_teardown_async()`. `audio.stop()` is fast (~1ms: `stream.stop()` + `stream.close()` + WAV finalize). Only the slow part (`transcription.cancel()` with its 15s join timeout) goes to the daemon thread. The Stop path was unaffected because `_stop_providers` completes `audio.stop()` in a background thread that finishes before the window closes.
+
+Also fixed: `window.close()` in the CANCELLED UI handler is now deferred via `GLib.idle_add` to avoid nesting window destruction inside the `machine.transition()` callback chain.
+
+The tool is ready for daily use. Remaining deferred items that could improve the experience:
+- **Transcription prompt hints** for technical vocabulary (existed in VoxInput via WHISPER.txt)
+- **Audio level meter** — `Gtk.LevelBar` for "am I being heard?" feedback
+- **Fade gradient `lookup_color("vox_bg")` silently fails** — cosmetic, falls back to hardcoded rgba(30,30,30,0.85)
+
+#### Next
+- Begin daily use. If issues surface, the debugging guide and analysis script are ready.
+- Transcription prompt hints are the highest-value deferred item — would improve accuracy for technical vocabulary.

@@ -148,6 +148,8 @@ class VoxizeApp(Gtk.Application):
         self._transcription.start(
             on_delta=self._ui.append_text,
             on_error=self._on_ws_error,
+            on_ready=self._ui.on_ws_ready,
+            on_speech=self._ui.on_speech,
         )
 
         # Start audio capture — transition to RECORDING immediately (fast startup).
@@ -249,7 +251,20 @@ class VoxizeApp(Gtk.Application):
             if self._cleanup:
                 self._cleanup.cancel()
                 self._cleanup = None
-            # Move blocking teardown to background thread, close window when done
+            # Stop audio synchronously — it's fast (stream.stop + close + WAV
+            # finalize) and MUST complete before Python shutdown, otherwise
+            # sounddevice's atexit Pa_Terminate() blocks on the still-active
+            # PortAudio stream while the daemon thread that was supposed to
+            # close it has been killed.
+            audio = self._audio
+            self._audio = None
+            if audio:
+                try:
+                    audio.stop()
+                except Exception:
+                    logger.exception("Cancel: failed to stop audio")
+            # Defer only the slow parts (transcription cancel with 15s join,
+            # lock release) to a background thread.
             self._teardown_async()
 
         elif new == State.ERROR:
