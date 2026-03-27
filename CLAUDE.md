@@ -2,6 +2,14 @@
 
 Voice-to-text overlay for Linux/Wayland/GNOME. Python + GTK4, single-process-per-invocation.
 
+## Claude Code plugins
+
+This project expects the [superpowers](https://github.com/obra/superpowers) plugin, primarily used for code reviewing:
+
+```
+/plugin install superpowers@superpowers-marketplace
+```
+
 ## Quick reference
 
 ```sh
