@@ -91,3 +91,20 @@ headerbar button {
     border-radius: 6px;
     padding: 0.3em 1em;
 }
+
+/* Error bar — bottom panel, non-destructive */
+.error-bar {
+    padding: 0.5em 0.75em;
+    border-top: 1px solid color-mix(in srgb, var(--vox-red) 30%, transparent);
+    background-color: color-mix(in srgb, var(--vox-red) 10%, transparent);
+}
+
+.error-bar .error-icon {
+    color: var(--vox-red);
+    margin-right: 0.5em;
+}
+
+.error-bar .error-message {
+    color: var(--vox-fg-dim);
+    font-size: 0.85em;
+}

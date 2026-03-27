@@ -1,4 +1,4 @@
-"""Startup dependency checks."""
+"""Startup dependency checks and API key retrieval."""
 
 import shutil
 import subprocess
@@ -47,6 +47,25 @@ def check_all() -> list[str]:
                 errors.append(f"Failed to run secret-tool for {label}: {e}")
 
     return errors
+
+
+def get_api_key(service: str) -> str:
+    """Retrieve an API key from GNOME Keyring via secret-tool.
+
+    Raises RuntimeError if the key is not found.
+    """
+    result = subprocess.run(
+        ["secret-tool", "lookup", "service", service, "key", "api"],
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    key = result.stdout.strip()
+    if not key:
+        raise RuntimeError(
+            f"API key for '{service}' not found in keyring"
+        )
+    return key
 
 
 def exit_on_failure() -> None:

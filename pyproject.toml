@@ -5,6 +5,8 @@ description = "Voice-to-text tool for Linux (Wayland/GNOME)"
 requires-python = ">=3.11"
 dependencies = [
     "PyGObject>=3.46",
+    "sounddevice>=0.4",
+    "websockets>=13.0",
 ]
 
 [build-system]

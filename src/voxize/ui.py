@@ -101,7 +101,8 @@ class OverlayWindow:
         self._spinner.set_halign(Gtk.Align.CENTER)
         self._spinner.set_margin_top(12)
         self._spinner.set_margin_bottom(12)
-        self._spinner.set_visible(False)
+        self._spinner.set_visible(True)
+        self._spinner.set_spinning(True)
         main.append(self._spinner)
 
         # Text area with fade overlay
@@ -146,6 +147,27 @@ class OverlayWindow:
         self._overlay.set_visible(False)  # hidden until text arrives
         main.append(overlay)
 
+        # Error bar — shown at bottom when a non-fatal error occurs
+        error_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        error_box.add_css_class("error-bar")
+
+        error_icon = Gtk.Label(label="\u26a0")  # ⚠
+        error_icon.add_css_class("error-icon")
+        error_box.append(error_icon)
+
+        self._error_label = Gtk.Label()
+        self._error_label.add_css_class("error-message")
+        self._error_label.set_wrap(True)
+        self._error_label.set_hexpand(True)
+        self._error_label.set_xalign(0)
+        error_box.append(self._error_label)
+
+        self._error_bar = error_box
+        self._error_bar.set_visible(False)
+        main.append(error_box)
+
+        self._degraded = False
+
     def setup_max_height(self) -> None:
         """Set max text area height based on screen geometry (1/4 screen)."""
         display = Gdk.Display.get_default()
@@ -180,6 +202,24 @@ class OverlayWindow:
 
     def clear_text(self) -> None:
         self._text_view.get_buffer().set_text("")
+
+    def show_error_banner(self, message: str) -> None:
+        """Show error banner at the bottom without clearing transcript.
+
+        Stops the recording timer and pulse. Changes the action button to
+        Close so the user can end the session. Audio capture continues in
+        the background — the WAV file is the safety net.
+        """
+        self._error_label.set_text(message)
+        self._error_bar.set_visible(True)
+        self._stop_pulse()
+        self._stop_timer()
+        self._degraded = True
+        self._cancel_btn.set_visible(False)
+        self._action_btn.set_label("Close")
+        self._action_btn.add_css_class("flat")
+        self._action_btn.set_visible(True)
+        self._window.set_default_widget(self._action_btn)
 
     def _scroll_to_end(self) -> bool:
         self._scroll_pending = False
@@ -252,8 +292,7 @@ class OverlayWindow:
             self._action_btn.add_css_class("flat")
             self._action_btn.set_visible(True)
             self._window.set_default_widget(self._action_btn)
-            self.clear_text()
-            self.append_text(machine.error_message)
+            self.show_error_banner(machine.error_message)
 
     def _on_active_changed(self, window, _pspec) -> None:
         if window.is_active():
@@ -270,7 +309,10 @@ class OverlayWindow:
     def _on_action(self, _btn: Gtk.Button) -> None:
         s = self._machine.state
         if s == State.RECORDING:
-            self._machine.transition(State.CLEANING)
+            if self._degraded:
+                self._machine.transition(State.CANCELLED)
+            else:
+                self._machine.transition(State.CLEANING)
         elif s in (State.READY, State.ERROR):
             self._window.close()
 
