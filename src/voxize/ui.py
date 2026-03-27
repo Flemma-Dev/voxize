@@ -349,6 +349,7 @@ class OverlayWindow:
             self.clear_text()
 
         elif new == State.CLEANING:
+            self._context_label.set_visible(False)
             self._status_label.set_text("Finishing\u2026")
             self._timer_label.set_visible(False)
             self._stop_timer()
