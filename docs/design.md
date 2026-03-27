@@ -6,7 +6,7 @@ Voxize is a voice-to-text tool for Linux (Wayland/GNOME). It is invoked via a gl
 
 ### Relationship to VoxInput
 
-Voxize is a spiritual successor to the author's [personal setup](https://github.com/StanAngeloff/nix-meridian/tree/trunk/home/apps/voxinput) built on top of [VoxInput](https://github.com/richiejp/VoxInput) by [@richiejp](https://github.com/richiejp). The author's setup used a **fork of [VoxInput v0.6.2](https://github.com/StanAngeloff/nix-meridian/blob/trunk/home/apps/voxinput/package.nix)** with [custom patches](https://github.com/StanAngeloff/nix-meridian/tree/trunk/home/apps/voxinput/patches) ([wl-copy for Wayland clipboard](https://github.com/StanAngeloff/nix-meridian/blob/trunk/home/apps/voxinput/patches/0002-feat-replace-dotool-with-wl-copy.patch) instead of dotool, [prompt injection via env var](https://github.com/StanAngeloff/nix-meridian/blob/trunk/home/apps/voxinput/patches/0001-feat-add-support-for-injecting-a-prompt-via-env-vari.patch)) plus a custom [`record.sh` Bash wrapper](https://github.com/StanAngeloff/nix-meridian/blob/trunk/home/apps/voxinput/record/record.sh) that added Haiku cleanup, prompt injection protection, and per-directory Whisper prompt context. The wrapper and patches were not part of upstream VoxInput.
+Voxize is a spiritual successor to the author's [personal setup](https://github.com/StanAngeloff/nix-meridian/tree/trunk%40%7B2026-03-26%7D/home/apps/voxinput) built on top of [VoxInput](https://github.com/richiejp/VoxInput) by [@richiejp](https://github.com/richiejp). The author's setup used a **fork of [VoxInput v0.6.2](https://github.com/StanAngeloff/nix-meridian/blob/trunk%40%7B2026-03-26%7D/home/apps/voxinput/package.nix)** with [custom patches](https://github.com/StanAngeloff/nix-meridian/tree/trunk%40%7B2026-03-26%7D/home/apps/voxinput/patches) ([wl-copy for Wayland clipboard](https://github.com/StanAngeloff/nix-meridian/blob/trunk%40%7B2026-03-26%7D/home/apps/voxinput/patches/0002-feat-replace-dotool-with-wl-copy.patch) instead of dotool, [prompt injection via env var](https://github.com/StanAngeloff/nix-meridian/blob/trunk%40%7B2026-03-26%7D/home/apps/voxinput/patches/0001-feat-add-support-for-injecting-a-prompt-via-env-vari.patch)) plus a custom [`record.sh` Bash wrapper](https://github.com/StanAngeloff/nix-meridian/blob/trunk%40%7B2026-03-26%7D/home/apps/voxinput/record/record.sh) that added Haiku cleanup, prompt injection protection, and per-directory Whisper prompt context. The wrapper and patches were not part of upstream VoxInput.
 
 **Important:** Upstream VoxInput has advanced significantly since v0.6.x. As of v1.1.0, it includes real-time transcription via the OpenAI Realtime API, an interactive TUI, IPC socket architecture, Assistant mode with desktop control, and acoustic echo cancellation. The comparison below is **not** a criticism of VoxInput — it is a comparison against the specific v0.6.x-based fork and wrapper that the author used, to explain the motivation for building Voxize as a separate tool.
 
@@ -22,7 +22,7 @@ Voxize is not a replacement for VoxInput in general — it is a purpose-built to
 
 ### How the author's v0.6.x setup compared to what Voxize aims to deliver
 
-| Concern | Author's [VoxInput v0.6.2 fork](https://github.com/StanAngeloff/nix-meridian/blob/trunk/home/apps/voxinput/package.nix) + [`record.sh`](https://github.com/StanAngeloff/nix-meridian/blob/trunk/home/apps/voxinput/record/record.sh) | Voxize |
+| Concern | Author's [VoxInput v0.6.2 fork](https://github.com/StanAngeloff/nix-meridian/blob/trunk%40%7B2026-03-26%7D/home/apps/voxinput/package.nix) + [`record.sh`](https://github.com/StanAngeloff/nix-meridian/blob/trunk%40%7B2026-03-26%7D/home/apps/voxinput/record/record.sh) | Voxize |
 |---|---|---|
 | Transcription | Batch (record → upload WAV → wait) | Real-time streaming via WebSocket |
 | UI | `notify-send` + Zenity dialog | Translucent GTK4 overlay window |
@@ -81,7 +81,7 @@ This section records choices made during the design phase so future sessions don
 
 ### Auto-paste
 
-**Explicitly rejected.** The author's v0.6.x setup auto-pasted into the focused window using dotool/wl-paste with [per-application logic](https://github.com/StanAngeloff/nix-meridian/blob/trunk/home/apps/voxinput/record/record.sh) (Ghostty, tmux, Neovim, etc.). This was fragile — the user had to keep the target app focused during the entire transcription+cleanup pipeline. Voxize copies to clipboard only. The user pastes when ready, into whatever app they choose.
+**Explicitly rejected.** The author's v0.6.x setup auto-pasted into the focused window using dotool/wl-paste with [per-application logic](https://github.com/StanAngeloff/nix-meridian/blob/trunk%40%7B2026-03-26%7D/home/apps/voxinput/record/record.sh) (Ghostty, tmux, Neovim, etc.). This was fragile — the user had to keep the target app focused during the entire transcription+cleanup pipeline. Voxize copies to clipboard only. The user pastes when ready, into whatever app they choose.
 
 ## 3. Requirements
 
@@ -438,7 +438,7 @@ The WebSocket library is **websockets** (asyncio-native).
 - Model: `claude-haiku-4-5-20251001`
 - Use `async_client.messages.stream()` for real-time output in the overlay
 
-System prompt carries forward the proven approach from the author's [`record.sh`](https://github.com/StanAngeloff/nix-meridian/blob/trunk/home/apps/voxinput/record/record.sh):
+System prompt carries forward the proven approach from the author's [`record.sh`](https://github.com/StanAngeloff/nix-meridian/blob/trunk%40%7B2026-03-26%7D/home/apps/voxinput/record/record.sh):
 - Nonce-wrapped input to prevent prompt injection
 - Fix spelling, punctuation, grammar
 - Remove filler words (um, uh, like, you know)
