@@ -84,6 +84,7 @@ class Cleanup:
         self._prompt = prompt
         self._thread: threading.Thread | None = None
         self._cancelled = False
+        self._usage: dict[str, int] | None = None
 
     def start(
         self,
@@ -109,6 +110,11 @@ class Cleanup:
             name="voxize-cleanup",
         )
         self._thread.start()
+
+    @property
+    def usage(self) -> dict[str, int] | None:
+        """Return cleanup usage (input/output tokens), or None if unavailable."""
+        return self._usage
 
     def cancel(self) -> None:
         """Cancel cleanup. The thread will exit on the next chunk."""
@@ -146,6 +152,7 @@ class Cleanup:
                     {"role": "user", "content": user_message},
                 ],
                 stream=True,
+                stream_options={"include_usage": True},
             )
 
             first_delta = True
@@ -154,6 +161,11 @@ class Cleanup:
                     logger.debug("_run: cancelled during streaming")
                     stream.close()
                     return
+                if chunk.usage:
+                    self._usage = {
+                        "input_tokens": chunk.usage.prompt_tokens,
+                        "output_tokens": chunk.usage.completion_tokens,
+                    }
                 choice = chunk.choices[0] if chunk.choices else None
                 if choice and choice.delta and choice.delta.content:
                     text = choice.delta.content

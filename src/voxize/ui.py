@@ -215,6 +215,22 @@ class OverlayWindow:
         )
         self._context_label.set_visible(True)
 
+    def show_session_costs(self, transcription_cost: float | None, cleanup_cost: float | None) -> None:
+        """Show session costs in the context bar (plain text)."""
+        if self._destroyed:
+            return
+        t_str = f"${transcription_cost:.4f}" if transcription_cost is not None else "\u2014"
+        c_str = f"${cleanup_cost:.4f}" if cleanup_cost is not None else "\u2014"
+        if transcription_cost is not None or cleanup_cost is not None:
+            total = (transcription_cost or 0) + (cleanup_cost or 0)
+            total_str = f"${total:.4f}"
+        else:
+            total_str = "\u2014"
+        self._context_label.set_text(
+            f"Total {total_str} \u2022 Transcription {t_str} \u00b7 Cleanup {c_str}"
+        )
+        self._context_label.set_visible(True)
+
     # ── Text operations ──
 
     def on_ws_ready(self) -> None:

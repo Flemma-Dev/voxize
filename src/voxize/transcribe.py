@@ -62,6 +62,10 @@ class RealtimeTranscription:
         self._cancelled = False
         self._draining = False
 
+        # Accumulated usage from completed transcription events
+        self._usage_input_tokens = 0
+        self._usage_output_tokens = 0
+
     # ── Public interface ──
 
     def start(
@@ -138,6 +142,16 @@ class RealtimeTranscription:
         self._signal_done()
         self._join()
         return self._transcript
+
+    @property
+    def usage(self) -> dict[str, int] | None:
+        """Return accumulated transcription usage, or None if no data."""
+        if self._usage_input_tokens == 0 and self._usage_output_tokens == 0:
+            return None
+        return {
+            "input_tokens": self._usage_input_tokens,
+            "output_tokens": self._usage_output_tokens,
+        }
 
     # ── Thread management ──
 
@@ -406,6 +420,10 @@ class RealtimeTranscription:
 
                 elif etype == "conversation.item.input_audio_transcription.completed":
                     item_id = event.get("item_id", "")
+                    usage = event.get("usage")
+                    if usage:
+                        self._usage_input_tokens += usage.get("input_tokens", 0)
+                        self._usage_output_tokens += usage.get("output_tokens", 0)
                     logger.debug("_recv: type=%s item_id=%s", etype, item_id)
 
                 elif etype == "input_audio_buffer.speech_started":

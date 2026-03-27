@@ -383,3 +383,23 @@ Root cause: `_on_state_change()` calls `_stop_text_pulse()` unconditionally at t
 Fix (two changes):
 1. **Start pulse in CLEANING branch** — added `self._start_text_pulse()` in the CLEANING case of `_on_state_change`, so the pulse begins immediately on state transition.
 2. **Make `_start_text_pulse()` idempotent** — added `self._stop_text_pulse()` at the top of `_start_text_pulse()`. Without this, the second call from `show_transcript_for_cleanup()` would overwrite `_text_pulse_source` without removing the old GLib timeout, leaking the timer. Now the second call safely replaces the first.
+
+---
+
+### 2026-03-27 — Session 8: Feature — show session costs on READY
+
+**Feature: session cost display in the context bar.**
+
+After cleanup completes and the session reaches READY, the `_context_label` (previously used for WHISPER.txt context, hidden during CLEANING) is repurposed to show API costs:
+
+```
+Total $0.0016 • Transcription $0.0012 · Cleanup $0.0004
+```
+
+**Cost data sources:**
+
+- **Transcription (`transcribe.py`)** — The OpenAI Realtime API returns token usage in each `conversation.item.input_audio_transcription.completed` event with `input_tokens` (broken down into `text_tokens` + `audio_tokens`) and `output_tokens`. These are accumulated across all completed items in a session. Priced at gpt-4o-transcribe rates: $2.50/MTok input, $10.00/MTok output.
+
+- **Cleanup (`cleanup.py`)** — The OpenAI Chat Completions API returns usage in the final streamed chunk when `stream_options={"include_usage": True}` is set. Reports `prompt_tokens` and `completion_tokens`. Priced at gpt-5.4-mini rates: $0.75/MTok input, $4.50/MTok output.
+
+**Wiring:** `app.py` stores usage dicts from both providers (`_transcription_usage` passed through `_start_cleanup`, `_cleanup_usage` captured in `_on_cleanup_done` before nulling the provider). `_show_session_costs()` computes dollar amounts and calls `ui.show_session_costs()`. If a cost is unavailable (API didn't return usage), that component shows `—` and is omitted from the total. In mock mode, no costs are shown (no real API calls).

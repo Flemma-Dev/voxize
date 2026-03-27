@@ -50,6 +50,10 @@ class VoxizeApp(Gtk.Application):
         # Mock transcription (only in mock mode)
         self._mock_transcription: MockTranscription | None = None
 
+        # Session cost tracking
+        self._transcription_usage: dict[str, int] | None = None
+        self._cleanup_usage: dict[str, int] | None = None
+
         # Auto-close timer
         self._autoclose_source: int | None = None
 
@@ -252,6 +256,8 @@ class VoxizeApp(Gtk.Application):
             )
 
         if new == State.RECORDING:
+            self._transcription_usage = None
+            self._cleanup_usage = None
             if _MOCK:
                 self._mock_transcription = MockTranscription()
                 self._mock_transcription.start(on_delta=self._ui.append_text)
@@ -354,6 +360,8 @@ class VoxizeApp(Gtk.Application):
         except Exception:
             logger.exception("Failed to release lock")
 
+        transcription_usage = transcription.usage if transcription else None
+
         # Save raw transcript and copy to clipboard (safety net)
         if transcript and session_dir:
             try:
@@ -364,10 +372,11 @@ class VoxizeApp(Gtk.Application):
             clipboard.copy(transcript)
 
         # Post back to GTK thread to start cleanup streaming
-        GLib.idle_add(self._start_cleanup, transcript)
+        GLib.idle_add(self._start_cleanup, transcript, transcription_usage)
 
-    def _start_cleanup(self, transcript: str) -> bool:
+    def _start_cleanup(self, transcript: str, transcription_usage=None) -> bool:
         """GTK thread: start cleanup provider (or handle empty transcript)."""
+        self._transcription_usage = transcription_usage
         logger.debug("_start_cleanup: transcript_len=%d empty=%s",
                       len(transcript), not transcript.strip())
         # Guard against stale callback (e.g., user cancelled during drain)
@@ -380,6 +389,7 @@ class VoxizeApp(Gtk.Application):
             self._ui.append_text("No speech detected.")
             if self._machine:
                 self._machine.transition(State.READY)
+            self._show_session_costs()
             return False
 
         # Show the final transcript and arm the cleanup swap — the user sees
@@ -463,6 +473,7 @@ class VoxizeApp(Gtk.Application):
     def _on_cleanup_done(self, cleaned: str) -> None:
         from voxize import clipboard
 
+        self._cleanup_usage = self._cleanup.usage if self._cleanup else None
         self._cleanup = None
         if self._machine and self._machine.state == State.CLEANING:
             # Save cleaned text and copy to clipboard (overwrites raw transcript)
@@ -474,12 +485,40 @@ class VoxizeApp(Gtk.Application):
             if cleaned:
                 clipboard.copy(cleaned)
             self._machine.transition(State.READY)
+            self._show_session_costs()
 
     def _on_cleanup_error(self, message: str) -> None:
         """Cleanup failed — non-fatal. Raw transcript is already in clipboard."""
         if self._machine and self._machine.state == State.CLEANING:
             self._cleanup = None
             self._machine.transition(State.ERROR, error=message)
+
+    # ── Session costs ──
+
+    # Pricing per million tokens
+    _TRANSCRIBE_INPUT_PRICE = 2.50   # gpt-4o-transcribe
+    _TRANSCRIBE_OUTPUT_PRICE = 10.00
+    _CLEANUP_INPUT_PRICE = 0.75      # gpt-5.4-mini
+    _CLEANUP_OUTPUT_PRICE = 4.50
+
+    def _show_session_costs(self) -> None:
+        """Compute dollar costs from provider usage and display in UI."""
+        t_cost = None
+        if self._transcription_usage:
+            inp = self._transcription_usage["input_tokens"]
+            out = self._transcription_usage["output_tokens"]
+            t_cost = (inp * self._TRANSCRIBE_INPUT_PRICE
+                      + out * self._TRANSCRIBE_OUTPUT_PRICE) / 1_000_000
+
+        c_cost = None
+        if self._cleanup_usage:
+            inp = self._cleanup_usage["input_tokens"]
+            out = self._cleanup_usage["output_tokens"]
+            c_cost = (inp * self._CLEANUP_INPUT_PRICE
+                      + out * self._CLEANUP_OUTPUT_PRICE) / 1_000_000
+
+        if t_cost is not None or c_cost is not None:
+            self._ui.show_session_costs(t_cost, c_cost)
 
     # ── Window events ──
 
