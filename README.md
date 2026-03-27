@@ -2,7 +2,10 @@
 
 Voice-to-text overlay for Linux/Wayland/GNOME.
 
-> **Actively Evolving.** Voxize is under active development. Pin a commit if you need a stable target. See the [implementation journal](docs/journal.md) for progress and design decisions.
+> [!IMPORTANT]
+> **Actively Evolving.**
+>
+> Voxize is under active development. Pin a commit if you need a stable target. See the [implementation journal](docs/journal.md) for progress and design decisions.
 
 - **Global hotkey opens a translucent overlay** that floats above your workspace. Start speaking immediately.
 - **Real-time streaming transcription** via the OpenAI Realtime API (`gpt-4o-transcribe`). Text appears as you talk.
@@ -33,14 +36,14 @@ Cleaned text with session cost breakdown.
 
 ## Requirements
 
-| Requirement | Notes |
-|---|---|
-| NixOS (tested on 25.11) | NixOS-first — `flake.nix` + `shell.nix` handle all system deps |
-| GNOME / Wayland | Mutter compositor; D-Bus used for focused-window detection |
-| Python >= 3.11 | Managed by `uv` |
-| OpenAI API key | Stored in GNOME Keyring via `secret-tool` |
-| `wl-clipboard` | `wl-copy` for clipboard output |
-| PortAudio | Audio capture backend |
+| Requirement                                                                          | Notes                                                                                                                                       |
+| ------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| NixOS (tested on 25.11)                                                              | NixOS-first — `flake.nix` + `shell.nix` handle all system deps                                                                              |
+| GNOME / Wayland                                                                      | Mutter compositor; D-Bus used for focused-window detection                                                                                  |
+| Python >= 3.11                                                                       | Managed by `uv`                                                                                                                             |
+| OpenAI API key                                                                       | Stored in GNOME Keyring via `secret-tool`                                                                                                   |
+| `wl-clipboard`                                                                       | `wl-copy` for clipboard output                                                                                                              |
+| PortAudio                                                                            | Audio capture backend                                                                                                                       |
 | [Window Calls](https://extensions.gnome.org/extension/4724/window-calls/) (optional) | GNOME Shell extension for focused-window detection. Required for WHISPER.txt prompt hints; without it, prompt detection is skipped silently |
 
 ## Installation
