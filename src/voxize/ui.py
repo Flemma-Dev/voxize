@@ -355,6 +355,7 @@ class OverlayWindow:
             self._cancel_btn.set_visible(True)
             self._action_btn.set_visible(False)
             self._window.set_default_widget(None)
+            self._start_text_pulse()
             # Keep spinner visible — deltas continue streaming during drain
             # and append_text will dismiss the spinner on the first arrival.
             # If no deltas arrive, show_transcript_for_cleanup handles it.
@@ -458,6 +459,7 @@ class OverlayWindow:
     # ── Text pulse (processing indicator) ──
 
     def _start_text_pulse(self) -> None:
+        self._stop_text_pulse()  # idempotent — safe to call when no pulse is running
         self._text_pulse_dim = True
         self._text_view.add_css_class("processing")  # start dim immediately
         self._text_pulse_source = GLib.timeout_add(1200, self._tick_text_pulse)

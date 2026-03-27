@@ -371,3 +371,15 @@ Implementation decisions:
 #### Next
 - Begin daily use with prompt hints active. Monitor debug.log for detection accuracy.
 - Audio level meter remains the highest-value deferred item.
+
+---
+
+### 2026-03-27 — Session 7: Bug fix — text pulse missing during CLEANING drain
+
+**Bug fix: text pulse not starting until drain completes (`ui.py`)** — The text view should start pulsating (`.processing` CSS class toggling opacity) immediately when entering CLEANING state ("Finishing…"), but it sat static during the entire drain period (~5-15s). The pulse only began when `show_transcript_for_cleanup()` called `_start_text_pulse()` after the background thread finished draining audio and transcription.
+
+Root cause: `_on_state_change()` calls `_stop_text_pulse()` unconditionally at the top for every state transition (line 329). The CLEANING branch never restarted it. The pulse only began much later when `show_transcript_for_cleanup()` ran after the drain.
+
+Fix (two changes):
+1. **Start pulse in CLEANING branch** — added `self._start_text_pulse()` in the CLEANING case of `_on_state_change`, so the pulse begins immediately on state transition.
+2. **Make `_start_text_pulse()` idempotent** — added `self._stop_text_pulse()` at the top of `_start_text_pulse()`. Without this, the second call from `show_transcript_for_cleanup()` would overwrite `_text_pulse_source` without removing the old GLib timeout, leaking the timer. Now the second call safely replaces the first.
