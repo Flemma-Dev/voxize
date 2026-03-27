@@ -18,11 +18,10 @@ Voice-to-text overlay for Linux/Wayland/GNOME.
 
 _TBD_
 
-<!-- TODO: capture screenshots -->
+<img alt="Recording state" src="assets/screenshot_2026-03-27_23-24-20.png" width="420" height="130">
+
+<!-- TODO: capture screenshots @ 100% display scale, no blurring -->
 <!--
-
-<img alt="Recording state" src="docs/screenshots/recording.png" width="420">
-
 Live transcription streaming in as the user speaks.
 
 <img alt="Cleaning state" src="docs/screenshots/cleaning.png" width="420">
