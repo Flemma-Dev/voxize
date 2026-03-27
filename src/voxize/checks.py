@@ -28,7 +28,7 @@ def check_all() -> list[str]:
 
     # API keys via secret-tool
     if shutil.which("secret-tool"):
-        for service, label in [("openai", "OpenAI"), ("anthropic", "Anthropic")]:
+        for service, label in [("openai", "OpenAI")]:
             try:
                 result = subprocess.run(
                     ["secret-tool", "lookup", "service", service, "key", "api"],

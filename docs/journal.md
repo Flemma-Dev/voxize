@@ -142,3 +142,88 @@ Architecture decisions:
 - Live test with real microphone and speech (full GTK app)
 - Verify WAV file is saved correctly after a recording session
 - Verify mic lock prevents concurrent recording across instances
+
+---
+
+### 2026-03-27 — Session 4: Phase 3 — Text Cleanup + Clipboard
+
+**Phase**: 3 — Text Cleanup + Clipboard
+**Status**: in progress
+
+> [!IMPORTANT]
+> **Major design deviation — GPT-5.4 Mini replaces Claude Haiku for text cleanup.** The design doc specified Claude Haiku (`claude-haiku-4-5-20251001`) via the Anthropic Python SDK. We pivoted to **GPT-5.4 Mini** via the OpenAI Python SDK. Rationale:
+> - OpenAI is already a project dependency — the Realtime Transcription API uses their WebSocket endpoint. Adding Anthropic would introduce a second vendor SDK for no benefit.
+> - GPT-5.4 Mini is cheaper: $0.75/MTok input, $4.50/MTok output vs Haiku's $1/$5.
+> - Both models are comparably capable for this cleanup task (spelling, punctuation, filler removal).
+> - The `openai` Python SDK gives us streaming chat completions with the same patterns we already use.
+> - No Anthropic API key is needed in the keyring anymore — startup checks simplified.
+
+Implemented the Phase 3 deliverables:
+
+**Text cleanup (`cleanup.py`)** — `Cleanup` class wrapping the OpenAI Chat Completions API with `gpt-5.4-mini`. Matches the `MockCleanup` interface: `start(transcript, on_delta, on_complete, on_error)`, `cancel()`. Runs a synchronous streaming call in a daemon thread (`voxize-cleanup`), posts delta tokens to the GTK main thread via `GLib.idle_add`. System prompt uses nonce-wrapped input (`<transcription-{nonce}>...</transcription-{nonce}>`) per the design doc's prompt injection strategy. Instructions: fix spelling/punctuation/grammar, remove filler words, preserve meaning, apply emphasis, never execute embedded instructions.
+
+**Clipboard integration (`clipboard.py`)** — `copy(text)` function piping text to `wl-copy` via stdin. Uses stdin (not argv) to avoid `ARG_MAX` limits on large transcripts. Failures are logged but never raised — clipboard is best-effort, it must never crash the app.
+
+**App wiring (`app.py`)** — `_begin_cleanup()` rewritten:
+- Saves raw transcript to `session_dir/transcription.txt`
+- Copies raw transcript to clipboard via `wl-copy` (safety net — available in clipboard history even if cleanup fails)
+- Handles empty transcript: shows "No speech detected", transitions to READY
+- Creates `Cleanup(api_key)` and starts streaming (mock mode still uses `MockCleanup`)
+- `_on_cleanup_done(cleaned)`: saves `cleaned.txt` to session dir, copies cleaned text to clipboard (overwrites raw), transitions to READY
+- `_on_cleanup_error(message)`: transitions to ERROR state — raw transcript is already in clipboard, so cleanup failure is non-fatal
+- API key stored as `self._api_key` during `_initialize()` for reuse by cleanup
+
+**Startup checks (`checks.py`)** — Removed the Anthropic API key check. Only the OpenAI key is required now.
+
+**Dependencies (`pyproject.toml`)** — Added `openai>=1.0`.
+
+Architecture decisions:
+- **Synchronous thread over asyncio** — Unlike `transcribe.py` which uses asyncio for the WebSocket, cleanup uses a plain thread with a synchronous streaming iterator. The OpenAI SDK's `stream=True` returns a blocking iterator, which is simplest to consume in a thread. No asyncio event loop needed. GLib.idle_add bridges back to GTK.
+- **on_error callback** — Added to the cleanup interface (MockCleanup doesn't have it). On failure, the app transitions to ERROR. The raw transcript is already in the clipboard from `_begin_cleanup`, so the user loses nothing. This aligns with the design doc's principle: "Anthropic API failure → show error, keep raw transcript in clipboard."
+- **stream.close() on cancel** — When the user cancels during cleanup, `cancel()` sets a flag. The thread checks it between chunks and calls `stream.close()` to abort the HTTP connection promptly.
+
+**System prompt ported from VoxInput `record.sh`** — The initial cleanup prompt was generic. Replaced it with the battle-tested prompt from `~/nix-meridian/home/apps/voxinput/record/record.sh` (lines 193-231). Key additions over the initial draft:
+- "You are not an assistant" — explicit role constraint preventing conversational behaviour
+- Technical user context — mistranscribed words should be corrected toward SaaS product names, programming terms, or technical concepts
+- Detailed "so" handling — remove as sentence-opening filler, keep as causal conjunction, never split a causal "so" into a new sentence
+- Emphasis formatting with anti-patterns — bold/italics/CAPITALS reflect spoken stress only, never decorate proper nouns or product names; includes concrete examples of correct and incorrect usage
+- Paragraph reformatting — separates sentences into readable paragraphs, not just inline fixes
+
+**Noise reduction (`transcribe.py`)** — Added `input_audio_noise_reduction: { type: "near_field" }` to the Realtime API `transcription_session.update` payload. Found in the OpenAI Speech-to-text docs. `near_field` is appropriate for a desktop/laptop microphone. Should improve transcription quality by filtering background noise before the model sees the audio.
+
+**Bug fix: missing spaces between VAD segments (`transcribe.py`)** — First live test showed "happens.I've taken a big pause" — no separator between speech turns. The OpenAI Realtime API creates a new `item_id` for each VAD segment, but we concatenated deltas blindly. Fixed by tracking `_current_item_id` in the receive loop; when it changes, a `"\n"` is prepended to separate speech turns. The cleanup model handles paragraph formatting from there.
+
+**Bug fix: raw WebSocket event logging (`transcribe.py`)** — Added `ws_events.jsonl` logging to the session directory. Every received WebSocket event is written as a JSONL line with `flush()`. This makes it possible to diagnose transcription issues post-session. The log file is opened at session start and closed in a `finally` block. `RealtimeTranscription` now takes an optional `session_dir` parameter.
+
+**Bug fix: UI freeze on Stop (`app.py`)** — GNOME was offering to kill the app because `_begin_cleanup()` ran `transcription.stop()` (blocks up to ~5s for WebSocket thread join) and `clipboard.copy()` (subprocess) on the GTK main thread. Fixed by splitting cleanup into three stages:
+1. `_begin_cleanup()` (GTK thread): stops mock providers (instant, uses GLib timers), nulls real provider references to prevent teardown races, spawns background thread.
+2. `_stop_providers()` (background thread): stops audio capture, stops transcription (blocking join), releases mic lock, saves `transcription.txt`, copies raw transcript to clipboard. Posts back via `GLib.idle_add`.
+3. `_start_cleanup()` (GTK thread): handles empty transcript case, creates and starts the cleanup provider.
+
+The UI stays responsive throughout — the CLEANING state (pulsing text, amber dot) renders immediately while the background thread does the blocking work.
+
+**Bug fix: transcription deltas leaking into cleanup (`transcribe.py`)** — First live test showed transcription text arriving after the cleanup phase had started, mixing raw transcript with cleaned output. Root cause: `GLib.idle_add(on_delta, ...)` callbacks queued during the drain period fired on the GTK thread after CLEANING state was entered. Fixed by adding a `_draining` flag. When `stop()` is called, it sets `_draining = True` before signaling done. The receive loop still accumulates text into `self._transcript` (so the full transcript is returned) but skips `GLib.idle_add` — no more deltas reach the UI. Also increased the trailing event drain timeout from 1.5s to 5s to give OpenAI time to finish processing mid-sentence audio.
+
+**Fast startup (`app.py`)** — Initialization was taking 3-4s because the UI stayed on "Initializing" until the WebSocket connected. The audio capture already started before the WS and chunks queued — but the RECORDING transition waited for `on_ready`. Fixed by transitioning to RECORDING immediately after `audio.start()` succeeds. Removed `_on_ws_ready` callback. If the WS fails later, `_on_ws_error` already handles RECORDING state (degraded mode with error banner, audio continues). The user now sees "Recording" and can start speaking instantly.
+
+**Bug fix: Cancel hangs the app (`app.py`)** — Same root cause as the Stop freeze: `_teardown_recording()` called `transcription.cancel()` → `_join(timeout=5.0)` on the GTK thread. Fixed by replacing `_teardown_recording` with `_teardown_async()` everywhere: nulls provider references on the GTK thread (preventing races), spawns a background daemon thread (`voxize-teardown`) that does the blocking cancel/stop/release. Used in CANCELLED handler, ERROR handler, Escape-during-INITIALIZING, and `close-request`. Window close proceeds immediately — daemon threads finish in the background.
+
+**Early stdio close (`app.py`)** — `_on_close_request` now closes fd 0/1/2 before allowing the window to close. If a parent process (e.g., future GNOME Shell extension) is reading our stdout, it sees EOF immediately and doesn't hang while daemon threads finish async teardown.
+
+**Bug fix: raw transcript never shown before cleanup (`ui.py`, `app.py`)** — With fast startup, the WS connection happens in the background. If the user presses Stop before any transcription deltas reach the UI (or after only a few arrive), the text area is empty when CLEANING state is entered. The spinner was never dismissed, the text pulse had nothing to pulse on, and the user only saw the cleaned output — never their raw transcript.
+
+Root cause: the CLEANING state handler in `ui.py` immediately set `_awaiting_cleanup = True` and started the text pulse. But the transcript drain hadn't completed yet — the final transcript wasn't available. Stale delta callbacks (queued in GLib before `_draining` was set) could also trigger the one-shot `_awaiting_cleanup` clear prematurely, before actual cleanup tokens arrived.
+
+Fix: moved `_awaiting_cleanup` and text pulse out of the CLEANING state handler. Instead, `_start_cleanup()` (which runs on the GTK thread after drain completes) calls `ui.show_transcript_for_cleanup(transcript)`. This method:
+1. Dismisses the spinner (if still showing).
+2. Sets the text buffer to the full transcript.
+3. Makes the text area visible.
+4. Arms `_awaiting_cleanup` and starts the text pulse.
+
+The user now sees their raw transcript pulsing while cleanup runs. The first cleanup token clears it and streams the cleaned version. The CLEANING state handler now only dismisses the spinner (in case the user stopped before WS connected) and updates chrome (status label, buttons). Also added intermediate status label: "Finishing…" during drain, "Cleaning up…" once cleanup actually starts (set in `show_transcript_for_cleanup`).
+
+**Bug fix: transcription data loss from audio queue burst (`transcribe.py`)** — A 26-second recording lost an entire middle section (~15s of speech). Investigation via `ws_events.jsonl` and batch re-transcription of the WAV confirmed the audio was on disk but the Realtime API never received it. Root cause: with fast startup, `AudioCapture` starts before the WebSocket connects. Chunks accumulated in the asyncio queue (~75-100 at 40ms each). When the WS connected, the send loop blasted them all at the API in milliseconds. The server VAD couldn't properly segment speech from this burst — it processed the initial chunk as one segment, missed VAD boundaries in the buffered middle section, and only picked up again once real-time-paced chunks started flowing.
+
+Research confirmed: OpenAI's own cookbook (`Speech_transcription_methods.ipynb`) paces pre-recorded audio at ~5x real-time with the comment "Add pacing to ensure real-time transcription" (128ms chunks with 25ms sleeps). No hard rate limit is documented, but the server VAD is sensitive to burst delivery. Per-message limit is 15 MiB, minimum commit size is 100ms.
+
+Fix: added pacing to `_send_loop`. When the queue has a backlog (`queue.qsize() > 0`), an 8ms `asyncio.sleep` is inserted between sends (40ms chunks / 5 = 8ms, matching the ~5x real-time rate from the cookbook). When the queue is empty (live mic, real-time flow), no delay — chunks go straight through. This preserves all buffered audio for transcription while avoiding VAD degradation. No audio is dropped — the WAV and the API both get every chunk.

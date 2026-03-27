@@ -45,6 +45,7 @@ class OverlayWindow:
         self._text_pulse_source: int | None = None
         self._text_pulse_dim = False
         self._awaiting_cleanup = False
+        self._destroyed = False
         self._build()
         machine.on_change(self._on_state_change)
 
@@ -183,6 +184,8 @@ class OverlayWindow:
     # ── Text operations ──
 
     def append_text(self, text: str) -> None:
+        if self._destroyed:
+            return
         if self._spinner.get_spinning():
             self._spinner.set_spinning(False)
             self._spinner.set_visible(False)
@@ -203,6 +206,28 @@ class OverlayWindow:
     def clear_text(self) -> None:
         self._text_view.get_buffer().set_text("")
 
+    def show_transcript_for_cleanup(self, transcript: str) -> None:
+        """Show the final transcript and arm the cleanup swap.
+
+        Called by app._start_cleanup after the transcription drain completes.
+        Updates the status label, sets the text buffer to the full transcript,
+        starts pulsing, and arms _awaiting_cleanup so the first cleanup token
+        clears and replaces it.
+        """
+        if self._destroyed:
+            return
+        self._status_label.set_text("Cleaning up\u2026")
+        if self._spinner.get_spinning():
+            self._spinner.set_spinning(False)
+            self._spinner.set_visible(False)
+        self._overlay.set_visible(True)
+        self._text_view.get_buffer().set_text(transcript)
+        if not self._scroll_pending:
+            self._scroll_pending = True
+            GLib.idle_add(self._scroll_to_end)
+        self._awaiting_cleanup = True
+        self._start_text_pulse()
+
     def show_error_banner(self, message: str) -> None:
         """Show error banner at the bottom without clearing transcript.
 
@@ -210,6 +235,8 @@ class OverlayWindow:
         Close so the user can end the session. Audio capture continues in
         the background — the WAV file is the safety net.
         """
+        if self._destroyed:
+            return
         self._error_label.set_text(message)
         self._error_bar.set_visible(True)
         self._stop_pulse()
@@ -241,6 +268,7 @@ class OverlayWindow:
             self._dot.remove_css_class(cls)
         self._dot.add_css_class(new.name.lower())
         self._stop_pulse()
+        self._stop_text_pulse()
 
         if new == State.RECORDING:
             self._status_label.set_text("Recording")
@@ -260,15 +288,18 @@ class OverlayWindow:
             self.clear_text()
 
         elif new == State.CLEANING:
-            self._status_label.set_text("Cleaning up\u2026")
+            self._status_label.set_text("Finishing\u2026")
             self._timer_label.set_visible(False)
             self._stop_timer()
             self._cancel_btn.set_visible(True)
             self._action_btn.set_visible(False)
             self._window.set_default_widget(None)
-            # Keep transcript visible so user can review; pulse to signal processing
-            self._awaiting_cleanup = True
-            self._start_text_pulse()
+            # Dismiss spinner if still showing (e.g., quick stop before WS connected)
+            if self._spinner.get_spinning():
+                self._spinner.set_spinning(False)
+                self._spinner.set_visible(False)
+            # Don't set _awaiting_cleanup here — _start_cleanup will show the
+            # final transcript and arm the swap after the drain completes.
 
         elif new == State.READY:
             self._status_label.set_text("Ready")
@@ -377,6 +408,7 @@ class OverlayWindow:
     # ── Cleanup ──
 
     def destroy(self) -> None:
+        self._destroyed = True
         self._stop_timer()
         self._stop_pulse()
         self._stop_text_pulse()
