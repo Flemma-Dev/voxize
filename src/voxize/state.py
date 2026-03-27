@@ -1,6 +1,9 @@
 """State machine for Voxize session lifecycle."""
 
+import logging
 from enum import Enum, auto
+
+logger = logging.getLogger(__name__)
 
 
 class State(Enum):
@@ -47,7 +50,9 @@ class StateMachine:
 
     def transition(self, new_state: State, *, error: str = "") -> None:
         old = self._state
-        if new_state not in _ALLOWED[old]:
+        allowed = new_state in _ALLOWED[old]
+        logger.debug("transition: %s -> %s allowed=%s", old.name, new_state.name, allowed)
+        if not allowed:
             raise InvalidTransition(f"{old.name} → {new_state.name} is not allowed")
         if new_state == State.ERROR:
             self.error_message = error

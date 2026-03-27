@@ -75,6 +75,9 @@ class RealtimeTranscription:
         self._audio_queue = asyncio.Queue()
         self._done = asyncio.Event()
 
+        self._chunk_count = 0
+
+        logger.debug("start: launching WS thread")
         self._thread = threading.Thread(target=self._run, daemon=True, name="voxize-ws")
         self._thread.start()
 
@@ -82,6 +85,11 @@ class RealtimeTranscription:
         """Post an audio chunk from any thread (typically sounddevice callback)."""
         if self._loop and self._running and self._audio_queue is not None:
             self._loop.call_soon_threadsafe(self._audio_queue.put_nowait, chunk)
+            self._chunk_count += 1
+            if self._chunk_count % 25 == 0:
+                q = self._audio_queue
+                logger.debug("send_audio: chunk %d queued (qsize=%d)",
+                             self._chunk_count, q.qsize() if q else -1)
 
     def stop(self) -> str:
         """Stop gracefully: drain buffered audio, commit, wait for events.
@@ -93,6 +101,8 @@ class RealtimeTranscription:
         self._draining = True
         self._running = False
         self._cancelled = False
+        q = self._audio_queue
+        logger.info("Stop called, queue backlog: %d chunks", q.qsize() if q else -1)
         self._signal_done()
         self._join()
         return self._transcript
@@ -102,6 +112,7 @@ class RealtimeTranscription:
 
         Returns whatever transcript was accumulated so far.
         """
+        logger.debug("cancel: requested")
         self._draining = True
         self._running = False
         self._cancelled = True
@@ -112,6 +123,7 @@ class RealtimeTranscription:
     # ── Thread management ──
 
     def _signal_done(self) -> None:
+        logger.debug("_signal_done: signalling event loop")
         if self._loop and self._done is not None:
             self._loop.call_soon_threadsafe(self._done.set)
         if self._loop and self._audio_queue is not None:
@@ -144,6 +156,7 @@ class RealtimeTranscription:
             except Exception:
                 logger.exception("Failed to open ws_events.jsonl")
 
+        logger.debug("_session: connecting to WS url=%s", _WS_URL)
         headers = {
             "Authorization": f"Bearer {self._api_key}",
             "OpenAI-Beta": "realtime=v1",
@@ -155,7 +168,9 @@ class RealtimeTranscription:
                 max_size=None,
             ) as ws:
                 self._ws = ws
+                logger.debug("_session: WS connected")
                 await self._configure(ws)
+                logger.debug("_session: configure sent")
 
                 send_task = asyncio.create_task(self._send_loop(ws))
                 recv_task = asyncio.create_task(self._receive_loop(ws))
@@ -194,8 +209,8 @@ class RealtimeTranscription:
 
                 self._ws = None
 
-        except websockets.exceptions.InvalidStatusCode as e:
-            msg = f"WebSocket rejected (HTTP {e.status_code})"
+        except websockets.exceptions.InvalidStatus as e:
+            msg = f"WebSocket rejected (HTTP {e.response.status_code})"
             logger.error(msg)
             if self._on_error:
                 GLib.idle_add(self._on_error, msg)
@@ -214,20 +229,42 @@ class RealtimeTranscription:
                 self._log_file.close()
                 self._log_file = None
 
+    _VAD_CONFIG = {
+        "type": "semantic_vad",
+        "eagerness": "low",
+    }
+
     async def _configure(self, ws) -> None:
+        """Configure session with semantic VAD enabled from the start.
+
+        We use semantic_vad instead of server_vad to avoid the critical
+        pacing sensitivity problem.  server_vad relies on silence-based
+        timing to detect speech boundaries, and its internal clock loses
+        alignment when audio is delivered faster than real-time (the
+        startup burst).  This causes truncated segments, missed speech,
+        or session-wide VAD corruption.
+
+        semantic_vad detects speech boundaries based on semantic
+        understanding of the user's utterance (whether they appear to
+        have finished speaking), so it is not affected by delivery
+        timing.  With eagerness="low", it waits for the user to finish
+        speaking before chunking — ideal for dictation.
+
+        The startup burst (audio buffered while the WS was connecting)
+        is sent at full speed by the send loop, flowing into the same
+        input audio buffer as the real-time audio that follows.  No
+        manual commit, no VAD disable/re-enable dance, no artificial
+        boundary between buffered and live audio.
+        """
         await ws.send(json.dumps({
             "type": "transcription_session.update",
             "session": {
                 "input_audio_format": "pcm16",
                 "input_audio_transcription": {
                     "model": _MODEL,
+                    "language": "en",
                 },
-                "turn_detection": {
-                    "type": "server_vad",
-                    "threshold": 0.5,
-                    "prefix_padding_ms": 300,
-                    "silence_duration_ms": 500,
-                },
+                "turn_detection": self._VAD_CONFIG,
                 "input_audio_noise_reduction": {
                     "type": "near_field",
                 },
@@ -235,50 +272,86 @@ class RealtimeTranscription:
         }))
 
     async def _send_loop(self, ws) -> None:
-        """Drain audio queue and send base64-encoded chunks to WebSocket.
+        """Send audio chunks to the WebSocket.
 
-        When the queue has a backlog (buffered audio from before WS connected),
-        chunks are paced at ~5x real-time (8ms sleep per 40ms chunk) to avoid
-        overwhelming the server VAD. Once caught up, chunks flow at real-time
-        rate with no artificial delay.
+        Semantic VAD is enabled from the start (set in _configure), so
+        all audio — both the startup burst and real-time chunks — flows
+        into the same input audio buffer as one continuous stream.
 
-        Pacing follows OpenAI's own cookbook recommendation: their example sends
-        128ms chunks with 25ms sleeps (~5x real-time) with the comment "Add
-        pacing to ensure real-time transcription."
+        The startup burst (buffered while the WS was connecting) is sent
+        at full speed.  There is no manual commit and no VAD mode switch.
+        The semantic VAD detects speech boundaries based on content, not
+        delivery timing, so the burst does not corrupt its state.
+
+        After the burst drains, chunks flow at mic-capture rate.
         """
-        # Each chunk is 40ms of audio. At 5x real-time: 40ms / 5 = 8ms pacing.
-        _PACE_DELAY = 0.008
-
+        chunks_sent = 0
+        exit_reason = "unknown"
         try:
+            # ── Flush startup backlog at full speed ──
+            startup = 0
+            while not self._audio_queue.empty():
+                try:
+                    chunk = self._audio_queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+                if chunk is None:
+                    exit_reason = "sentinel"
+                    return
+                audio_b64 = base64.b64encode(chunk).decode("ascii")
+                await ws.send(json.dumps({
+                    "type": "input_audio_buffer.append",
+                    "audio": audio_b64,
+                }))
+                startup += 1
+                chunks_sent += 1
+
+            if startup > 0:
+                logger.debug("_send_loop: burst sent %d startup chunks "
+                             "(%.1fs audio)", startup, startup * 0.04)
+            else:
+                logger.debug("_send_loop: no startup backlog")
+
+            # ── Continuous flow (startup + real-time, same VAD) ──
             while True:
                 try:
                     chunk = await asyncio.wait_for(
                         self._audio_queue.get(), timeout=0.1,
                     )
                 except asyncio.TimeoutError:
-                    # No chunk available — exit if we're shutting down,
-                    # otherwise keep waiting for live mic chunks.
                     if not self._running:
+                        exit_reason = "timeout/not-running"
                         break
                     continue
-                if chunk is None:  # sentinel from stop/cancel
+                if chunk is None:
+                    exit_reason = "sentinel"
                     break
                 audio_b64 = base64.b64encode(chunk).decode("ascii")
                 await ws.send(json.dumps({
                     "type": "input_audio_buffer.append",
                     "audio": audio_b64,
                 }))
-                # Pace when draining a backlog (queue > 0 means more buffered)
-                if not self._audio_queue.empty():
-                    await asyncio.sleep(_PACE_DELAY)
+                chunks_sent += 1
+                if chunks_sent == 1:
+                    logger.debug("_send_loop: first chunk sent")
+                elif chunks_sent % 25 == 0:
+                    logger.debug("_send_loop: chunk %d sent (qsize=%d)",
+                                 chunks_sent, self._audio_queue.qsize())
         except asyncio.CancelledError:
-            pass
+            exit_reason = "cancelled"
         except websockets.exceptions.ConnectionClosed:
-            pass
+            exit_reason = "connection-closed"
+        finally:
+            logger.info("Send loop exited: %d chunks sent (%.1fs audio)",
+                        chunks_sent, chunks_sent * 0.04)
+            logger.debug("_send_loop: exit_reason=%s total=%d",
+                         exit_reason, chunks_sent)
 
     async def _receive_loop(self, ws) -> None:
         """Receive WebSocket events and dispatch delta text to GTK thread."""
         from gi.repository import GLib
+        exit_reason = "end-of-stream"
+        events_received = 0
         try:
             async for raw in ws:
                 # Log every event for debugging
@@ -292,10 +365,13 @@ class RealtimeTranscription:
 
                 event = json.loads(raw)
                 etype = event.get("type", "")
+                events_received += 1
 
                 if etype == "conversation.item.input_audio_transcription.delta":
                     item_id = event.get("item_id", "")
                     delta = event.get("delta", "")
+                    logger.debug("_recv: type=%s item_id=%s delta_len=%d",
+                                 etype, item_id, len(delta))
                     if delta:
                         # Separate VAD speech turns with a newline
                         if self._current_item_id and item_id != self._current_item_id:
@@ -309,12 +385,14 @@ class RealtimeTranscription:
                             GLib.idle_add(self._on_delta, delta)
 
                 elif etype == "conversation.item.input_audio_transcription.completed":
-                    pass  # already accumulated via deltas
+                    item_id = event.get("item_id", "")
+                    logger.debug("_recv: type=%s item_id=%s", etype, item_id)
 
                 elif etype == "error":
                     error = event.get("error", {})
                     code = error.get("code", "")
                     msg = error.get("message", "Unknown API error")
+                    logger.debug("_recv: type=%s code=%s", etype, code)
                     # Non-fatal errors: empty buffer commit from VAD auto-processing
                     if code == "input_audio_buffer_commit_empty":
                         logger.debug("Ignored non-fatal API error: %s", msg)
@@ -323,8 +401,13 @@ class RealtimeTranscription:
                         if self._on_error:
                             GLib.idle_add(self._on_error, msg)
 
-                # Silently ignore expected lifecycle events
+                else:
+                    logger.debug("_recv: type=%s", etype)
+
         except asyncio.CancelledError:
-            pass
+            exit_reason = "cancelled"
         except websockets.exceptions.ConnectionClosed:
-            pass
+            exit_reason = "connection-closed"
+        finally:
+            logger.debug("_receive_loop: exit_reason=%s events=%d transcript_len=%d",
+                         exit_reason, events_received, len(self._transcript))

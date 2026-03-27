@@ -227,3 +227,59 @@ The user now sees their raw transcript pulsing while cleanup runs. The first cle
 Research confirmed: OpenAI's own cookbook (`Speech_transcription_methods.ipynb`) paces pre-recorded audio at ~5x real-time with the comment "Add pacing to ensure real-time transcription" (128ms chunks with 25ms sleeps). No hard rate limit is documented, but the server VAD is sensitive to burst delivery. Per-message limit is 15 MiB, minimum commit size is 100ms.
 
 Fix: added pacing to `_send_loop`. When the queue has a backlog (`queue.qsize() > 0`), an 8ms `asyncio.sleep` is inserted between sends (40ms chunks / 5 = 8ms, matching the ~5x real-time rate from the cookbook). When the queue is empty (live mic, real-time flow), no delay — chunks go straight through. This preserves all buffered audio for transcription while avoiding VAD degradation. No audio is dropped — the WAV and the API both get every chunk.
+
+---
+
+### 2026-03-27 — Session 5: Phase 4 — Polish
+
+**Phase**: 4 — Polish
+**Status**: in progress
+
+Several Phase 4 deliverables were already implemented during Phase 2-3 work:
+- WebSocket error handling (degraded recording mode with error banner, audio continues)
+- WebSocket drops mid-recording (same degraded mode)
+- Microphone open failure → ERROR state with actionable message
+- Empty transcription → "No speech detected"
+- Cleanup API failure → ERROR state, raw transcript preserved in clipboard
+- Most error state UI (error banner, text preservation)
+
+Remaining deliverables implemented this session:
+
+**Session rotation at termination (`storage.py`)** — `prune_sessions(keep=8)` deletes session directories beyond the most recent 8. Called in `_on_close_request` (not at startup) per a deliberate decision: if a bug causes repeated startup crashes, doing cleanup at startup would progressively destroy session history. At termination, we know the app ran successfully, so pruning is safe. Uses lexicographic sort on `YYYY-MM-DDTHH-MM-SS` directory names (equals chronological order). `shutil.rmtree` with `OSError` catch — best-effort, never crashes the app.
+
+**Signal handlers (`app.py`)** — `GLib.unix_signal_add` for SIGTERM and SIGINT, registered in `do_activate`. The handler calls `AudioCapture.finalize_wav()` (new method — fixes WAV header sizes without stopping the stream), releases the mic lock, and calls `self.quit()`. This ensures the WAV file has a valid header even when the process is killed externally (e.g., `kill`, `systemctl stop`). The existing placeholder-header technique already preserves raw PCM data on hard crashes — the signal handler upgrades this to a properly-playable WAV.
+
+**Auto-close timeout (`app.py`)** — `GLib.timeout_add_seconds(_AUTOCLOSE, self._on_autoclose)` starts when READY state is entered. Default 30 seconds, configurable via `VOXIZE_AUTOCLOSE` env var (0 to disable). Timer is cancelled on any state transition (via `_cancel_autoclose` in `_on_state_change`) and on `close-request`. The callback checks that the state is still READY before closing — guards against races if the user somehow triggers a state change between the timer firing and the callback executing.
+
+**Edge case: very short recording (<1s)** — Reviewed all code paths. No changes needed: `transcription.stop()` returns empty/short text, `_start_cleanup` already handles empty transcripts with "No speech detected" → READY. `WavWriter.finalize()` correctly produces a valid WAV even with 0 bytes of PCM data (RIFF size 36, data size 0). The mic lock and session dir cleanup work regardless of recording duration.
+
+**Edge case: very long recording (>10min)** — No changes needed. `Gtk.TextView` with `max_content_height` constraint keeps the window bounded. Programmatic `scroll_to_end` via `vadjustment.set_value` is O(1). The fade gradient shows when content overflows. Text selection and word-wrap work throughout.
+
+**Edge case: multiple rapid invocations** — Already handled by `MicLock` (`fcntl.flock` with `LOCK_EX | LOCK_NB`). Second instance gets `MicLockError` → ERROR state with message. No changes needed.
+
+Architecture decisions:
+- **`GLib.unix_signal_add` over `signal.signal`** — Python's `signal.signal` is unreliable in GTK apps because the Python signal handler requires the GIL, which may be held by GTK during event processing. `GLib.unix_signal_add` integrates with the GLib main loop, running the handler as a normal idle callback. The `GLib.PRIORITY_HIGH` ensures it runs before other pending events.
+- **`finalize_wav()` separate from `stop()`** — The signal handler should only fix the WAV header, not try to stop the sounddevice stream (which may deadlock if the audio callback is running). `stop()` still calls `finalize()` for normal shutdown.
+- **Termination-time pruning over startup-time** — User's insight: a crash loop at startup would repeatedly invoke pruning before creating a new session, progressively deleting history. At termination, the session has been created and used, so pruning old sessions is safe.
+
+**UX fix: keep spinner during drain (`ui.py`)** — When the user pressed Stop before any transcription text had appeared, the CLEANING state handler dismissed the spinner. Result: the user saw an empty window with "Finishing…" and no activity indicator. Fix: removed spinner dismissal from the CLEANING state handler — the spinner stays visible and is dismissed naturally by `append_text` when the first text arrives, or by `show_transcript_for_cleanup` after the drain completes. The user now sees: press Stop → "Finishing…" with spinner → transcript appears → "Cleaning up…" with pulsing text.
+
+**Root cause: VAD corruption from 5x burst pacing (`transcribe.py`)** — Two sessions showed truncated or zero transcription despite full audio delivery. Diagnostic logging (session-level `debug.log` capturing all threads) revealed all chunks were sent successfully. The root cause: when the user starts speaking during the initial buffered burst (before the WS has drained all queued chunks), the 5x pacing (8ms per 40ms chunk) causes the server VAD to misdetect speech boundaries. Evidence from `ws_events.jsonl`:
+
+- **Broken (19:44)**: `speech_started` at 468ms, `speech_stopped` at 1376ms — 908ms segment in the burst region → "Right?" (should have been "Alright, this is another test..."). VAD never fired again despite 5 more seconds of audio.
+- **Working (18:57)**: `speech_started` at 2420ms — user waited longer, speech fell in the real-time region → full transcript captured.
+
+The 5x pacing from OpenAI's cookbook was designed for batch file transcription, not live streaming with a burst-to-realtime transition. When the VAD processes burst audio, its internal clock loses alignment with the audio content, causing it to commit truncated segments and miss subsequent speech.
+
+The full history of pacing experiments and root cause analysis is documented in **[`docs/debugging-guide.md`](debugging-guide.md)** § 3 "The OpenAI Realtime API and VAD". That guide should be kept up to date alongside this journal whenever new debugging insights emerge.
+
+**Session-level trace logging (`app.py`, `transcribe.py`, `audio.py`, `state.py`, `cleanup.py`, `lock.py`, `storage.py`, `clipboard.py`)** — Added comprehensive `logger.debug()` calls throughout the codebase. A `FileHandler` writing to `{session_dir}/debug.log` is configured in `_initialize()`. This logging was instrumental in diagnosing the VAD burst pacing issue — the debug.log showed all 166 chunks sent but only one 908ms speech segment detected. See **[`docs/debugging-guide.md`](debugging-guide.md)** § 6 for log format and key patterns.
+
+**Switch from `server_vad` to `semantic_vad` (`transcribe.py`)** — After exhaustive testing (5x, 1.5x, 1.1x pacing; VAD disable/re-enable with manual commit; no-commit), all `server_vad` approaches failed due to its fundamental sensitivity to audio delivery timing. Research into the OpenAI Realtime API documentation revealed `semantic_vad` — a mode that detects speech boundaries based on semantic understanding of the utterance, not silence-based timing. With `eagerness: "low"` (waits for the user to finish speaking — ideal for dictation), the startup burst can be sent at full speed without corrupting the VAD. The entire two-phase dance (VAD off → burst → commit → VAD on) was eliminated. Audio now flows as one continuous stream: startup burst at full speed → real-time chunks. Also added `language: "en"` to prevent hallucination on short/ambiguous segments. See **[`docs/debugging-guide.md`](debugging-guide.md)** § 3 for the full rationale and historical experiment table.
+
+**Buffer drain progress bar — added then removed** — A `Gtk.ProgressBar` was implemented to visualize the startup backlog draining during paced delivery. With `semantic_vad` eliminating pacing entirely (burst sends in ~50ms), the bar became pointless and was removed. The implementation is preserved in git history for reference.
+
+**Cancel hang fix (`app.py`)** — Added explicit `self.quit()` call in `_on_close_request` so the GTK main loop exits even when GLib sources (signal handlers, stale idle callbacks) are pending.
+
+#### Deferred
+- **Audio level meter** — A `Gtk.LevelBar` showing real-time microphone input level (RMS dB computed in the audio callback). Would give the user direct "am I being heard?" feedback and catch "too quiet" issues.

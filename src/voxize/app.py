@@ -1,15 +1,17 @@
 """Voxize GTK4 application — wires state machine, UI, and providers.
 
-Mock mode (env vars, see __main__.py):
+Environment variables:
     VOXIZE_MOCK=1          Use mock transcription (no mic, no API)
     VOXIZE_ERROR=<ms>      Simulate WebSocket error after <ms>
     VOXIZE_STOP=<ms>       Auto-stop recording after <ms>
+    VOXIZE_AUTOCLOSE=<s>   Auto-close after READY state (default 30, 0 to disable)
 """
 
 from __future__ import annotations
 
 import logging
 import os
+import signal
 import threading
 from pathlib import Path
 
@@ -27,6 +29,7 @@ from voxize.ui import OverlayWindow
 logger = logging.getLogger(__name__)
 
 _MOCK = bool(os.environ.get("VOXIZE_MOCK"))
+_AUTOCLOSE = int(os.environ.get("VOXIZE_AUTOCLOSE", "30"))
 
 
 class VoxizeApp(Gtk.Application):
@@ -45,6 +48,12 @@ class VoxizeApp(Gtk.Application):
 
         # Mock transcription (only in mock mode)
         self._mock_transcription: MockTranscription | None = None
+
+        # Auto-close timer
+        self._autoclose_source: int | None = None
+
+        # Session-level file log handler
+        self._log_handler = None
 
     def do_activate(self) -> None:
         # Load CSS theme
@@ -75,6 +84,11 @@ class VoxizeApp(Gtk.Application):
         win.present()
         self._ui.setup_max_height()
 
+        # Signal handlers — finalize WAV header before exit so the file is
+        # a valid WAV (not just raw PCM with a placeholder header).
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            GLib.unix_signal_add(GLib.PRIORITY_HIGH, sig, self._on_signal, sig)
+
         if _MOCK:
             GLib.idle_add(self._initialize_mock)
         else:
@@ -90,6 +104,7 @@ class VoxizeApp(Gtk.Application):
         from voxize.storage import create_session_dir
         from voxize.transcribe import RealtimeTranscription
 
+        logger.debug("_initialize: acquiring lock")
         try:
             self._lock = MicLock()
             self._lock.acquire()
@@ -99,20 +114,37 @@ class VoxizeApp(Gtk.Application):
         except Exception as e:
             self._machine.transition(State.ERROR, error=f"Lock failed: {e}")
             return False
+        logger.debug("_initialize: lock acquired")
 
         try:
             self._session_dir = create_session_dir()
+            logger.debug("_initialize: session_dir=%s", self._session_dir)
             self._api_key = get_api_key("openai")
+            logger.debug("_initialize: api_key retrieved")
         except Exception as e:
             self._release_lock()
             self._machine.transition(State.ERROR, error=str(e))
             return False
 
+        # Set up session-level file logging
+        fh = logging.FileHandler(os.path.join(self._session_dir, "debug.log"))
+        fh.setLevel(logging.DEBUG)
+        fh.setFormatter(logging.Formatter(
+            "%(asctime)s.%(msecs)03d %(threadName)-14s %(name)s %(message)s",
+            datefmt="%H:%M:%S",
+        ))
+        logging.getLogger("voxize").addHandler(fh)
+        logging.getLogger("voxize").setLevel(logging.DEBUG)
+        self._log_handler = fh
+        logger.debug("_initialize: file logging active")
+
         # Create providers
+        logger.debug("_initialize: creating providers")
         self._transcription = RealtimeTranscription(self._api_key, self._session_dir)
         self._audio = AudioCapture(self._session_dir, self._transcription.send_audio)
 
         # Start WebSocket (background thread) — connects while we record
+        logger.debug("_initialize: starting transcription WS")
         self._transcription.start(
             on_delta=self._ui.append_text,
             on_error=self._on_ws_error,
@@ -121,6 +153,7 @@ class VoxizeApp(Gtk.Application):
         # Start audio capture — transition to RECORDING immediately (fast startup).
         # Audio chunks queue in the asyncio queue until WS is connected.
         # If WS fails later, _on_ws_error handles RECORDING state (degraded mode).
+        logger.debug("_initialize: starting audio capture")
         try:
             self._audio.start()
         except Exception as e:
@@ -130,6 +163,7 @@ class VoxizeApp(Gtk.Application):
             self._machine.transition(State.ERROR, error=f"Microphone: {e}")
             return False
 
+        logger.debug("_initialize: transitioning to RECORDING")
         self._machine.transition(State.RECORDING)
         return False  # one-shot idle
 
@@ -174,6 +208,8 @@ class VoxizeApp(Gtk.Application):
 
         During INITIALIZING: nothing to preserve, transition to ERROR.
         """
+        current = self._machine.state if self._machine else None
+        logger.debug("_on_ws_error: state=%s msg=%s", current, message)
         if self._machine and self._machine.state == State.RECORDING:
             # Degraded mode — keep audio, show banner
             if self._transcription:
@@ -187,6 +223,15 @@ class VoxizeApp(Gtk.Application):
     # ── State orchestration ──
 
     def _on_state_change(self, machine: StateMachine, old: State, new: State) -> None:
+        logger.debug("_on_state_change: %s -> %s", old.name, new.name)
+        # Cancel any pending auto-close when leaving READY
+        self._cancel_autoclose()
+
+        if new == State.READY and _AUTOCLOSE > 0:
+            self._autoclose_source = GLib.timeout_add_seconds(
+                _AUTOCLOSE, self._on_autoclose
+            )
+
         if new == State.RECORDING:
             if _MOCK:
                 self._mock_transcription = MockTranscription()
@@ -218,6 +263,7 @@ class VoxizeApp(Gtk.Application):
         Real providers are stopped in a background thread to avoid freezing
         the GTK main loop (transcription.stop blocks up to ~5s).
         """
+        logger.debug("_begin_cleanup: mock=%s", _MOCK)
         # Stop mock transcription on GTK thread (uses GLib timers)
         mock_transcript = ""
         if self._mock_transcription:
@@ -251,19 +297,25 @@ class VoxizeApp(Gtk.Application):
         from gi.repository import GLib
         from voxize import clipboard
 
+        logger.debug("_stop_providers: stopping audio")
         try:
             if audio:
                 audio.stop()
         except Exception:
             logger.exception("Failed to stop audio")
+        logger.debug("_stop_providers: audio stopped")
 
         transcript = ""
+        logger.debug("_stop_providers: stopping transcription")
         try:
             if transcription:
                 transcript = transcription.stop()
         except Exception:
             logger.exception("Failed to stop transcription")
+        logger.debug("_stop_providers: transcription stopped, transcript_len=%d",
+                      len(transcript))
 
+        logger.debug("_stop_providers: releasing lock")
         try:
             if lock:
                 lock.release()
@@ -284,6 +336,8 @@ class VoxizeApp(Gtk.Application):
 
     def _start_cleanup(self, transcript: str) -> bool:
         """GTK thread: start cleanup provider (or handle empty transcript)."""
+        logger.debug("_start_cleanup: transcript_len=%d empty=%s",
+                      len(transcript), not transcript.strip())
         # Guard against stale callback (e.g., user cancelled during drain)
         if not self._machine or self._machine.state != State.CLEANING:
             return False
@@ -322,6 +376,9 @@ class VoxizeApp(Gtk.Application):
 
     def _teardown_async(self) -> None:
         """Move blocking teardown to a background thread."""
+        logger.debug("_teardown_async: audio=%s transcription=%s lock=%s",
+                      self._audio is not None, self._transcription is not None,
+                      self._lock is not None)
         # Grab references and null them on GTK thread to prevent races
         audio = self._audio
         self._audio = None
@@ -331,6 +388,7 @@ class VoxizeApp(Gtk.Application):
         self._lock = None
 
         if not audio and not transcription and not lock:
+            logger.debug("_teardown_async: nothing to tear down")
             return  # nothing to tear down
 
         threading.Thread(
@@ -343,21 +401,27 @@ class VoxizeApp(Gtk.Application):
     @staticmethod
     def _teardown_blocking(audio, transcription, lock) -> None:
         """Background thread: stop providers, release lock."""
+        logger.debug("_teardown_blocking: audio=%s transcription=%s lock=%s",
+                      audio is not None, transcription is not None, lock is not None)
         try:
             if audio:
+                logger.debug("_teardown_blocking: stopping audio")
                 audio.stop()
         except Exception:
             logger.exception("Teardown: failed to stop audio")
         try:
             if transcription:
+                logger.debug("_teardown_blocking: cancelling transcription")
                 transcription.cancel()
         except Exception:
             logger.exception("Teardown: failed to cancel transcription")
         try:
             if lock:
+                logger.debug("_teardown_blocking: releasing lock")
                 lock.release()
         except Exception:
             logger.exception("Teardown: failed to release lock")
+        logger.debug("_teardown_blocking: complete")
 
     def _release_lock(self) -> None:
         if self._lock:
@@ -400,7 +464,42 @@ class VoxizeApp(Gtk.Application):
             win.close()
         return True
 
+    def _on_autoclose(self) -> bool:
+        """Auto-close the window after the READY timeout."""
+        logger.debug("_on_autoclose: firing")
+        self._autoclose_source = None
+        if self._machine and self._machine.state == State.READY:
+            win = self.get_active_window()
+            if win:
+                win.close()
+        return GLib.SOURCE_REMOVE
+
+    def _cancel_autoclose(self) -> None:
+        if self._autoclose_source is not None:
+            GLib.source_remove(self._autoclose_source)
+            self._autoclose_source = None
+
+    def _on_signal(self, sig: int) -> bool:
+        """Handle SIGTERM/SIGINT — finalize WAV, release lock, quit."""
+        logger.debug("_on_signal: sig=%s", sig)
+        logger.info("Signal %s received, shutting down", sig)
+        if self._audio:
+            try:
+                self._audio.finalize_wav()
+            except Exception:
+                logger.exception("Signal handler: failed to finalize WAV")
+        if self._lock:
+            try:
+                self._lock.release()
+                self._lock = None
+            except Exception:
+                pass
+        self.quit()
+        return GLib.SOURCE_REMOVE
+
     def _on_close_request(self, _win) -> bool:
+        logger.debug("_on_close_request: entry")
+        self._cancel_autoclose()
         self._teardown_async()
         if self._mock_transcription:
             self._mock_transcription.cancel()
@@ -408,6 +507,18 @@ class VoxizeApp(Gtk.Application):
             self._cleanup.cancel()
         if self._ui:
             self._ui.destroy()
+        # Prune old sessions (best-effort, at termination time)
+        try:
+            from voxize.storage import prune_sessions
+
+            prune_sessions()
+        except Exception:
+            pass
+        # Remove session file log handler
+        if self._log_handler:
+            logging.getLogger("voxize").removeHandler(self._log_handler)
+            self._log_handler.close()
+            self._log_handler = None
         # Redirect stdio to /dev/null so any parent process (e.g., GNOME Shell
         # extension) sees EOF immediately, while daemon threads can still write
         # to stderr without EBADF.
@@ -421,4 +532,7 @@ class VoxizeApp(Gtk.Application):
             os.close(devnull)
         except OSError:
             pass
+        # Explicitly quit the application so the main loop exits even if
+        # GLib sources (signal handlers, stale idle callbacks) are pending.
+        self.quit()
         return False  # allow close

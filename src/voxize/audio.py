@@ -10,11 +10,14 @@ on each write, and fixes the two size fields on finalize. On crash, the file
 has an incorrect header but all PCM data is intact and recoverable.
 """
 
+import logging
 import os
 import struct
 from typing import Callable
 
 import sounddevice as sd
+
+logger = logging.getLogger(__name__)
 
 SAMPLE_RATE = 24_000
 CHANNELS = 1
@@ -31,6 +34,7 @@ class WavWriter:
         self._data_bytes = 0
 
     def open(self) -> None:
+        logger.debug("wav open: path=%s", self._path)
         self._fd = open(self._path, "wb")
         # 44-byte RIFF/WAV header with placeholder sizes
         self._fd.write(b"RIFF")
@@ -59,6 +63,7 @@ class WavWriter:
 
     def finalize(self) -> None:
         """Fix WAV header sizes and close the file."""
+        logger.debug("wav finalize: data_bytes=%d", self._data_bytes)
         if self._fd:
             try:
                 self._fd.seek(4)
@@ -78,14 +83,21 @@ class AudioCapture:
         self._wav = WavWriter(os.path.join(session_dir, "audio.wav"))
         self._on_chunk = on_chunk
         self._stream: sd.RawInputStream | None = None
+        self._chunk_count = 0
 
     def _callback(self, indata, frames, time_info, status) -> None:
         pcm = bytes(indata)
         self._wav.write(pcm)
         self._on_chunk(pcm)
+        self._chunk_count += 1
+        if self._chunk_count % 25 == 0:
+            logger.debug("audio callback: chunk %d, %d bytes",
+                         self._chunk_count, len(pcm))
 
     def start(self) -> None:
         self._wav.open()
+        logger.debug("audio start: rate=%d ch=%d dtype=%s blocksize=%d",
+                      SAMPLE_RATE, CHANNELS, DTYPE, BLOCK_SIZE)
         self._stream = sd.RawInputStream(
             samplerate=SAMPLE_RATE,
             channels=CHANNELS,
@@ -94,10 +106,20 @@ class AudioCapture:
             callback=self._callback,
         )
         self._stream.start()
+        logger.debug("audio start: stream active")
+
+    def finalize_wav(self) -> None:
+        """Finalize the WAV header without stopping the stream.
+
+        Safe to call from a signal handler — only touches the file descriptor.
+        """
+        self._wav.finalize()
 
     def stop(self) -> None:
+        logger.debug("audio stop: total_chunks=%d", self._chunk_count)
         if self._stream:
             self._stream.stop()
             self._stream.close()
             self._stream = None
         self._wav.finalize()
+        logger.debug("audio stop: complete")

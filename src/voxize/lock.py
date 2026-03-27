@@ -6,7 +6,10 @@ stale lock problem.
 """
 
 import fcntl
+import logging
 import os
+
+logger = logging.getLogger(__name__)
 
 _LOCK_NAME = "voxize-mic.lock"
 
@@ -27,6 +30,7 @@ class MicLock:
 
     def acquire(self) -> None:
         """Acquire the mic lock. Raises MicLockError if another instance holds it."""
+        logger.debug("acquire: path=%s", self._path)
         self._fd = open(self._path, "w")
         try:
             fcntl.flock(self._fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -36,9 +40,11 @@ class MicLock:
             raise MicLockError("Another Voxize instance is recording")
         self._fd.write(str(os.getpid()))
         self._fd.flush()
+        logger.debug("acquire: success pid=%d", os.getpid())
 
     def release(self) -> None:
         """Release the mic lock."""
+        logger.debug("release: path=%s", self._path)
         if self._fd is not None:
             try:
                 fcntl.flock(self._fd, fcntl.LOCK_UN)

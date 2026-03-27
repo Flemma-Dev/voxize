@@ -99,6 +99,7 @@ class Cleanup:
             on_complete: Called on GTK thread with the full cleaned text.
             on_error: Called on GTK thread with error message on failure.
         """
+        logger.debug("start: transcript_len=%d", len(transcript))
         self._cancelled = False
         self._thread = threading.Thread(
             target=self._run,
@@ -110,6 +111,7 @@ class Cleanup:
 
     def cancel(self) -> None:
         """Cancel cleanup. The thread will exit on the next chunk."""
+        logger.debug("cancel: requested")
         self._cancelled = True
 
     def _run(
@@ -130,6 +132,7 @@ class Cleanup:
         accumulated: list[str] = []
 
         try:
+            logger.debug("_run: calling API model=%s", _MODEL)
             stream = client.chat.completions.create(
                 model=_MODEL,
                 messages=[
@@ -139,18 +142,24 @@ class Cleanup:
                 stream=True,
             )
 
+            first_delta = True
             for chunk in stream:
                 if self._cancelled:
+                    logger.debug("_run: cancelled during streaming")
                     stream.close()
                     return
                 choice = chunk.choices[0] if chunk.choices else None
                 if choice and choice.delta and choice.delta.content:
                     text = choice.delta.content
                     accumulated.append(text)
+                    if first_delta:
+                        logger.debug("_run: first delta received, len=%d", len(text))
+                        first_delta = False
                     GLib.idle_add(on_delta, text)
 
             if not self._cancelled:
                 cleaned = "".join(accumulated)
+                logger.debug("_run: complete, cleaned_len=%d", len(cleaned))
                 GLib.idle_add(on_complete, cleaned)
 
         except Exception as e:

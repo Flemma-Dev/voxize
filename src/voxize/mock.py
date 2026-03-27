@@ -1,7 +1,7 @@
 """Mock providers for Phase 1 UI development.
 
 These emit predefined text on timers, simulating the real OpenAI Realtime
-transcription deltas and Anthropic Haiku cleanup streaming.
+transcription deltas and GPT-5.4 Mini cleanup streaming.
 """
 
 from gi.repository import GLib
@@ -81,6 +81,7 @@ class MockTranscription:
 
     def _tick(self) -> bool:
         if self._pos >= len(self._words):
+            self._source = None  # GLib auto-removes; clear to prevent stale source_remove
             return False  # all words emitted, stay "recording"
         sep = " " if self._pos > 0 else ""
         self._on_delta(sep + self._words[self._pos])
@@ -117,6 +118,7 @@ class MockCleanup:
 
     def _tick(self) -> bool:
         if self._pos >= len(self._words):
+            self._source = None  # GLib auto-removes; clear to prevent stale source_remove
             if self._on_complete:
                 self._on_complete(" ".join(self._words))
             return False

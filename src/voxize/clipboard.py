@@ -14,6 +14,7 @@ def copy(text: str) -> None:
     Text is piped via stdin to avoid ARG_MAX limits on large transcripts.
     Failures are logged but never raised — clipboard is best-effort.
     """
+    logger.debug("copy: text_len=%d", len(text))
     try:
         subprocess.run(
             ["wl-copy"],
@@ -22,5 +23,6 @@ def copy(text: str) -> None:
             check=True,
             timeout=5,
         )
+        logger.debug("copy: success")
     except Exception:
         logger.exception("wl-copy failed")

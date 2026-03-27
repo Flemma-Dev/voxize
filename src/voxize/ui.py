@@ -294,10 +294,10 @@ class OverlayWindow:
             self._cancel_btn.set_visible(True)
             self._action_btn.set_visible(False)
             self._window.set_default_widget(None)
-            # Dismiss spinner if still showing (e.g., quick stop before WS connected)
-            if self._spinner.get_spinning():
-                self._spinner.set_spinning(False)
-                self._spinner.set_visible(False)
+            # Keep spinner visible — deltas continue streaming during drain
+            # and append_text will dismiss the spinner on the first arrival.
+            # If no deltas arrive, show_transcript_for_cleanup handles it.
+            #
             # Don't set _awaiting_cleanup here — _start_cleanup will show the
             # final transcript and arm the swap after the drain completes.
 
