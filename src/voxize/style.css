@@ -1,6 +1,9 @@
 /* Voxize overlay theme — dark translucent, as specified in design doc §5 */
 /* Sizing uses em so the UI scales with the system font.               */
 
+/* @define-color for lookup_color() used by the fade gradient draw func */
+@define-color vox_bg rgba(30, 30, 30, 0.85);
+
 window {
     /* Palette — CSS custom properties, same mechanism libadwaita uses */
     --vox-bg:         rgba(30, 30, 30, 0.85);

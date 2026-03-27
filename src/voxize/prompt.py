@@ -102,7 +102,8 @@ def _get_focused_window_pid() -> int | None:
 def _read_cmdline(pid: int) -> str | None:
     """Read /proc/{pid}/cmdline, returning space-joined args or None."""
     try:
-        raw = open(f"/proc/{pid}/cmdline", "rb").read()  # noqa: SIM115
+        with open(f"/proc/{pid}/cmdline", "rb") as f:
+            raw = f.read()
         return raw.replace(b"\x00", b" ").decode("utf-8", errors="replace").strip()
     except Exception:
         return None
@@ -204,7 +205,8 @@ def _read_whisper(cwd: str) -> str | None:
             logger.debug("prompt: no %s in %s", _WHISPER_FILE, cwd)
             return None
 
-        content = open(path).read().strip()  # noqa: SIM115
+        with open(path) as f:
+            content = f.read().strip()
         if not content:
             logger.debug("prompt: %s is empty", path)
             return None

@@ -13,6 +13,7 @@ has an incorrect header but all PCM data is intact and recoverable.
 import logging
 import os
 import struct
+import threading
 from collections.abc import Callable
 
 import sounddevice as sd
@@ -32,6 +33,7 @@ class WavWriter:
         self._path = path
         self._fd = None
         self._data_bytes = 0
+        self._lock = threading.Lock()
 
     def open(self) -> None:
         logger.debug("wav open: path=%s", self._path)
@@ -56,24 +58,26 @@ class WavWriter:
         self._data_bytes = 0
 
     def write(self, pcm: bytes) -> None:
-        if self._fd:
-            self._fd.write(pcm)
-            self._fd.flush()
-            self._data_bytes += len(pcm)
+        with self._lock:
+            if self._fd:
+                self._fd.write(pcm)
+                self._fd.flush()
+                self._data_bytes += len(pcm)
 
     def finalize(self) -> None:
         """Fix WAV header sizes and close the file."""
-        logger.debug("wav finalize: data_bytes=%d", self._data_bytes)
-        if self._fd:
-            try:
-                self._fd.seek(4)
-                self._fd.write(struct.pack("<I", 36 + self._data_bytes))
-                self._fd.seek(40)
-                self._fd.write(struct.pack("<I", self._data_bytes))
-                self._fd.flush()
-            finally:
-                self._fd.close()
-                self._fd = None
+        with self._lock:
+            logger.debug("wav finalize: data_bytes=%d", self._data_bytes)
+            if self._fd:
+                try:
+                    self._fd.seek(4)
+                    self._fd.write(struct.pack("<I", 36 + self._data_bytes))
+                    self._fd.seek(40)
+                    self._fd.write(struct.pack("<I", self._data_bytes))
+                    self._fd.flush()
+                finally:
+                    self._fd.close()
+                    self._fd = None
 
 
 class AudioCapture:
@@ -83,17 +87,11 @@ class AudioCapture:
         self._wav = WavWriter(os.path.join(session_dir, "audio.wav"))
         self._on_chunk = on_chunk
         self._stream: sd.RawInputStream | None = None
-        self._chunk_count = 0
 
     def _callback(self, indata, frames, time_info, status) -> None:
         pcm = bytes(indata)
         self._wav.write(pcm)
         self._on_chunk(pcm)
-        self._chunk_count += 1
-        if self._chunk_count % 25 == 0:
-            logger.debug(
-                "audio callback: chunk %d, %d bytes", self._chunk_count, len(pcm)
-            )
 
     def start(self) -> None:
         self._wav.open()
@@ -122,7 +120,7 @@ class AudioCapture:
         self._wav.finalize()
 
     def stop(self) -> None:
-        logger.debug("audio stop: total_chunks=%d", self._chunk_count)
+        logger.debug("audio stop")
         if self._stream:
             self._stream.stop()
             self._stream.close()

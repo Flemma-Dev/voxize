@@ -30,7 +30,10 @@ def create_session_dir() -> str:
 
 
 def prune_sessions(keep: int = _MAX_SESSIONS) -> None:
-    """Delete session directories beyond the most recent *keep*.
+    """Trash session directories beyond the most recent *keep*.
+
+    Uses ``Gio.File.trash()`` so sessions are recoverable from the system
+    trash rather than permanently deleted.
 
     Called at termination time (not startup) so that a faulty launch that
     crashes repeatedly cannot wipe out the session history.

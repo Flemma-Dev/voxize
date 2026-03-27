@@ -63,6 +63,10 @@ def get_api_key(service: str) -> str:
     key = result.stdout.strip()
     if not key:
         raise RuntimeError(f"API key for '{service}' not found in keyring")
+    if not key.startswith("sk-"):
+        raise RuntimeError(
+            f"API key for '{service}' has unexpected format (expected 'sk-' prefix)"
+        )
     return key
 
 

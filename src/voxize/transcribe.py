@@ -108,14 +108,6 @@ class RealtimeTranscription:
         """Post an audio chunk from any thread (typically sounddevice callback)."""
         if self._loop and self._running and self._audio_queue is not None:
             self._loop.call_soon_threadsafe(self._audio_queue.put_nowait, chunk)
-            self._chunk_count += 1
-            if self._chunk_count % 25 == 0:
-                q = self._audio_queue
-                logger.debug(
-                    "send_audio: chunk %d queued (qsize=%d)",
-                    self._chunk_count,
-                    q.qsize() if q else -1,
-                )
 
     def stop(self) -> str:
         """Stop gracefully: drain buffered audio, commit, wait for events.

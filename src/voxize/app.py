@@ -55,6 +55,9 @@ class VoxizeApp(Gtk.Application):
         self._transcription_usage: dict[str, int] | None = None
         self._cleanup_usage: dict[str, int] | None = None
 
+        # Prompt detection (set in do_activate before window present)
+        self._prompt_cwd: str | None = None
+
         # Auto-close timer
         self._autoclose_source: int | None = None
 
@@ -546,11 +549,8 @@ class VoxizeApp(Gtk.Application):
         if keyval != Gdk.KEY_Escape:
             return False
         s = self._machine.state if self._machine else None
-        if s in (State.RECORDING, State.CLEANING):
+        if s in (State.INITIALIZING, State.RECORDING, State.CLEANING):
             self._machine.transition(State.CANCELLED)
-        elif s == State.INITIALIZING:
-            self._teardown_async()
-            win.close()
         elif s in (State.READY, State.ERROR, None):
             win.close()
         return True

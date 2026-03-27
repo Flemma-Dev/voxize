@@ -211,6 +211,7 @@ class OverlayWindow:
         file_uri = GLib.filename_to_uri(os.path.join(cwd, "WHISPER.txt"), None)
         # Link color must be set in Pango markup — GtkLabel ignores CSS for
         # link colors (it uses the accent color internally).
+        # NOTE: this matches --vox-fg-dim in style.css; update both if the palette changes.
         link_color = "#ffffff80"
         self._context_label.set_markup(
             f'<a href="{GLib.markup_escape_text(file_uri)}">'

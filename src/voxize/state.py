@@ -16,7 +16,7 @@ class State(Enum):
 
 
 _ALLOWED: dict[State, frozenset[State]] = {
-    State.INITIALIZING: frozenset({State.RECORDING, State.ERROR}),
+    State.INITIALIZING: frozenset({State.RECORDING, State.CANCELLED, State.ERROR}),
     State.RECORDING: frozenset({State.CLEANING, State.CANCELLED, State.ERROR}),
     State.CLEANING: frozenset({State.READY, State.CANCELLED, State.ERROR}),
     State.READY: frozenset(),
