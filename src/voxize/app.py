@@ -21,7 +21,7 @@ gi.require_version("Gdk", "4.0")
 gi.require_version("Gtk", "4.0")
 
 # gi.require_version() above is executable code; all subsequent imports trigger E402.
-from gi.repository import Gdk, GLib, Gtk  # noqa: E402
+from gi.repository import Gdk, Gio, GLib, Gtk  # noqa: E402
 
 from voxize.mock import MockCleanup, MockTranscription  # noqa: E402
 from voxize.state import State, StateMachine  # noqa: E402
@@ -35,7 +35,10 @@ _AUTOCLOSE = int(os.environ.get("VOXIZE_AUTOCLOSE", "30"))
 
 class VoxizeApp(Gtk.Application):
     def __init__(self) -> None:
-        super().__init__(application_id="dev.voxize.overlay")
+        super().__init__(
+            application_id="dev.flemma.Voxize",
+            flags=Gio.ApplicationFlags.NON_UNIQUE,
+        )
         self._machine: StateMachine | None = None
         self._ui: OverlayWindow | None = None
 
@@ -321,25 +324,27 @@ class VoxizeApp(Gtk.Application):
             self._release_lock()
             self._start_cleanup(mock_transcript)
         else:
+            # Release mic lock immediately — recording is done, let another
+            # instance start while we drain transcription and run cleanup.
+            self._release_lock()
+
             # Grab references and null them to prevent races with teardown
             audio = self._audio
             self._audio = None
             transcription = self._transcription
             self._transcription = None
-            lock = self._lock
-            self._lock = None
             session_dir = self._session_dir
 
             threading.Thread(
                 target=self._stop_providers,
-                args=(audio, transcription, lock, session_dir),
+                args=(audio, transcription, session_dir),
                 daemon=True,
                 name="voxize-stop",
             ).start()
 
         return False  # one-shot idle
 
-    def _stop_providers(self, audio, transcription, lock, session_dir) -> None:
+    def _stop_providers(self, audio, transcription, session_dir) -> None:
         """Background thread: stop real providers, save transcript, copy clipboard."""
         from gi.repository import GLib
 
@@ -363,13 +368,6 @@ class VoxizeApp(Gtk.Application):
         logger.debug(
             "_stop_providers: transcription stopped, transcript_len=%d", len(transcript)
         )
-
-        logger.debug("_stop_providers: releasing lock")
-        try:
-            if lock:
-                lock.release()
-        except Exception:
-            logger.exception("Failed to release lock")
 
         transcription_usage = transcription.usage if transcription else None
 
