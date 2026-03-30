@@ -12,7 +12,7 @@ gi.require_version("Gdk", "4.0")
 gi.require_version("Gtk", "4.0")
 
 # gi.require_version() above is executable code; all subsequent imports trigger E402.
-from gi.repository import Gdk, GLib, Gtk  # noqa: E402
+from gi.repository import Gdk, Gio, GLib, Gtk, Pango  # noqa: E402
 
 from voxize.state import State, StateMachine  # noqa: E402
 
@@ -32,6 +32,7 @@ class OverlayWindow:
         self._text_pulse_dim = False
         self._awaiting_cleanup = False
         self._destroyed = False
+        self._session_dir: str | None = None
         self._ws_ready = False
         self._speech_active = False
         self._had_first_text = False
@@ -74,6 +75,7 @@ class OverlayWindow:
         self._copy_btn = Gtk.Button.new_from_icon_name("edit-copy-symbolic")
         self._copy_btn.set_tooltip_text("Copy to clipboard")
         self._copy_btn.add_css_class("flat")
+        self._copy_btn.set_focusable(False)
         self._copy_btn.connect("clicked", self._on_copy)
         self._copy_btn.set_visible(False)
         header.pack_end(self._copy_btn)
@@ -83,6 +85,14 @@ class OverlayWindow:
         self._cancel_btn.connect("clicked", self._on_cancel)
         self._cancel_btn.set_visible(False)
         header.pack_end(self._cancel_btn)
+
+        self._folder_btn = Gtk.Button.new_from_icon_name("folder-symbolic")
+        self._folder_btn.set_tooltip_text("Open session folder")
+        self._folder_btn.add_css_class("flat")
+        self._folder_btn.add_css_class("dim-label")
+        self._folder_btn.set_focusable(False)
+        self._folder_btn.connect("clicked", self._on_open_folder)
+        header.pack_end(self._folder_btn)
 
         self._window.set_titlebar(header)
 
@@ -166,8 +176,6 @@ class OverlayWindow:
         self._degraded = False
 
         # Context bar — persistent prompt indicator at the bottom
-        from gi.repository import Pango
-
         self._context_label = Gtk.Label()
         self._context_label.add_css_class("context-bar")
         self._context_label.set_wrap(True)
@@ -440,7 +448,19 @@ class OverlayWindow:
         else:
             self._text_view.add_css_class("backdrop")
 
+    # ── Session directory ──
+
+    def set_session_dir(self, path: str) -> None:
+        """Store the session directory path for the folder button."""
+        self._session_dir = path
+
     # ── Button handlers ──
+
+    def _on_open_folder(self, _btn: Gtk.Button) -> None:
+        if self._session_dir:
+            Gio.AppInfo.launch_default_for_uri(
+                GLib.filename_to_uri(self._session_dir, None), None
+            )
 
     def _on_copy(self, _btn: Gtk.Button) -> None:
         buf = self._text_view.get_buffer()

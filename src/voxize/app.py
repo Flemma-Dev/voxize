@@ -24,6 +24,7 @@ gi.require_version("Gtk", "4.0")
 from gi.repository import Gdk, Gio, GLib, Gtk  # noqa: E402
 
 from voxize.mock import MockCleanup, MockTranscription  # noqa: E402
+from voxize.recover import write_recover_script  # noqa: E402
 from voxize.state import State, StateMachine  # noqa: E402
 from voxize.ui import OverlayWindow  # noqa: E402
 
@@ -151,6 +152,10 @@ class VoxizeApp(Gtk.Application):
             self._release_lock()
             self._machine.transition(State.ERROR, error=str(e))
             return False
+
+        # Session folder button + recovery script
+        self._ui.set_session_dir(self._session_dir)
+        write_recover_script(self._session_dir)
 
         # Set up session-level file logging
         fh = logging.FileHandler(os.path.join(self._session_dir, "debug.log"))
