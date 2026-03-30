@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import cairo
 import gi
 
 gi.require_version("Gdk", "4.0")
@@ -12,26 +11,6 @@ gi.require_version("Gtk", "4.0")
 from gi.repository import Gdk, GLib, Gtk  # noqa: E402
 
 from voxize.state import State, StateMachine  # noqa: E402
-
-
-def _draw_fade(
-    area: Gtk.DrawingArea, cr: cairo.Context, w: int, h: int, _data=None
-) -> None:
-    """Draw a gradient from window background (top) to transparent (bottom)."""
-    r, g, b, a = 30 / 255, 30 / 255, 30 / 255, 0.85
-    try:
-        # PyGObject returns (found, Gdk.RGBA) — not an output parameter
-        found, color = area.get_style_context().lookup_color("vox_bg")
-        if found:
-            r, g, b, a = color.red, color.green, color.blue, color.alpha
-    except Exception:
-        pass
-    pat = cairo.LinearGradient(0, 0, 0, h)
-    pat.add_color_stop_rgba(0, r, g, b, a)
-    pat.add_color_stop_rgba(1, r, g, b, 0.0)
-    cr.set_source(pat)
-    cr.rectangle(0, 0, w, h)
-    cr.fill()
 
 
 class OverlayWindow:
@@ -137,13 +116,13 @@ class OverlayWindow:
 
         overlay.set_child(self._scroll)
 
-        self._fade = Gtk.DrawingArea()
-        self._fade.set_content_height(32)
+        self._fade = Gtk.Box()
+        self._fade.add_css_class("fade-overlay")
+        self._fade.set_size_request(-1, 32)
         self._fade.set_valign(Gtk.Align.START)
         self._fade.set_halign(Gtk.Align.FILL)
         self._fade.set_hexpand(True)
         self._fade.set_can_target(False)  # click-through
-        self._fade.set_draw_func(_draw_fade)
         self._fade.set_visible(False)
         overlay.add_overlay(self._fade)
 

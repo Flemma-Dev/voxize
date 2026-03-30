@@ -41,7 +41,9 @@ class WavWriter:
             self._fd = open(self._path, "wb")  # noqa: SIM115
             # 44-byte RIFF/WAV header with placeholder sizes
             self._fd.write(b"RIFF")
-            self._fd.write(struct.pack("<I", 0xFFFFFFFF))  # RIFF chunk size (placeholder)
+            self._fd.write(
+                struct.pack("<I", 0xFFFFFFFF)
+            )  # RIFF chunk size (placeholder)
             self._fd.write(b"WAVE")
             # fmt sub-chunk (16 bytes)
             self._fd.write(b"fmt ")
