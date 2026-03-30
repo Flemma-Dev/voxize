@@ -63,6 +63,15 @@ class RealtimeTranscription:
         self._cancelled = False
         self._draining = False
 
+        # Drain tracking — deterministic completion without timeouts.
+        # _items_in_flight counts conversation items whose transcription
+        # has started (created) but not finished (completed).
+        # _drain_sentinel_received is set when the sentinel commit's
+        # commit_empty error arrives, proving the server has processed
+        # our real commit and all events before it.
+        self._items_in_flight = 0
+        self._drain_sentinel_received = False
+
         # Accumulated usage from completed transcription events
         self._usage_input_tokens = 0
         self._usage_output_tokens = 0
@@ -94,6 +103,8 @@ class RealtimeTranscription:
         self._draining = False
         self._transcript = ""
         self._current_item_id = None
+        self._items_in_flight = 0
+        self._drain_sentinel_received = False
 
         self._loop = asyncio.new_event_loop()
         self._audio_queue = asyncio.Queue()
@@ -214,20 +225,29 @@ class RealtimeTranscription:
                     except (TimeoutError, asyncio.CancelledError):
                         send_task.cancel()
 
-                    # Commit the audio buffer so the API processes any trailing speech
-                    try:  # noqa: SIM105
+                    # Commit the audio buffer so the API processes any trailing speech,
+                    # then send a sentinel commit to detect when the server has
+                    # finished processing. The sentinel is guaranteed to get
+                    # commit_empty (the real commit already flushed the buffer),
+                    # and its error response includes our event_id — giving us a
+                    # deterministic "all prior events delivered" signal without
+                    # arbitrary timeouts.
+                    try:
+                        await ws.send(json.dumps({"type": "input_audio_buffer.commit"}))
                         await ws.send(
                             json.dumps(
                                 {
                                     "type": "input_audio_buffer.commit",
+                                    "event_id": "drain_sentinel",
                                 }
                             )
                         )
                     except Exception:
                         pass
-                    # Wait for the receive loop to see a transcription.completed
-                    # event (set by _receive_loop when draining). This replaces
-                    # the old fixed 5s wait — typical completion is <500ms.
+                    # _drain_complete is set by the receive loop when BOTH:
+                    #   1. the sentinel's commit_empty arrives (all prior
+                    #      events have been delivered — WebSocket ordering)
+                    #   2. _items_in_flight == 0 (all items have completed)
                     try:  # noqa: SIM105
                         await asyncio.wait_for(self._drain_complete.wait(), timeout=5.0)
                     except (TimeoutError, asyncio.CancelledError):
@@ -265,7 +285,7 @@ class RealtimeTranscription:
 
     _VAD_CONFIG: ClassVar[dict[str, str]] = {
         "type": "semantic_vad",
-        "eagerness": "low",
+        "eagerness": "auto",
     }
 
     async def _configure(self, ws) -> None:
@@ -449,15 +469,28 @@ class RealtimeTranscription:
                         if not self._draining:
                             GLib.idle_add(self._on_delta, delta)
 
+                elif etype == "conversation.item.created":
+                    self._items_in_flight += 1
+                    logger.debug(
+                        "_recv: type=%s in_flight=%d",
+                        etype,
+                        self._items_in_flight,
+                    )
+
                 elif etype == "conversation.item.input_audio_transcription.completed":
                     item_id = event.get("item_id", "")
                     usage = event.get("usage")
                     if usage:
                         self._usage_input_tokens += usage.get("input_tokens", 0)
                         self._usage_output_tokens += usage.get("output_tokens", 0)
-                    logger.debug("_recv: type=%s item_id=%s", etype, item_id)
-                    if self._draining and self._drain_complete is not None:
-                        self._drain_complete.set()
+                    self._items_in_flight = max(0, self._items_in_flight - 1)
+                    logger.debug(
+                        "_recv: type=%s item_id=%s in_flight=%d",
+                        etype,
+                        item_id,
+                        self._items_in_flight,
+                    )
+                    self._check_drain_complete()
 
                 elif etype == "input_audio_buffer.speech_started":
                     logger.debug(
@@ -487,9 +520,17 @@ class RealtimeTranscription:
                     code = error.get("code", "")
                     msg = error.get("message", "Unknown API error")
                     logger.debug("_recv: type=%s code=%s", etype, code)
-                    # Non-fatal errors: empty buffer commit from VAD auto-processing
                     if code == "input_audio_buffer_commit_empty":
-                        logger.debug("Ignored non-fatal API error: %s", msg)
+                        ref_id = error.get("event_id", "")
+                        if ref_id == "drain_sentinel":
+                            self._drain_sentinel_received = True
+                            logger.debug(
+                                "_recv: drain sentinel received, in_flight=%d",
+                                self._items_in_flight,
+                            )
+                            self._check_drain_complete()
+                        else:
+                            logger.debug("Ignored non-fatal API error: %s", msg)
                     else:
                         logger.error("API error: %s", msg)
                         if self._on_error:
@@ -509,3 +550,14 @@ class RealtimeTranscription:
                 events_received,
                 len(self._transcript),
             )
+
+    def _check_drain_complete(self) -> None:
+        """Signal drain complete when sentinel received and no items in flight."""
+        if (
+            self._draining
+            and self._drain_sentinel_received
+            and self._items_in_flight <= 0
+            and self._drain_complete is not None
+        ):
+            logger.debug("_check_drain_complete: signalling drain complete")
+            self._drain_complete.set()
