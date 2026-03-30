@@ -4,7 +4,11 @@ These emit predefined text on timers, simulating the real OpenAI Realtime
 transcription deltas and GPT-5.4 Mini cleanup streaming.
 """
 
+import logging
+
 from gi.repository import GLib
+
+logger = logging.getLogger(__name__)
 
 _TRANSCRIPT = (
     "So I've been thinking about this project and how it should work. "
@@ -57,6 +61,11 @@ class MockTranscription:
         self._on_delta = None
 
     def start(self, on_delta, delay_ms: int = 1500) -> None:
+        logger.debug(
+            "MockTranscription.start: delay_ms=%d words=%d",
+            delay_ms,
+            len(_TRANSCRIPT.split()),
+        )
         self._on_delta = on_delta
         self._words = _TRANSCRIPT.split()
         self._pos = 0
@@ -65,22 +74,30 @@ class MockTranscription:
 
     def stop(self) -> str:
         """Stop and return the transcript emitted so far."""
+        logger.debug("MockTranscription.stop: pos=%d/%d", self._pos, len(self._words))
         if self._source is not None:
             GLib.source_remove(self._source)
             self._source = None
-        return " ".join(self._words[: self._pos])
+        transcript = " ".join(self._words[: self._pos])
+        logger.debug("MockTranscription.stop: transcript_len=%d", len(transcript))
+        return transcript
 
     def cancel(self) -> None:
+        logger.debug("MockTranscription.cancel: pos=%d/%d", self._pos, len(self._words))
         if self._source is not None:
             GLib.source_remove(self._source)
             self._source = None
 
     def _begin(self) -> bool:
+        logger.debug("MockTranscription._begin: starting word emission")
         self._source = GLib.timeout_add(220, self._tick)
         return False  # one-shot
 
     def _tick(self) -> bool:
         if self._pos >= len(self._words):
+            logger.debug(
+                "MockTranscription._tick: all %d words emitted", len(self._words)
+            )
             self._source = (
                 None  # GLib auto-removes; clear to prevent stale source_remove
             )
@@ -104,6 +121,12 @@ class MockCleanup:
     def start(
         self, transcript: str, on_delta, on_complete, delay_ms: int = 2500
     ) -> None:
+        logger.debug(
+            "MockCleanup.start: transcript_len=%d delay_ms=%d words=%d",
+            len(transcript),
+            delay_ms,
+            len(_CLEANED.split()),
+        )
         self._on_delta = on_delta
         self._on_complete = on_complete
         self._words = _CLEANED.split()
@@ -112,21 +135,28 @@ class MockCleanup:
         self._source = GLib.timeout_add(delay_ms, self._begin)
 
     def cancel(self) -> None:
+        logger.debug("MockCleanup.cancel: pos=%d/%d", self._pos, len(self._words))
         if self._source is not None:
             GLib.source_remove(self._source)
             self._source = None
 
     def _begin(self) -> bool:
+        logger.debug("MockCleanup._begin: starting token emission")
         self._source = GLib.timeout_add(60, self._tick)
         return False  # one-shot
 
     def _tick(self) -> bool:
         if self._pos >= len(self._words):
+            logger.debug("MockCleanup._tick: all %d words emitted", len(self._words))
             self._source = (
                 None  # GLib auto-removes; clear to prevent stale source_remove
             )
             if self._on_complete:
-                self._on_complete(" ".join(self._words))
+                cleaned = " ".join(self._words)
+                logger.debug(
+                    "MockCleanup._tick: complete, cleaned_len=%d", len(cleaned)
+                )
+                self._on_complete(cleaned)
             return False
         sep = " " if self._pos > 0 else ""
         self._on_delta(sep + self._words[self._pos])

@@ -120,6 +120,7 @@ class AudioCapture:
 
         Safe to call from a signal handler — only touches the file descriptor.
         """
+        logger.debug("finalize_wav: finalizing WAV header (stream still active)")
         self._wav.finalize()
 
     def stop(self) -> None:

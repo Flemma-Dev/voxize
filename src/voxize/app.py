@@ -206,28 +206,37 @@ class VoxizeApp(Gtk.Application):
 
     def _initialize_mock(self) -> bool:
         """Mock mode: skip mic/lock/WebSocket, use mock transcription."""
+        logger.debug("_initialize_mock: starting mock mode")
         self._machine.transition(State.RECORDING)
 
         # Schedule simulated error if requested
         error_ms = os.environ.get("VOXIZE_ERROR")
         if error_ms:
+            logger.debug("_initialize_mock: scheduling error after %sms", error_ms)
             GLib.timeout_add(int(error_ms), self._mock_error)
 
         # Schedule auto-stop if requested
         stop_ms = os.environ.get("VOXIZE_STOP")
         if stop_ms:
+            logger.debug("_initialize_mock: scheduling auto-stop after %sms", stop_ms)
             GLib.timeout_add(int(stop_ms), self._mock_stop)
 
         return False
 
     def _mock_error(self) -> bool:
         """Fire a simulated WebSocket error."""
+        logger.debug(
+            "_mock_error: state=%s", self._machine.state if self._machine else None
+        )
         if self._machine and self._machine.state == State.RECORDING:
             self._on_ws_error("Simulated: WebSocket connection lost")
         return False
 
     def _mock_stop(self) -> bool:
         """Fire a simulated stop."""
+        logger.debug(
+            "_mock_stop: state=%s", self._machine.state if self._machine else None
+        )
         if self._machine and self._machine.state == State.RECORDING:
             self._machine.transition(State.CLEANING)
         return False
@@ -263,6 +272,7 @@ class VoxizeApp(Gtk.Application):
         self._cancel_autoclose()
 
         if new == State.READY and _AUTOCLOSE > 0:
+            logger.debug("_on_state_change: scheduling autoclose in %ds", _AUTOCLOSE)
             self._autoclose_source = GLib.timeout_add_seconds(
                 _AUTOCLOSE, self._on_autoclose
             )
@@ -486,12 +496,14 @@ class VoxizeApp(Gtk.Application):
 
     def _release_lock(self) -> None:
         if self._lock:
+            logger.debug("_release_lock: releasing mic lock")
             self._lock.release()
             self._lock = None
 
     def _on_cleanup_done(self, cleaned: str) -> None:
         from voxize import clipboard
 
+        logger.debug("_on_cleanup_done: cleaned_len=%d", len(cleaned))
         self._cleanup_usage = self._cleanup.usage if self._cleanup else None
         self._cleanup = None
         if self._machine and self._machine.state == State.CLEANING:
@@ -508,6 +520,7 @@ class VoxizeApp(Gtk.Application):
 
     def _on_cleanup_error(self, message: str) -> None:
         """Cleanup failed — non-fatal. Raw transcript is already in clipboard."""
+        logger.error("_on_cleanup_error: %s", message)
         if self._machine and self._machine.state == State.CLEANING:
             self._cleanup = None
             self._machine.transition(State.ERROR, error=message)
@@ -522,6 +535,11 @@ class VoxizeApp(Gtk.Application):
 
     def _show_session_costs(self) -> None:
         """Compute dollar costs from provider usage and display in UI."""
+        logger.debug(
+            "_show_session_costs: transcription_usage=%s cleanup_usage=%s",
+            self._transcription_usage,
+            self._cleanup_usage,
+        )
         t_cost = None
         if self._transcription_usage:
             inp = self._transcription_usage["input_tokens"]
@@ -547,6 +565,7 @@ class VoxizeApp(Gtk.Application):
         if keyval != Gdk.KEY_Escape:
             return False
         s = self._machine.state if self._machine else None
+        logger.debug("_on_key: Escape pressed, state=%s", s)
         if s in (State.INITIALIZING, State.RECORDING, State.CLEANING):
             self._machine.transition(State.CANCELLED)
         elif s in (State.READY, State.ERROR, None):
@@ -565,6 +584,7 @@ class VoxizeApp(Gtk.Application):
 
     def _cancel_autoclose(self) -> None:
         if self._autoclose_source is not None:
+            logger.debug("_cancel_autoclose: removing pending autoclose timer")
             GLib.source_remove(self._autoclose_source)
             self._autoclose_source = None
 
@@ -602,7 +622,7 @@ class VoxizeApp(Gtk.Application):
 
             prune_sessions()
         except Exception:
-            pass
+            logger.debug("_on_close_request: prune_sessions failed", exc_info=True)
         # Remove session file log handler
         if self._log_handler:
             logging.getLogger("voxize").removeHandler(self._log_handler)

@@ -58,6 +58,9 @@ class StateMachine:
             raise InvalidTransition(f"{old.name} → {new_state.name} is not allowed")
         if new_state == State.ERROR:
             self.error_message = error
+            logger.info("transition: %s -> ERROR error=%s", old.name, error)
+        else:
+            logger.info("transition: %s -> %s", old.name, new_state.name)
         self._state = new_state
         for cb in self._listeners:
             cb(self, old, new_state)

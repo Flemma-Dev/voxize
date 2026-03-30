@@ -9,17 +9,28 @@ Example:
     VOXIZE_MOCK=1 VOXIZE_ERROR=3000 uv run python -m voxize
 """
 
+import logging
 import os
+
+logger = logging.getLogger(__name__)
 
 if not os.environ.get("VOXIZE_MOCK"):
     from voxize.checks import exit_on_failure
 
     exit_on_failure()
 
-from voxize.app import VoxizeApp
+from voxize.app import VoxizeApp  # noqa: E402 — must follow exit_on_failure()
 
 
 def main() -> None:
+    mock = bool(os.environ.get("VOXIZE_MOCK"))
+    logger.info("main: starting voxize mock=%s", mock)
+    if mock:
+        logger.debug(
+            "main: mock env VOXIZE_ERROR=%s VOXIZE_STOP=%s",
+            os.environ.get("VOXIZE_ERROR"),
+            os.environ.get("VOXIZE_STOP"),
+        )
     app = VoxizeApp()
     app.run([])
 
