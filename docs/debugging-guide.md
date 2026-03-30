@@ -72,13 +72,13 @@ The OpenAI Realtime Transcription API (`wss://api.openai.com/v1/realtime?intent=
   "input_audio_transcription": { "model": "gpt-4o-transcribe", "language": "en" },
   "turn_detection": {
     "type": "semantic_vad",
-    "eagerness": "low"
+    "eagerness": "high"
   },
   "input_audio_noise_reduction": { "type": "near_field" }
 }
 ```
 
-We use `semantic_vad` instead of the default `server_vad`. Semantic VAD detects speech boundaries based on semantic understanding of the user's utterance (whether they appear to have finished speaking), rather than silence-based timing. With `eagerness: "low"`, it waits for the user to finish speaking before chunking — ideal for dictation.
+We use `semantic_vad` instead of the default `server_vad`. Semantic VAD detects speech boundaries based on semantic understanding of the user's utterance (whether they appear to have finished speaking), rather than silence-based timing. With `eagerness: "high"`, it chunks earlier so segments stay short — the model truncates long segments.
 
 ### Why semantic_vad: the server_vad delivery pacing problem
 
@@ -206,7 +206,7 @@ _send_loop: chunk 50 sent (qsize=1)       ← almost caught up
 _send_loop: chunk 75 sent (qsize=0)       ← real-time flow
 ```
 
-If `qsize` drops to 0 within 1-2 seconds of WS connection, pacing may be too fast. If it takes 5-10 seconds, pacing is appropriate for the VAD.
+If `qsize` drops to 0 within 1-2 seconds of WS connection, the startup burst drained normally.
 
 ## 4. The `_draining` Flag (transcript delta suppression)
 
@@ -335,7 +335,7 @@ _recv: type=transcription_session.created
 _recv: type=transcription_session.updated
 send_audio: chunk 25 queued (qsize=12)          ← backlog visible
 _send_loop: chunk 25 sent (qsize=9)             ← draining
-_send_loop: chunk 50 sent (qsize=0)             ← caught up (may take longer at 1.1x)
+_send_loop: chunk 50 sent (qsize=0)             ← caught up
 
 # Real-time transcription
 _recv: type=input_audio_buffer.speech_started   ← VAD detected speech
@@ -397,27 +397,7 @@ print(repr(result.text))
 If batch returns full text but realtime missed it: **VAD pacing issue** (see Section 3).
 If batch also returns empty/wrong text: **audio quality issue** (mic level, noise, wrong device).
 
-## 8. The Buffer Drain Progress Bar
-
-A thin 3px `Gtk.ProgressBar` at the bottom of the window shows the startup backlog draining.
-
-### How it works
-
-1. When the send loop sends its first chunk, it captures `peak_backlog = qsize + 1`
-2. On each subsequent paced chunk (while `qsize > 0` and `peak_backlog > 5`), it posts `fraction = 1.0 - remaining / peak_backlog` to the GTK thread via `GLib.idle_add`
-3. When the queue empties after a drain, it posts `fraction = 1.0`
-4. The UI sets the progress bar fraction — orange fill grows left-to-right
-5. At fraction=1.0, the `.caught-up` CSS class switches to green
-6. After 600ms, the bar resets to fraction=0 (transparent)
-
-### Design decisions
-
-- **Always in layout, never show/hidden** — avoids layout shifts. The trough uses Adwaita's `.osd` class which has `background-color: transparent`. At fraction=0 the bar is invisible.
-- **One-shot** — A `_buffer_bar_done` flag prevents the bar from reappearing after the initial drain. Set on completion or on any state transition away from RECORDING.
-- **Threshold** — Only triggers when `peak_backlog > 5` chunks. Transient 1-2 chunk jitter during real-time flow is normal and ignored.
-- **Stale callback guard** — The `_buffer_bar_done` flag is set in `_on_state_change` for all transitions, preventing send loop callbacks that arrive during CLEANING from re-showing the bar.
-
-## 9. Signal Handling
+## 8. Signal Handling
 
 `GLib.unix_signal_add` for SIGTERM and SIGINT, registered in `do_activate`. The handler:
 1. Calls `audio.finalize_wav()` — fixes WAV header sizes without stopping the stream

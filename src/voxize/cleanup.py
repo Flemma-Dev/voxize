@@ -1,4 +1,4 @@
-"""Text cleanup via OpenAI GPT-5.4 Mini streaming.
+"""Text cleanup via OpenAI GPT-5.4 Mini streaming (Responses API).
 
 Runs a synchronous OpenAI SDK streaming call in a daemon thread. Delta
 tokens are posted to the GTK main thread via GLib.idle_add.
@@ -11,7 +11,9 @@ Lifecycle:
 
 from __future__ import annotations
 
+import json
 import logging
+import os
 import secrets
 import threading
 from collections.abc import Callable
@@ -79,9 +81,15 @@ _SYSTEM_PROMPT = (
 class Cleanup:
     """Streams transcript through GPT-5.4 Mini for cleanup."""
 
-    def __init__(self, api_key: str, prompt: str | None = None) -> None:
+    def __init__(
+        self,
+        api_key: str,
+        prompt: str | None = None,
+        session_dir: str | None = None,
+    ) -> None:
         self._api_key = api_key
         self._prompt = prompt
+        self._session_dir = session_dir
         self._thread: threading.Thread | None = None
         self._cancelled = False
         self._usage: dict[str, int] | None = None
@@ -131,12 +139,41 @@ class Cleanup:
         from gi.repository import GLib
         from openai import OpenAI
 
+        log_file = None
+        if self._session_dir:
+            try:
+                log_file = open(  # noqa: SIM115
+                    os.path.join(self._session_dir, "cleanup_events.jsonl"), "w"
+                )
+            except Exception:
+                logger.debug("Failed to open cleanup_events.jsonl", exc_info=True)
+
+        def _log_event(event) -> None:
+            if log_file:
+                try:
+                    log_file.write(
+                        event.model_dump_json()
+                        if hasattr(event, "model_dump_json")
+                        else json.dumps(event)
+                    )
+                    log_file.write("\n")
+                    log_file.flush()
+                except Exception:
+                    pass
+
         nonce = secrets.token_hex(8)
         system = _SYSTEM_PROMPT.replace("{nonce}", nonce)
         if self._prompt:
             system += (
-                "\n\nThe transcription agent was given the following additional context:\n\n"
-                f"<transcription_context>\n{self._prompt}\n</transcription_context>"
+                "\n\n<vocabulary-guidance>\n"
+                "The transcription may contain vocabulary errors for domain-specific terms. "
+                "A WHISPER.txt file from the user's project provided the following hints:\n\n"
+                f'"""\n{self._prompt}\n"""\n\n'
+                "When the transcription contains a word or phrase that is phonetically similar "
+                "to a term in the hints above, replace it with the correct term if the "
+                "surrounding context supports it. Only apply replacements when the intended "
+                "word is reasonably clear — do not force substitutions.\n"
+                "</vocabulary-guidance>"
             )
         user_message = (
             f"<transcription-{nonce}>\n{transcript}\n</transcription-{nonce}>"
@@ -147,35 +184,39 @@ class Cleanup:
 
         try:
             logger.debug("_run: calling API model=%s", _MODEL)
-            stream = client.chat.completions.create(
+            _log_event(
+                {"type": "request", "model": _MODEL, "transcript_len": len(transcript)}
+            )
+            stream = client.responses.create(
                 model=_MODEL,
-                messages=[
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": user_message},
-                ],
+                reasoning={"effort": "low"},
+                instructions=system,
+                input=[{"role": "user", "content": user_message}],
                 stream=True,
-                stream_options={"include_usage": True},
+                store=False,
             )
 
             first_delta = True
-            for chunk in stream:
+            for event in stream:
+                _log_event(event)
                 if self._cancelled:
                     logger.debug("_run: cancelled during streaming")
                     stream.close()
                     return
-                if chunk.usage:
-                    self._usage = {
-                        "input_tokens": chunk.usage.prompt_tokens,
-                        "output_tokens": chunk.usage.completion_tokens,
-                    }
-                choice = chunk.choices[0] if chunk.choices else None
-                if choice and choice.delta and choice.delta.content:
-                    text = choice.delta.content
+                if event.type == "response.output_text.delta":
+                    text = event.delta
                     accumulated.append(text)
                     if first_delta:
                         logger.debug("_run: first delta received, len=%d", len(text))
                         first_delta = False
                     GLib.idle_add(on_delta, text)
+                elif event.type == "response.completed":
+                    usage = event.response.usage
+                    if usage:
+                        self._usage = {
+                            "input_tokens": usage.input_tokens,
+                            "output_tokens": usage.output_tokens,
+                        }
 
             if not self._cancelled:
                 cleaned = "".join(accumulated)
@@ -186,9 +227,13 @@ class Cleanup:
             if not self._cancelled:
                 msg = f"Cleanup failed: {e}"
                 logger.error(msg)
+                _log_event({"type": "error", "message": msg})
                 if on_error:
                     GLib.idle_add(on_error, msg)
                 else:
                     # No error handler — still complete with whatever we have
                     cleaned = "".join(accumulated)
                     GLib.idle_add(on_complete, cleaned)
+        finally:
+            if log_file:
+                log_file.close()

@@ -177,9 +177,12 @@ class VoxizeApp(Gtk.Application):
         self._transcription = RealtimeTranscription(
             self._api_key,
             self._session_dir,
-            prompt=self._prompt,
         )
-        self._audio = AudioCapture(self._session_dir, self._transcription.send_audio)
+
+        self._audio = AudioCapture(
+            self._session_dir,
+            self._transcription.send_audio,
+        )
 
         # Start WebSocket (background thread) — connects while we record
         logger.debug("_initialize: starting transcription WS")
@@ -202,6 +205,9 @@ class VoxizeApp(Gtk.Application):
             self._release_lock()
             self._machine.transition(State.ERROR, error=f"Microphone: {e}")
             return False
+
+        # Wire level meter — UI polls level via timeout
+        self._ui.set_level_meter(self._audio.meter)
 
         logger.debug("_initialize: transitioning to RECORDING")
         self._machine.transition(State.RECORDING)
@@ -434,7 +440,9 @@ class VoxizeApp(Gtk.Application):
         else:
             from voxize.cleanup import Cleanup
 
-            self._cleanup = Cleanup(self._api_key, prompt=self._prompt)
+            self._cleanup = Cleanup(
+                self._api_key, prompt=self._prompt, session_dir=self._session_dir
+            )
             self._cleanup.start(
                 transcript=transcript,
                 on_delta=self._ui.append_text,

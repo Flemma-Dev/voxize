@@ -16,6 +16,13 @@ from gi.repository import Gdk, Gio, GLib, Gtk, Pango  # noqa: E402
 
 from voxize.state import State, StateMachine  # noqa: E402
 
+_VU_ZONE_CLASSES = ("vu-low", "vu-good", "vu-hot", "vu-clip")
+
+
+def _dbfs_to_fraction(dbfs: float) -> float:
+    """Map dBFS [-60, 0] to fraction [0, 1] for the level bar."""
+    return max(0.0, min(1.0, (dbfs + 60.0) / 60.0))
+
 
 class OverlayWindow:
     """Builds and manages the Voxize overlay UI widgets."""
@@ -36,6 +43,8 @@ class OverlayWindow:
         self._ws_ready = False
         self._speech_active = False
         self._had_first_text = False
+        self._meter_source: int | None = None
+        self._level_meter = None  # set via set_level_meter()
         self._build()
         machine.on_change(self._on_state_change)
 
@@ -102,6 +111,13 @@ class OverlayWindow:
         # Content area
         main = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         self._window.set_child(main)
+
+        # Level meter — thin OSD progress bar, visible only during RECORDING
+        self._meter_bar = Gtk.ProgressBar()
+        self._meter_bar.add_css_class("osd")
+        self._meter_bar.add_css_class("vu-meter")
+        self._meter_bar.set_visible(False)
+        main.append(self._meter_bar)
 
         # Spinner — shown while waiting for first text in a new phase
         self._spinner = Gtk.Spinner()
@@ -372,6 +388,7 @@ class OverlayWindow:
         self._dot.add_css_class(new.name.lower())
         self._stop_pulse()
         self._stop_text_pulse()
+        self._stop_meter()
 
         if new == State.RECORDING:
             self._status_label.set_text("Listening\u2026")
@@ -392,6 +409,7 @@ class OverlayWindow:
             self._spinner.set_spinning(True)
             self._start_timer()
             self._start_pulse()
+            self._start_meter()
             self.clear_text()
 
         elif new == State.CLEANING:
@@ -447,6 +465,47 @@ class OverlayWindow:
             self._text_view.remove_css_class("backdrop")
         else:
             self._text_view.add_css_class("backdrop")
+
+    # ── Level meter ──
+
+    def set_level_meter(self, meter) -> None:
+        """Store a reference to the LevelMeter for polling."""
+        self._level_meter = meter
+
+    def _start_meter(self) -> None:
+        self._stop_meter()
+        if self._level_meter is None:
+            return
+        self._meter_bar.set_visible(True)
+        self._meter_source = GLib.timeout_add(40, self._tick_meter)
+
+    def _stop_meter(self) -> None:
+        if self._meter_source is not None:
+            GLib.source_remove(self._meter_source)
+            self._meter_source = None
+        self._meter_bar.set_visible(False)
+        self._meter_bar.set_fraction(0)
+
+    def _tick_meter(self) -> bool:
+        meter = self._level_meter
+        if meter is None:
+            return True
+        frac = _dbfs_to_fraction(meter.level_dbfs)
+        self._meter_bar.set_fraction(frac)
+        # Swap CSS class for color zone
+        if frac > 0.95:
+            zone = "vu-clip"
+        elif frac > 0.80:
+            zone = "vu-hot"
+        elif frac > 0.33:
+            zone = "vu-good"
+        else:
+            zone = "vu-low"
+        for cls in _VU_ZONE_CLASSES:
+            if cls != zone:
+                self._meter_bar.remove_css_class(cls)
+        self._meter_bar.add_css_class(zone)
+        return True
 
     # ── Session directory ──
 
@@ -566,3 +625,4 @@ class OverlayWindow:
         self._stop_timer()
         self._stop_pulse()
         self._stop_text_pulse()
+        self._stop_meter()

@@ -39,11 +39,9 @@ class RealtimeTranscription:
         self,
         api_key: str,
         session_dir: str | None = None,
-        prompt: str | None = None,
     ) -> None:
         self._api_key = api_key
         self._session_dir = session_dir
-        self._prompt = prompt
         self._on_delta: Callable[[str], None] | None = None
         self._on_error: Callable[[str], None] | None = None
         self._on_ready: Callable[[], None] | None = None
@@ -285,7 +283,7 @@ class RealtimeTranscription:
 
     _VAD_CONFIG: ClassVar[dict[str, str]] = {
         "type": "semantic_vad",
-        "eagerness": "auto",
+        "eagerness": "high",
     }
 
     async def _configure(self, ws) -> None:
@@ -301,8 +299,8 @@ class RealtimeTranscription:
         semantic_vad detects speech boundaries based on semantic
         understanding of the user's utterance (whether they appear to
         have finished speaking), so it is not affected by delivery
-        timing.  With eagerness="low", it waits for the user to finish
-        speaking before chunking — ideal for dictation.
+        timing.  With eagerness="high", it chunks earlier so
+        segments stay short — the model truncates long segments.
 
         The startup burst (audio buffered while the WS was connecting)
         is sent at full speed by the send loop, flowing into the same
@@ -319,7 +317,6 @@ class RealtimeTranscription:
                         "input_audio_transcription": {
                             "model": _MODEL,
                             "language": "en",
-                            **({"prompt": self._prompt} if self._prompt else {}),
                         },
                         "turn_detection": self._VAD_CONFIG,
                         "input_audio_noise_reduction": {

@@ -39,12 +39,13 @@ Thread bridge: `GLib.idle_add` (worker -> GTK), `call_soon_threadsafe` (GTK -> a
 | `app.py` | GTK Application, orchestrates lifecycle, wires providers |
 | `ui.py` | Widgets, CSS loading, text area, header bar |
 | `state.py` | State machine (pure logic, no GTK) |
-| `audio.py` | `AudioCapture` (sounddevice) + `WavWriter` (placeholder-header crash-safe WAV) |
+| `audio.py` | `AudioCapture` (sounddevice) + `WavWriter` (crash-safe WAV) + `LevelMeter` (passive RMS) |
 | `transcribe.py` | OpenAI Realtime WebSocket client (`gpt-4o-transcribe`, `semantic_vad`) |
-| `cleanup.py` | GPT-5.4 Mini text cleanup (streaming chat completions) |
+| `cleanup.py` | GPT-5.4 Mini text cleanup (Responses API, streaming) |
 | `mock.py` | Mock providers for testing without API calls |
 | `prompt.py` | Focused-window detection, WHISPER.txt loading |
-| `clipboard.py` | `wl-copy` wrapper (stdin, best-effort) |
+| `recover.py` | Generates per-session `recover.sh` for batch re-transcription |
+| `clipboard.py` | Gdk.Clipboard (Wayland-native, best-effort) |
 | `storage.py` | XDG state directory, session rotation (keep 8) |
 | `lock.py` | Mic lock via `fcntl.flock()` |
 | `checks.py` | Startup dependency validation |
@@ -53,7 +54,7 @@ Thread bridge: `GLib.idle_add` (worker -> GTK), `call_soon_threadsafe` (GTK -> a
 ## Key technical decisions
 
 - **GPT-5.4 Mini for cleanup** (not Haiku) — OpenAI already a dependency, cheaper, no second vendor SDK.
-- **`semantic_vad` with `eagerness: "low"`** — server_vad was unreliable with startup audio bursts. Semantic VAD handles burst-to-realtime transitions correctly.
+- **`semantic_vad` with `eagerness: "high"`** — server_vad was unreliable with startup audio bursts. Semantic VAD handles burst-to-realtime transitions correctly. High eagerness keeps segments short — the model truncates long segments.
 - **Thread bridge over gbulb** — asyncio in daemon thread + `GLib.idle_add`. Simpler, no extra dependency.
 - **Audio starts before WS connects** — chunks queue in asyncio queue, burst-sent when WS ready.
 - **WAV placeholder header** — crash-safe; most tools read to EOF when size field is wrong.

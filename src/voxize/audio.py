@@ -8,9 +8,15 @@ WavWriter uses the placeholder-header technique: writes a 44-byte RIFF/WAV
 header at open time with data size set to 0xFFFFFFFF, appends + flushes PCM
 on each write, and fixes the two size fields on finalize. On crash, the file
 has an incorrect header but all PCM data is intact and recoverable.
+
+LevelMeter tracks per-chunk RMS for the UI level bar.  Audio is never
+modified — per-chunk gain manipulation was proven to degrade the
+Realtime API's transcription quality.
 """
 
+import array
 import logging
+import math
 import os
 import struct
 import threading
@@ -24,6 +30,33 @@ SAMPLE_RATE = 24_000
 CHANNELS = 1
 DTYPE = "int16"
 BLOCK_SIZE = 960  # 40ms at 24kHz — 1920 bytes per block
+
+
+def rms_dbfs(samples: array.array) -> float:
+    """Compute RMS level in dBFS from an int16 sample array."""
+    n = len(samples)
+    if n == 0:
+        return -96.0
+    sum_sq = sum(s * s for s in samples)
+    rms = math.sqrt(sum_sq / n)
+    if rms < 1:
+        return -96.0
+    return 20.0 * math.log10(rms / 32768.0)
+
+
+class LevelMeter:
+    """Passive audio level tracker — observes without modifying audio.
+
+    Exposes ``level_dbfs`` for the UI meter bar.
+    """
+
+    def __init__(self) -> None:
+        self.level_dbfs: float = -96.0
+
+    def update(self, pcm: bytes) -> None:
+        """Compute level from a chunk of int16 PCM."""
+        samples = array.array("h", pcm)
+        self.level_dbfs = rms_dbfs(samples)
 
 
 class WavWriter:
@@ -86,13 +119,24 @@ class WavWriter:
 class AudioCapture:
     """Captures microphone audio, writes WAV, and forwards PCM chunks."""
 
-    def __init__(self, session_dir: str, on_chunk: Callable[[bytes], None]) -> None:
+    def __init__(
+        self,
+        session_dir: str,
+        on_chunk: Callable[[bytes], None],
+    ) -> None:
         self._wav = WavWriter(os.path.join(session_dir, "audio.wav"))
         self._on_chunk = on_chunk
+        self._meter = LevelMeter()
         self._stream: sd.RawInputStream | None = None
+
+    @property
+    def meter(self) -> LevelMeter:
+        """Access the level meter for UI polling."""
+        return self._meter
 
     def _callback(self, indata, frames, time_info, status) -> None:
         pcm = bytes(indata)
+        self._meter.update(pcm)
         self._wav.write(pcm)
         self._on_chunk(pcm)
 

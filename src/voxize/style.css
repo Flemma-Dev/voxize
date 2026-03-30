@@ -57,6 +57,22 @@ headerbar {
     color: var(--vox-fg-dim);
 }
 
+/* Level meter — thin OSD progress bar at top of content area.
+ * .osd gives us border-radius:0, no shadows, 2px height.
+ * We bump to 3px and override --accent-bg-color for zone colours. */
+progressbar.vu-meter.osd {
+    --accent-bg-color: var(--vox-fg-dim);
+}
+
+progressbar.vu-meter.osd.horizontal > trough,
+progressbar.vu-meter.osd.horizontal > trough > progress {
+    min-height: 3px;
+}
+
+progressbar.vu-meter.vu-good { --accent-bg-color: var(--vox-green); }
+progressbar.vu-meter.vu-hot  { --accent-bg-color: var(--vox-amber); }
+progressbar.vu-meter.vu-clip { --accent-bg-color: var(--vox-red); }
+
 /* Fade overlay — CSS gradient replacing the former cairo DrawingArea */
 .fade-overlay {
     background-image: linear-gradient(

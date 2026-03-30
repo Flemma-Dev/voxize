@@ -79,7 +79,7 @@ nix develop /path/to/voxize --command bash -c "cd /path/to/voxize && uv run pyth
 
 ## How it works
 
-Voxize runs as a single Python process per invocation. A state machine drives the session through INITIALIZING, RECORDING, CLEANING, and READY. During recording, microphone audio streams over a WebSocket to the OpenAI Realtime API with semantic VAD (low eagerness, tuned for dictation). Transcription deltas appear live in the overlay. On stop, the accumulated transcript is sent to GPT-5.4 Mini for cleanup, which streams corrected text back into the same overlay. The final text is copied to the clipboard. See [docs/design.md](docs/design.md) for the original specification and [docs/journal.md](docs/journal.md) for implementation deviations and decisions made during development.
+Voxize runs as a single Python process per invocation. A state machine drives the session through INITIALIZING, RECORDING, CLEANING, and READY. During recording, microphone audio streams over a WebSocket to the OpenAI Realtime API with semantic VAD (high eagerness, for shorter segments). Transcription deltas appear live in the overlay. On stop, the accumulated transcript is sent to GPT-5.4 Mini for cleanup (via the Responses API), which streams corrected text back into the same overlay. The final text is copied to the clipboard. See [docs/design.md](docs/design.md) for the original specification and [docs/journal.md](docs/journal.md) for implementation deviations and decisions made during development.
 
 ## Architecture
 

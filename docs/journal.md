@@ -403,3 +403,33 @@ Total $0.0016 • Transcription $0.0012 · Cleanup $0.0004
 - **Cleanup (`cleanup.py`)** — The OpenAI Chat Completions API returns usage in the final streamed chunk when `stream_options={"include_usage": True}` is set. Reports `prompt_tokens` and `completion_tokens`. Priced at gpt-5.4-mini rates: $0.75/MTok input, $4.50/MTok output.
 
 **Wiring:** `app.py` stores usage dicts from both providers (`_transcription_usage` passed through `_start_cleanup`, `_cleanup_usage` captured in `_on_cleanup_done` before nulling the provider). `_show_session_costs()` computes dollar amounts and calls `ui.show_session_costs()`. If a cost is unavailable (API didn't return usage), that component shows `—` and is omitted from the total. In mock mode, no costs are shown (no real API calls).
+
+---
+
+## Session 9 — Prompt hallucination fix, VAD tuning, Responses API, level meter
+
+### Prompt removal from Realtime API
+
+The `prompt` field in the transcription session config (populated from WHISPER.txt) was the direct cause of hallucinations on quiet audio. When the audio signal was weak, the decoder echoed the prompt text — e.g., "Glossary: voxize" became the transcription of a 12.8-second speech segment. This is a documented `gpt-4o-transcribe` bug with multiple reports on the OpenAI Developer Community.
+
+**Fix:** Removed the `prompt` parameter from `_configure()` in `transcribe.py`. Vocabulary hints from WHISPER.txt are now consumed by the cleanup model instead, via a `<vocabulary-guidance>` block in the system prompt that instructs phonetic matching with context-aware substitution. The cleanup model can reason about whether "vocalize" should be "voxize" from surrounding words — something the Whisper decoder bias could never do.
+
+### VAD eagerness: "low" → "auto" → "high"
+
+The original `eagerness: "low"` waited for the user to finish speaking before chunking. This produced segments up to 15+ seconds, which the model truncated — the tail of long segments was silently dropped. Changing to `"high"` splits more aggressively, keeping segments short enough for reliable transcription.
+
+### Cleanup migrated to Responses API
+
+`cleanup.py` switched from Chat Completions (`client.chat.completions.create()`) to the Responses API (`client.responses.create()`). This enables `reasoning: {"effort": "low"}` — appropriate for text reformatting, not complex reasoning. The Responses API uses `instructions` + `input` instead of `messages`, and stream events are typed (`response.output_text.delta`, `response.completed`).
+
+Session-level event logging added: `cleanup_events.jsonl` logs raw SDK events (via `model_dump_json()`), matching the `ws_events.jsonl` pattern for the transcription WebSocket.
+
+### AGC retrospective (seven failed attempts)
+
+Per-chunk Python gain manipulation was attempted in seven variants (RMS-based adaptive, hard gate, smooth decay, fast/slow release, auto-calibrating, fixed gain, noise-floor calibration). All degraded the Realtime API's transcription quality by destroying natural audio dynamics that the server-side VAD and transcription model depend on. Full analysis in `docs/superpowers/specs/2026-03-30-quiet-mic-research-and-conclusions.md`.
+
+Audio is now passed through unchanged. A passive `LevelMeter` class tracks RMS levels for a thin OSD progress bar (3px, `GtkProgressBar` with `.osd` class) visible during recording. If audio-level amplification is needed in the future, PipeWire static gain (subprocess with `module-filter-chain`) is the recommended approach — it preserves natural dynamics perfectly.
+
+### Cleanup usage tracking update
+
+Cleanup usage is now obtained from the Responses API's `response.completed` event (`event.response.usage.input_tokens` / `.output_tokens`), replacing the Chat Completions pattern of reading `chunk.usage.prompt_tokens` / `.completion_tokens` from the final streamed chunk.
