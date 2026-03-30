@@ -347,7 +347,7 @@ class RealtimeTranscription:
 
             if startup > 0:
                 logger.debug(
-                    "_send_loop: burst sent %d startup chunks " "(%.1fs audio)",
+                    "_send_loop: burst sent %d startup chunks (%.1fs audio)",
                     startup,
                     startup * 0.04,
                 )
