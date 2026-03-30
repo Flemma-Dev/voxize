@@ -67,6 +67,13 @@ class OverlayWindow:
         self._action_btn.set_visible(False)
         header.pack_end(self._action_btn)
 
+        self._copy_btn = Gtk.Button.new_from_icon_name("edit-copy-symbolic")
+        self._copy_btn.set_tooltip_text("Copy to clipboard")
+        self._copy_btn.add_css_class("flat")
+        self._copy_btn.connect("clicked", self._on_copy)
+        self._copy_btn.set_visible(False)
+        header.pack_end(self._copy_btn)
+
         self._cancel_btn = Gtk.Button(label="Cancel")
         self._cancel_btn.add_css_class("destructive-action")
         self._cancel_btn.connect("clicked", self._on_cancel)
@@ -340,6 +347,7 @@ class OverlayWindow:
             self._timer_seconds = 0
             self._timer_label.set_text("00:00")
             self._timer_label.set_visible(True)
+            self._copy_btn.set_visible(False)
             self._cancel_btn.set_visible(True)
             self._action_btn.set_label("Stop")
             self._action_btn.remove_css_class("flat")
@@ -357,6 +365,7 @@ class OverlayWindow:
             self._status_label.set_text("Finishing\u2026")
             self._timer_label.set_visible(False)
             self._stop_timer()
+            self._copy_btn.set_visible(False)
             self._cancel_btn.set_visible(True)
             self._action_btn.set_visible(False)
             self._window.set_default_widget(None)
@@ -371,6 +380,7 @@ class OverlayWindow:
         elif new == State.READY:
             self._status_label.set_text("Ready")
             self._timer_label.set_visible(False)
+            self._copy_btn.set_visible(True)
             self._cancel_btn.set_visible(False)
             self._action_btn.set_label("Close")
             self._action_btn.add_css_class("flat")
@@ -403,6 +413,15 @@ class OverlayWindow:
             self._text_view.add_css_class("backdrop")
 
     # ── Button handlers ──
+
+    def _on_copy(self, _btn: Gtk.Button) -> None:
+        buf = self._text_view.get_buffer()
+        start, end = buf.get_bounds()
+        text = buf.get_text(start, end, False)
+        if text:
+            display = Gdk.Display.get_default()
+            if display:
+                display.get_clipboard().set(text)
 
     def _on_cancel(self, _btn: Gtk.Button) -> None:
         if self._machine.state in (State.RECORDING, State.CLEANING):
