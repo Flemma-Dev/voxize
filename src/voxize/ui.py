@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import logging
+
 import gi
+
+logger = logging.getLogger(__name__)
 
 gi.require_version("Gdk", "4.0")
 gi.require_version("Gtk", "4.0")
@@ -178,12 +182,20 @@ class OverlayWindow:
         """Set max text area height based on screen geometry (1/4 screen)."""
         display = Gdk.Display.get_default()
         if not display:
+            logger.debug("setup_max_height: no display available")
             return
         monitors = display.get_monitors()
         if monitors.get_n_items() == 0:
+            logger.debug("setup_max_height: no monitors found")
             return
         geom = monitors.get_item(0).get_geometry()
         max_h = geom.height // 4 - 50  # reserve ~50px for header
+        logger.debug(
+            "setup_max_height: screen=%dx%d max_content_height=%d",
+            geom.width,
+            geom.height,
+            max(100, max_h),
+        )
         self._scroll.set_max_content_height(max(100, max_h))
 
     # ── Context statusbar ──
@@ -192,6 +204,7 @@ class OverlayWindow:
         """Show a persistent context bar with the active WHISPER.txt prompt."""
         if self._destroyed:
             return
+        logger.debug("show_prompt_context: cwd=%s prompt_len=%d", cwd, len(prompt))
         import os
 
         file_uri = GLib.filename_to_uri(os.path.join(cwd, "WHISPER.txt"), None)
@@ -212,6 +225,11 @@ class OverlayWindow:
         """Show session costs in the context bar (plain text)."""
         if self._destroyed:
             return
+        logger.debug(
+            "show_session_costs: transcription=$%s cleanup=$%s",
+            f"{transcription_cost:.4f}" if transcription_cost is not None else "n/a",
+            f"{cleanup_cost:.4f}" if cleanup_cost is not None else "n/a",
+        )
         t_str = (
             f"${transcription_cost:.4f}" if transcription_cost is not None else "\u2014"
         )
@@ -232,6 +250,7 @@ class OverlayWindow:
         """WebSocket session configured — show 'Listening...' status."""
         if self._destroyed or self._machine.state != State.RECORDING:
             return
+        logger.debug("on_ws_ready: WebSocket session configured")
         self._ws_ready = True
         if not self._had_first_text:
             self._status_label.set_text("Listening\u2026")
@@ -240,6 +259,7 @@ class OverlayWindow:
         """VAD speech_started/speech_stopped — tie dot pulse to speech."""
         if self._destroyed or self._machine.state != State.RECORDING:
             return
+        logger.debug("on_speech: active=%s", active)
         self._speech_active = active
         if active:
             # Bright dot during speech (remove dim, restart pulse)
@@ -252,6 +272,7 @@ class OverlayWindow:
         if self._destroyed:
             return
         if not self._had_first_text:
+            logger.debug("append_text: first text arrived, len=%d", len(text))
             self._had_first_text = True
             if self._machine.state == State.RECORDING:
                 self._status_label.set_text("Recording")
@@ -260,6 +281,7 @@ class OverlayWindow:
             self._spinner.set_visible(False)
         if self._awaiting_cleanup:
             # First cleanup token — swap out the pulsing transcript
+            logger.debug("append_text: first cleanup token, swapping transcript")
             self._awaiting_cleanup = False
             self._stop_text_pulse()
             self.clear_text()
@@ -285,6 +307,7 @@ class OverlayWindow:
         """
         if self._destroyed:
             return
+        logger.debug("show_transcript_for_cleanup: transcript_len=%d", len(transcript))
         self._status_label.set_text("Cleaning up\u2026")
         if self._spinner.get_spinning():
             self._spinner.set_spinning(False)
@@ -306,6 +329,7 @@ class OverlayWindow:
         """
         if self._destroyed:
             return
+        logger.debug("show_error_banner: message=%s", message)
         self._error_label.set_text(message)
         self._error_bar.set_visible(True)
         self._stop_pulse()
@@ -327,11 +351,13 @@ class OverlayWindow:
         """Show fade gradient only when content overflows the viewport."""
         should_show = vadj.get_upper() > vadj.get_page_size() + 1
         if self._fade.get_visible() != should_show:
+            logger.debug("_on_vadj_changed: fade_visible=%s", should_show)
             self._fade.set_visible(should_show)
 
     # ── State change handler ──
 
     def _on_state_change(self, machine: StateMachine, old: State, new: State) -> None:
+        logger.debug("_on_state_change: %s -> %s", old.name, new.name)
         # Update dot color class
         for cls in ("recording", "cleaning", "ready", "error", "cancelled"):
             self._dot.remove_css_class(cls)
@@ -407,7 +433,9 @@ class OverlayWindow:
             self.show_error_banner(machine.error_message)
 
     def _on_active_changed(self, window, _pspec) -> None:
-        if window.is_active():
+        active = window.is_active()
+        logger.debug("_on_active_changed: active=%s", active)
+        if active:
             self._text_view.remove_css_class("backdrop")
         else:
             self._text_view.add_css_class("backdrop")
@@ -419,16 +447,23 @@ class OverlayWindow:
         start, end = buf.get_bounds()
         text = buf.get_text(start, end, False)
         if text:
+            logger.debug("_on_copy: text_len=%d", len(text))
             display = Gdk.Display.get_default()
             if display:
                 display.get_clipboard().set(text)
+            else:
+                logger.debug("_on_copy: no display available")
+        else:
+            logger.debug("_on_copy: no text to copy")
 
     def _on_cancel(self, _btn: Gtk.Button) -> None:
+        logger.debug("_on_cancel: state=%s", self._machine.state.name)
         if self._machine.state in (State.RECORDING, State.CLEANING):
             self._machine.transition(State.CANCELLED)
 
     def _on_action(self, _btn: Gtk.Button) -> None:
         s = self._machine.state
+        logger.debug("_on_action: state=%s degraded=%s", s.name, self._degraded)
         if s == State.RECORDING:
             if self._degraded:
                 self._machine.transition(State.CANCELLED)
@@ -506,6 +541,7 @@ class OverlayWindow:
     # ── Cleanup ──
 
     def destroy(self) -> None:
+        logger.debug("destroy: tearing down UI")
         self._destroyed = True
         self._stop_timer()
         self._stop_pulse()
