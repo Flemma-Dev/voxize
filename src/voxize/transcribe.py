@@ -54,6 +54,7 @@ class RealtimeTranscription:
         self._ws = None
         self._audio_queue: asyncio.Queue | None = None
         self._done: asyncio.Event | None = None
+        self._drain_complete: asyncio.Event | None = None
         self._log_file = None
 
         self._transcript = ""
@@ -97,6 +98,7 @@ class RealtimeTranscription:
         self._loop = asyncio.new_event_loop()
         self._audio_queue = asyncio.Queue()
         self._done = asyncio.Event()
+        self._drain_complete = asyncio.Event()
 
         logger.debug("start: launching WS thread")
         self._thread = threading.Thread(target=self._run, daemon=True, name="voxize-ws")
@@ -223,9 +225,11 @@ class RealtimeTranscription:
                         )
                     except Exception:
                         pass
-                    # Wait for final delta/completed events to drain
+                    # Wait for the receive loop to see a transcription.completed
+                    # event (set by _receive_loop when draining). This replaces
+                    # the old fixed 5s wait — typical completion is <500ms.
                     try:  # noqa: SIM105
-                        await asyncio.wait_for(asyncio.shield(recv_task), timeout=5.0)
+                        await asyncio.wait_for(self._drain_complete.wait(), timeout=5.0)
                     except (TimeoutError, asyncio.CancelledError):
                         pass
                 else:
@@ -452,6 +456,8 @@ class RealtimeTranscription:
                         self._usage_input_tokens += usage.get("input_tokens", 0)
                         self._usage_output_tokens += usage.get("output_tokens", 0)
                     logger.debug("_recv: type=%s item_id=%s", etype, item_id)
+                    if self._draining and self._drain_complete is not None:
+                        self._drain_complete.set()
 
                 elif etype == "input_audio_buffer.speech_started":
                     logger.debug(
