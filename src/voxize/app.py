@@ -65,6 +65,9 @@ class VoxizeApp(Gtk.Application):
         # Auto-close timer
         self._autoclose_source: int | None = None
 
+        # WS ready timeout
+        self._ws_ready_timeout: int | None = None
+
         # Session-level file log handler
         self._log_handler = None
 
@@ -184,19 +187,35 @@ class VoxizeApp(Gtk.Application):
             self._transcription.send_audio,
         )
 
-        # Start WebSocket (background thread) — connects while we record
+        # Start WebSocket (background thread) — audio capture starts when
+        # the WS session is configured (_on_ws_ready callback).
         logger.debug("_initialize: starting transcription WS")
         self._transcription.start(
             on_delta=self._ui.append_text,
             on_error=self._on_ws_error,
-            on_ready=self._ui.on_ws_ready,
+            on_ready=self._on_ws_ready,
             on_speech=self._ui.on_speech,
         )
 
-        # Start audio capture — transition to RECORDING immediately (fast startup).
-        # Audio chunks queue in the asyncio queue until WS is connected.
-        # If WS fails later, _on_ws_error handles RECORDING state (degraded mode).
-        logger.debug("_initialize: starting audio capture")
+        # Timeout: if WS connects but session.updated never arrives,
+        # transition to ERROR rather than leaving the user stuck.
+        self._ws_ready_timeout = GLib.timeout_add_seconds(10, self._on_ws_ready_timeout)
+
+        return False  # one-shot idle
+
+    def _on_ws_ready(self) -> None:
+        """WS session configured — start audio capture, transition to RECORDING."""
+        if not self._machine or self._machine.state != State.INITIALIZING:
+            logger.debug(
+                "_on_ws_ready: ignoring, state=%s",
+                self._machine.state.name if self._machine else None,
+            )
+            return
+        logger.debug("_on_ws_ready: starting audio capture")
+        if self._ws_ready_timeout is not None:
+            GLib.source_remove(self._ws_ready_timeout)
+            self._ws_ready_timeout = None
+
         try:
             self._audio.start()
         except Exception as e:
@@ -204,14 +223,22 @@ class VoxizeApp(Gtk.Application):
             self._transcription = None
             self._release_lock()
             self._machine.transition(State.ERROR, error=f"Microphone: {e}")
-            return False
+            return
 
-        # Wire level meter — UI polls level via timeout
         self._ui.set_level_meter(self._audio.meter)
-
-        logger.debug("_initialize: transitioning to RECORDING")
+        logger.debug("_on_ws_ready: transitioning to RECORDING")
         self._machine.transition(State.RECORDING)
-        return False  # one-shot idle
+
+    def _on_ws_ready_timeout(self) -> bool:
+        """WS session.updated never arrived — give up."""
+        self._ws_ready_timeout = None
+        if self._machine and self._machine.state == State.INITIALIZING:
+            logger.error("_on_ws_ready_timeout: WS session not configured within 10s")
+            self._teardown_async()
+            self._machine.transition(
+                State.ERROR, error="Transcription service did not respond"
+            )
+        return GLib.SOURCE_REMOVE
 
     # ── Mock initialization ──
 
@@ -279,8 +306,11 @@ class VoxizeApp(Gtk.Application):
 
     def _on_state_change(self, machine: StateMachine, old: State, new: State) -> None:
         logger.debug("_on_state_change: %s -> %s", old.name, new.name)
-        # Cancel any pending auto-close when leaving READY
+        # Cancel pending timers
         self._cancel_autoclose()
+        if self._ws_ready_timeout is not None:
+            GLib.source_remove(self._ws_ready_timeout)
+            self._ws_ready_timeout = None
 
         if new == State.READY and _AUTOCLOSE > 0:
             logger.debug("_on_state_change: scheduling autoclose in %ds", _AUTOCLOSE)

@@ -21,7 +21,6 @@ import logging
 import os
 import threading
 from collections.abc import Callable
-from typing import ClassVar
 
 import websockets
 
@@ -281,32 +280,12 @@ class RealtimeTranscription:
                 self._log_file.close()
                 self._log_file = None
 
-    _VAD_CONFIG: ClassVar[dict[str, str]] = {
-        "type": "semantic_vad",
-        "eagerness": "high",
-    }
-
     async def _configure(self, ws) -> None:
-        """Configure session with semantic VAD enabled from the start.
+        """Configure session with server-side VAD.
 
-        We use semantic_vad instead of server_vad to avoid the critical
-        pacing sensitivity problem.  server_vad relies on silence-based
-        timing to detect speech boundaries, and its internal clock loses
-        alignment when audio is delivered faster than real-time (the
-        startup burst).  This causes truncated segments, missed speech,
-        or session-wide VAD corruption.
-
-        semantic_vad detects speech boundaries based on semantic
-        understanding of the user's utterance (whether they appear to
-        have finished speaking), so it is not affected by delivery
-        timing.  With eagerness="high", it chunks earlier so
-        segments stay short — the model truncates long segments.
-
-        The startup burst (audio buffered while the WS was connecting)
-        is sent at full speed by the send loop, flowing into the same
-        input audio buffer as the real-time audio that follows.  No
-        manual commit, no VAD disable/re-enable dance, no artificial
-        boundary between buffered and live audio.
+        Audio capture starts only after this session is configured
+        (on_ready callback), so there is no startup burst — server_vad
+        receives audio at real-time pace from the first chunk.
         """
         await ws.send(
             json.dumps(
@@ -318,7 +297,12 @@ class RealtimeTranscription:
                             "model": _MODEL,
                             "language": "en",
                         },
-                        "turn_detection": self._VAD_CONFIG,
+                        "turn_detection": {
+                            "type": "server_vad",
+                            "threshold": 0.5,
+                            "prefix_padding_ms": 300,
+                            "silence_duration_ms": 500,
+                        },
                         "input_audio_noise_reduction": {
                             "type": "near_field",
                         },
@@ -330,52 +314,13 @@ class RealtimeTranscription:
     async def _send_loop(self, ws) -> None:
         """Send audio chunks to the WebSocket.
 
-        Semantic VAD is enabled from the start (set in _configure), so
-        all audio — both the startup burst and real-time chunks — flows
-        into the same input audio buffer as one continuous stream.
-
-        The startup burst (buffered while the WS was connecting) is sent
-        at full speed.  There is no manual commit and no VAD mode switch.
-        The semantic VAD detects speech boundaries based on content, not
-        delivery timing, so the burst does not corrupt its state.
-
-        After the burst drains, chunks flow at mic-capture rate.
+        Audio capture starts only after the WS session is configured,
+        so there is no startup backlog.  Chunks arrive at mic-capture
+        rate (~40ms intervals).
         """
         chunks_sent = 0
         exit_reason = "unknown"
         try:
-            # ── Flush startup backlog at full speed ──
-            startup = 0
-            while not self._audio_queue.empty():
-                try:
-                    chunk = self._audio_queue.get_nowait()
-                except asyncio.QueueEmpty:
-                    break
-                if chunk is None:
-                    exit_reason = "sentinel"
-                    return
-                audio_b64 = base64.b64encode(chunk).decode("ascii")
-                await ws.send(
-                    json.dumps(
-                        {
-                            "type": "input_audio_buffer.append",
-                            "audio": audio_b64,
-                        }
-                    )
-                )
-                startup += 1
-                chunks_sent += 1
-
-            if startup > 0:
-                logger.debug(
-                    "_send_loop: burst sent %d startup chunks (%.1fs audio)",
-                    startup,
-                    startup * 0.04,
-                )
-            else:
-                logger.debug("_send_loop: no startup backlog")
-
-            # ── Continuous flow (startup + real-time, same VAD) ──
             while True:
                 try:
                     chunk = await asyncio.wait_for(

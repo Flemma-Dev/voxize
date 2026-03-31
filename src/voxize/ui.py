@@ -40,7 +40,6 @@ class OverlayWindow:
         self._awaiting_cleanup = False
         self._destroyed = False
         self._session_dir: str | None = None
-        self._ws_ready = False
         self._speech_active = False
         self._had_first_text = False
         self._meter_source: int | None = None
@@ -270,15 +269,6 @@ class OverlayWindow:
 
     # ── Text operations ──
 
-    def on_ws_ready(self) -> None:
-        """WebSocket session configured — show 'Listening...' status."""
-        if self._destroyed or self._machine.state != State.RECORDING:
-            return
-        logger.debug("on_ws_ready: WebSocket session configured")
-        self._ws_ready = True
-        if not self._had_first_text:
-            self._status_label.set_text("Listening\u2026")
-
     def on_speech(self, active: bool) -> None:
         """VAD speech_started/speech_stopped — tie dot pulse to speech."""
         if self._destroyed or self._machine.state != State.RECORDING:
@@ -286,10 +276,8 @@ class OverlayWindow:
         logger.debug("on_speech: active=%s", active)
         self._speech_active = active
         if active:
-            # Bright dot during speech (remove dim, restart pulse)
             self._dot.remove_css_class("dim")
         else:
-            # Dim dot when speech stops — pulse resumes from dim
             self._dot.add_css_class("dim")
 
     def append_text(self, text: str) -> None:
@@ -392,7 +380,6 @@ class OverlayWindow:
 
         if new == State.RECORDING:
             self._status_label.set_text("Listening\u2026")
-            self._ws_ready = False
             self._speech_active = False
             self._had_first_text = False
             self._timer_seconds = 0
@@ -583,11 +570,9 @@ class OverlayWindow:
 
     def _tick_pulse(self) -> bool:
         if self._speech_active:
-            # During active speech, keep dot bright
             self._dot.remove_css_class("dim")
             self._pulse_dim = False
         else:
-            # Between speech / waiting — gentle pulse
             self._pulse_dim = not self._pulse_dim
             if self._pulse_dim:
                 self._dot.add_css_class("dim")
