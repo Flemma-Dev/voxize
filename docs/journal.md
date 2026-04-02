@@ -433,3 +433,96 @@ Audio is now passed through unchanged. A passive `LevelMeter` class tracks RMS l
 ### Cleanup usage tracking update
 
 Cleanup usage is now obtained from the Responses API's `response.completed` event (`event.response.usage.input_tokens` / `.output_tokens`), replacing the Chat Completions pattern of reading `chunk.usage.prompt_tokens` / `.completion_tokens` from the final streamed chunk.
+
+---
+
+## Session 10 — Three-phase transcription (live preview + batch + cleanup)
+
+### The realtime VAD problem (unsolvable)
+
+Extended investigation of the realtime transcription API's VAD modes confirmed that neither option is reliable for continuous dictation:
+
+- **`server_vad`** — over-segments continuous speech at brief pauses (silence_duration_ms=500). Words at segment boundaries are dropped because the transcription model only sees each segment in isolation. A 82-second monologue was split into 17 segments, with multiple phrases lost. The model also hallucinated at boundaries (e.g., "put a cross in this" instead of "put across in this").
+
+- **`semantic_vad`** — under-segments, producing 15+ second segments that the model silently truncates. The tail of long segments is dropped. With `eagerness: "auto"`, 16-second segments lost entire sentences. With `eagerness: "high"`, it was better but still unreliable.
+
+Across 5 analyzed sessions with both VAD modes, every one had missing words, phrases, or entire sentences. The audio pipeline was perfect in all cases (all chunks sent, zero queue backlog) — the problem is entirely in how the API segments and transcribes.
+
+**Key insight:** batch transcription (`POST /audio/transcriptions`) processes the entire WAV in one pass and produces accurate results every time. The existing `recover.sh` script demonstrates this — recovered transcripts consistently match the ground truth. The realtime API was never going to match this quality because it must segment speech on-the-fly.
+
+### Three-phase architecture
+
+Split transcription into three phases:
+
+1. **Live preview** (RECORDING) — `gpt-4o-mini-transcribe` via realtime WS. Cheap, throwaway, gives visual feedback while speaking. Uses `server_vad` with fast startup (audio before WS, burst drains at full speed). If burst corrupts server_vad and the preview is garbled, that's acceptable.
+
+2. **Batch transcription** (TRANSCRIBING) — `gpt-4o-transcribe` via `POST /audio/transcriptions` with streaming. Accurate, authoritative. Produces the source-of-truth transcript.
+
+3. **Cleanup** (CLEANING) — `gpt-5.4-nano` text reformatting. The batch transcript is already clean, so cleanup is light touchup (filler removal, paragraph formatting, emphasis). Nano handles the explicit rules-based prompt well and is 73% cheaper than mini.
+
+### State machine: TRANSCRIBING added
+
+```
+INITIALIZING -> RECORDING -> TRANSCRIBING -> CLEANING -> READY
+```
+
+`TRANSCRIBING` is a new state between RECORDING and CLEANING. No ERROR transition from RECORDING (WS failure is non-fatal). Batch/cleanup failures transition to READY (not ERROR) because the WAV + recover.sh are still usable.
+
+### Fast startup restored
+
+The `fd21f9a` commit had deferred audio capture until WS ready to avoid burst-corrupting server_vad. With the live preview being throwaway, this concern is irrelevant. Audio capture starts immediately in `_initialize`, chunks queue while WS connects (~0.7-1.2s), burst drains at full speed. The user speaks immediately — no waiting for WS.
+
+### WS failure is non-fatal
+
+Previously, WS failure during RECORDING transitioned to ERROR (terminal). Now it shows an error banner but audio capture continues. The user can still speak, stop, and get batch transcription. Only mic failure is fatal.
+
+### Stop sequence (no drain)
+
+The old architecture spent 5-15 seconds draining the WS (send remaining chunks, commit, wait for trailing transcription events). All of this was removed — the live transcript is throwaway, so `stop()` just cancels the WS immediately. The user hits Stop and the batch phase starts within milliseconds.
+
+### Batch `prompt` hallucination (same bug as realtime)
+
+Initially, the batch API was called with `prompt` from WHISPER.txt for vocabulary guidance. First test: the batch returned only "Voxize" (the prompt text) for 29.5 seconds of audio. The `input_token_details` showed `text_tokens: 5` confirming the prompt was injected. This is the same `gpt-4o-transcribe` hallucination bug documented in Session 9 — the decoder echoes the prompt instead of transcribing.
+
+**Fix:** Removed `prompt` from the batch API call. Vocabulary guidance stays in the cleanup model's `<vocabulary-guidance>` block where it works correctly (the cleanup model reasons about context, unlike the Whisper decoder bias).
+
+### Clipboard strategy
+
+No junk in the clipboard. The old architecture copied the raw realtime transcript as a "safety net" — but it was often garbled. New strategy:
+
+| Event | Clipboard |
+|-------|-----------|
+| Live preview text | Nothing |
+| Batch transcription completes | Write batch transcript |
+| Cleanup completes | Overwrite with cleaned text |
+
+### Cost comparison
+
+| Phase | Old | New |
+|-------|-----|-----|
+| Realtime | $0.0030/min (gpt-4o-transcribe) | $0.0015/min (gpt-4o-mini-transcribe) |
+| Batch | — | $0.0030/min (gpt-4o-transcribe) |
+| Cleanup | $0.0015/min (gpt-5.4-mini) | $0.0004/min (gpt-5.4-nano) |
+| **Total** | **$0.0045/min** | **$0.0049/min** |
+
+~9% cost increase for dramatically better accuracy.
+
+### New module: `batch.py`
+
+Mirrors the `cleanup.py` pattern: synchronous OpenAI SDK streaming call in a daemon thread (`voxize-batch`), deltas posted to GTK thread via `GLib.idle_add`, events logged to `batch_events.jsonl`.
+
+### Session files updated
+
+New files per session: `live_transcript.txt` (throwaway preview, saved for debugging), `batch_events.jsonl` (batch API events). The `transcription.txt` now contains the batch result (not the realtime preview).
+
+### UI: live preview pulse during batch
+
+When the user hits Stop, the live preview text stays visible and pulses while the batch API streams. The first batch delta swaps it out — same pattern as the transcript-to-cleanup swap. Status label progression: "Recording" → "Listening..." (first text) → "Transcribing..." → "Cleaning up..." → "Ready".
+
+### `transcribe.py` simplified
+
+Removed all drain machinery: `_draining` flag, `_drain_complete` event, `_items_in_flight` counter, `_drain_sentinel_received`, `_check_drain_complete()`, sentinel commit logic. `stop()` is now just `cancel()`. The transcript is still accumulated for `live_transcript.txt` but is not used by the pipeline.
+
+### Review findings (four passes)
+
+Four rounds of code review caught: MockCleanup missing `usage` property (crash in mock mode), `_batch_transcript` not initialized, file handle leak in batch.py, CSS class leak (`transcribing`/`initializing` not in removal list), missing `.status-dot.transcribing` CSS rule, stale WS delta race (fixed with state check in `_awaiting_batch` swap), hardcoded WAV byte rate (replaced with audio.py constants), `_initialize` state guard (cancel-during-init race).

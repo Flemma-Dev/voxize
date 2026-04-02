@@ -4,7 +4,11 @@ This document captures hard-won debugging lessons from the initial implementatio
 
 ## 1. Architecture Overview (for debugging context)
 
-Voxize has **three threads** that must cooperate:
+Voxize uses **three-phase transcription**: a throwaway live preview (realtime WS), an authoritative batch transcription (HTTP POST), and text cleanup. The live preview exists only for visual feedback — the batch pass on the full WAV is the source of truth.
+
+**State machine:** `INITIALIZING → RECORDING → TRANSCRIBING → CLEANING → READY` (+ CANCELLED, ERROR)
+
+**Threads during recording:**
 
 ```
 GTK main thread          sounddevice callback thread       asyncio thread (voxize-ws)
@@ -12,47 +16,73 @@ GTK main thread          sounddevice callback thread       asyncio thread (voxiz
 UI rendering             Fires every 40ms                  WebSocket send/receive
 State transitions        Writes PCM to WAV                 send_loop: queue → WS
 GLib.idle_add callbacks  Posts chunks to asyncio queue      receive_loop: WS → GLib.idle_add
-                         via call_soon_threadsafe
+                         via call_soon_threadsafe           (live preview only — throwaway)
 ```
 
-**Data flow for audio:**
-```
-Microphone → sounddevice callback → WAV file (always)
-                                  → asyncio queue → send_loop → WebSocket → OpenAI Realtime API
-```
+**Additional threads after recording:**
+- `voxize-stop` — stops audio + cancels WS, then triggers batch
+- `voxize-batch` — batch transcription API call (streaming)
+- `voxize-cleanup` — GPT-5.4 Nano cleanup API call (streaming)
 
-**Data flow for transcription:**
+**Data flow:**
 ```
-OpenAI Realtime API → receive_loop → GLib.idle_add → GTK thread → UI text area
+Phase 1 (RECORDING):
+  Microphone → sounddevice callback → WAV file (always, crash-safe)
+                                    → asyncio queue → WS → OpenAI Realtime API (mini model)
+                                                           → live preview deltas → UI (throwaway)
+
+Phase 2 (TRANSCRIBING):
+  audio.wav → POST /audio/transcriptions (gpt-4o-transcribe, streaming)
+            → batch deltas → UI (replaces live preview)
+            → transcription.txt + clipboard
+
+Phase 3 (CLEANING):
+  batch transcript → GPT-5.4 Nano (Responses API, streaming)
+                   → cleanup deltas → UI (replaces batch text)
+                   → cleaned.txt + clipboard (overwrites)
 ```
 
 **Key files:**
-- `transcribe.py` — WebSocket client, send/receive loops, asyncio thread
+- `transcribe.py` — Live preview: realtime WS client (gpt-4o-mini-transcribe, server_vad, throwaway)
+- `batch.py` — Batch transcription: POST /audio/transcriptions (gpt-4o-transcribe, streaming)
+- `cleanup.py` — Text cleanup: GPT-5.4 Nano (Responses API, streaming)
 - `audio.py` — Microphone capture, WAV writer, sounddevice callback
 - `app.py` — Orchestration, state transitions, provider lifecycle
 - `ui.py` — GTK4 widgets, state-driven updates
-- `state.py` — Pure state machine (INITIALIZING → RECORDING → CLEANING → READY)
+- `state.py` — Pure state machine (no GTK)
 
 ## 2. Session Directory Structure
 
 Each recording session creates a directory under `$XDG_STATE_HOME/voxize/` (typically `~/.local/state/voxize/`) named by ISO timestamp:
 
 ```
-2026-03-27T19-44-29/
-├── audio.wav           # Full PCM recording (always complete, crash-safe)
-├── ws_events.jsonl     # Every WebSocket event received from OpenAI
-├── debug.log           # Trace-level log from all threads (added in Phase 4)
-├── transcription.txt   # Raw transcript from realtime API
-└── cleaned.txt         # Post-cleanup text from GPT-5.4 Mini
+2026-04-02T12-47-31/
+├── audio.wav              # Full PCM recording (always complete, crash-safe)
+├── live_transcript.txt    # Live preview text (throwaway — for debugging only)
+├── transcription.txt      # Batch transcript (authoritative result)
+├── cleaned.txt            # Post-cleanup text from GPT-5.4 Nano
+├── ws_events.jsonl        # Every WS event from live preview (OpenAI Realtime API)
+├── batch_events.jsonl     # Every event from batch transcription API
+├── cleanup_events.jsonl   # Every event from cleanup API (Responses API)
+├── debug.log              # Trace-level log from all threads
+└── recover.sh             # Standalone batch re-transcription script
 ```
 
 **`audio.wav`** is the ground truth. It uses a placeholder-header technique: the RIFF/WAV header is written at open time with size `0xFFFFFFFF`, PCM data is appended and flushed on every chunk, and the header is fixed on finalize. On crash, the PCM data is intact — the header just has wrong sizes. Any audio tool can recover it.
 
-**`ws_events.jsonl`** logs every event *received* from the OpenAI Realtime API. It does NOT log sent events (audio chunks). One JSON object per line.
+**`live_transcript.txt`** is the throwaway live preview text from the realtime WS. It may be garbled, incomplete, or have missing words — this is expected. Saved for debugging only; never used by the pipeline.
+
+**`transcription.txt`** is the batch transcript from `gpt-4o-transcribe`. This is the authoritative result — it should match the audio content accurately.
+
+**`ws_events.jsonl`** logs every event *received* from the live preview WS. One JSON object per line. Useful for diagnosing WS connection issues but NOT for diagnosing transcript accuracy (the live preview is throwaway).
+
+**`batch_events.jsonl`** logs every event from the batch transcription API (request, `transcript.text.delta`, `transcript.text.done` with usage). This is the key file for diagnosing batch accuracy issues.
 
 **`debug.log`** has trace-level logging from all threads with millisecond timestamps and thread names. This is the primary debugging tool.
 
-## 3. The OpenAI Realtime API and VAD
+## 3. The OpenAI Realtime API and VAD (live preview only)
+
+**Important context:** The realtime WS is used only for the throwaway live preview (`gpt-4o-mini-transcribe` with `server_vad`). The authoritative transcript comes from the batch API (Section 7). VAD issues in the live preview are expected and acceptable — do not spend time debugging them unless the live preview is completely non-functional (no text at all).
 
 ### How it works
 
@@ -64,25 +94,22 @@ The OpenAI Realtime Transcription API (`wss://api.openai.com/v1/realtime?intent=
 4. Transcribes the committed segment
 5. Streams delta tokens back to the client
 
-### Current configuration
+### Current configuration (live preview)
 
 ```json
 {
   "input_audio_format": "pcm16",
-  "input_audio_transcription": { "model": "gpt-4o-transcribe", "language": "en" },
-  "turn_detection": {
-    "type": "semantic_vad",
-    "eagerness": "high"
-  },
+  "input_audio_transcription": { "model": "gpt-4o-mini-transcribe", "language": "en" },
+  "turn_detection": { "type": "server_vad" },
   "input_audio_noise_reduction": { "type": "near_field" }
 }
 ```
 
-We use `semantic_vad` instead of the default `server_vad`. Semantic VAD detects speech boundaries based on semantic understanding of the user's utterance (whether they appear to have finished speaking), rather than silence-based timing. With `eagerness: "high"`, it chunks earlier so segments stay short — the model truncates long segments.
+The live preview uses `gpt-4o-mini-transcribe` (cheaper) with `server_vad` (default params). No `prompt` (causes hallucinations). The preview is throwaway — accuracy issues are expected. Audio capture starts before the WS connects (fast startup), so there is a burst of queued chunks that drain at full speed. This may corrupt `server_vad`'s state, but that's acceptable.
 
-### Why semantic_vad: the server_vad delivery pacing problem
+### Historical: why neither VAD mode works for authoritative transcription
 
-**This is the single most important debugging insight in this entire document.**
+**This was the key insight that drove the three-phase architecture.**
 
 The `server_vad` expects audio to arrive at approximately real-time rate (1 chunk per 40ms for our 24kHz/16-bit/mono/960-sample blocks). When audio is delivered faster than real-time (burst delivery), the `server_vad`'s internal clock loses alignment with the audio content. This causes:
 
@@ -208,21 +235,20 @@ _send_loop: chunk 75 sent (qsize=0)       ← real-time flow
 
 If `qsize` drops to 0 within 1-2 seconds of WS connection, the startup burst drained normally.
 
-## 4. The `_draining` Flag (transcript delta suppression)
+## 4. The Stop Sequence (no drain)
 
-`self._draining` in `transcribe.py` controls whether transcription deltas are posted to the GTK thread during the stop/drain phase. When `stop()` is called:
+In the three-phase architecture, the live preview is throwaway, so there is no drain phase. When the user presses Stop:
 
-1. `_draining = True` — receive loop still accumulates text into `self._transcript` but does NOT call `GLib.idle_add(self._on_delta, delta)`
-2. `_running = False` — send_audio stops queuing new chunks
-3. Signal done → send loop drains remaining queue → commit → wait for trailing events
-4. Thread joins → `stop()` returns the accumulated transcript
+1. State transitions RECORDING → TRANSCRIBING
+2. `_begin_transcribing` (idle callback): grabs audio + transcription references, nulls them, spawns `voxize-stop` thread
+3. `voxize-stop` thread: calls `audio.stop()` (fast — finalizes WAV), then `transcription.stop()` (cancels WS immediately, no drain)
+4. Saves `live_transcript.txt` and logs WAV size
+5. Posts `_start_batch` back to GTK thread via `GLib.idle_add`
+6. `_start_batch`: creates `BatchTranscription`, starts streaming from `audio.wav`
 
-**Why suppress UI deltas during drain?** The drain phase happens AFTER the state transitions to CLEANING. If deltas were posted to the UI, they would appear in the text area during the "Finishing..." phase, which was the original desired behavior. However, an attempt to remove the `_draining` suppression coincided with a zero-audio delivery failure. While code analysis shows the receive loop changes cannot affect the send path (they are independent asyncio coroutines), the suppression was restored as a precaution.
+**Key difference from the old architecture:** the old `stop()` blocked for up to 15 seconds draining the WS (send remaining chunks, commit, wait for trailing events). The new `stop()` just cancels — it takes milliseconds. The live transcript accumulated in `transcribe.py` is saved for debugging but not used by the pipeline.
 
-**If you want to re-enable delta streaming during drain in the future:**
-1. The `_awaiting_cleanup` race is structurally resolved: `show_transcript_for_cleanup` runs AFTER the drain completes (posted via `GLib.idle_add` from `_stop_providers`), so all stale delta idle callbacks fire before `_awaiting_cleanup` is armed.
-2. The zero-audio issue was later traced to VAD burst pacing, not the `_draining` change.
-3. It should be safe to remove the `if not self._draining:` guards in the receive loop.
+**Historical:** The drain machinery (`_draining` flag, `_drain_complete` event, `_items_in_flight` counter, sentinel commit) was removed entirely. See journal Session 10 for the rationale.
 
 ## 5. Common Failure Modes
 
@@ -305,97 +331,149 @@ HH:MM:SS.mmm ThreadName     module.name message
 
 Thread names:
 - `MainThread` — GTK main thread
-- `voxize-ws` — asyncio/WebSocket thread
+- `voxize-ws` — asyncio/WebSocket thread (live preview)
 - `Dummy-1` — sounddevice callback thread (Python names portaudio threads "Dummy-N")
-- `voxize-stop` — background thread for stopping providers
-- `voxize-cleanup` — background thread for GPT-5.4 Mini API call
+- `voxize-stop` — background thread for stopping audio + WS, triggers batch
+- `voxize-batch` — background thread for batch transcription API call
+- `voxize-cleanup` — background thread for GPT-5.4 Nano cleanup API call
 - `voxize-teardown` — background thread for async teardown (cancel path)
 
 ### Healthy session timeline
 
 ```
-# Initialization
+# Initialization (fast startup — audio before WS)
 _initialize: file logging active
 _initialize: creating providers
-_initialize: starting transcription WS
-start: launching WS thread
 _initialize: starting audio capture
 wav open: path=...
 audio start: rate=24000 ch=1 dtype=int16 blocksize=960
 audio start: stream active
+_initialize: starting transcription WS
+start: launching WS thread
 _initialize: transitioning to RECORDING
 transition: INITIALIZING -> RECORDING allowed=True
 
-# WS connection + burst drain
+# WS connection + burst drain (live preview)
 _session: connecting to WS url=wss://...
 _session: WS connected                          ← ~0.7-1.2s after audio start
 _session: configure sent
 _send_loop: first chunk sent                    ← burst drain begins
 _recv: type=transcription_session.created
 _recv: type=transcription_session.updated
-send_audio: chunk 25 queued (qsize=12)          ← backlog visible
-_send_loop: chunk 25 sent (qsize=9)             ← draining
-_send_loop: chunk 50 sent (qsize=0)             ← caught up
+_send_loop: chunk 25 sent (qsize=0)             ← caught up
 
-# Real-time transcription
-_recv: type=input_audio_buffer.speech_started   ← VAD detected speech
-_recv: type=input_audio_buffer.speech_stopped
-_recv: type=input_audio_buffer.committed
+# Live preview deltas (throwaway — may be garbled)
+_recv: type=input_audio_buffer.speech_started
 _recv: type=conversation.item.input_audio_transcription.delta item_id=... delta_len=5
 _recv: type=conversation.item.input_audio_transcription.completed
 
-# User presses Stop
-transition: RECORDING -> CLEANING allowed=True
-_begin_cleanup: mock=False
-_stop_providers: stopping audio
-audio stop: total_chunks=237
-wav finalize: data_bytes=456960
-_stop_providers: stopping transcription
-Stop called, queue backlog: 0 chunks            ← should be 0 if real-time flow
-_signal_done: signalling event loop
-Send loop exited: 238 chunks sent (9.5s audio)  ← should ≈ total_chunks
-_receive_loop: exit_reason=cancelled events=12 transcript_len=19
-_stop_providers: transcription stopped, transcript_len=19
+# User presses Stop → TRANSCRIBING
+transition: RECORDING -> TRANSCRIBING allowed=True
+_stop_and_batch: stopping audio
+audio stop: complete
+_stop_and_batch: audio stopped
+_stop_and_batch: cancelling transcription
+Send loop exited: 238 chunks sent (9.5s audio)
+_stop_and_batch: transcription cancelled, live_transcript_len=42
+_stop_and_batch: wav_size=456960 (9.5s audio)
+
+# Batch transcription
+_start_batch: session_dir=...
+start: wav_path=...
+_run: calling API model=gpt-4o-transcribe wav_size=456960 (9.5s audio)
+_run: first delta received, len=3
+_run: usage input_tokens=95 output_tokens=19
+_run: complete, transcript_len=42 events=22
+_on_batch_done: transcript_len=42
+transition: TRANSCRIBING -> CLEANING allowed=True
 
 # Cleanup
-_start_cleanup: transcript_len=19 empty=False
-start: transcript_len=19
-_run: calling API model=gpt-5.4-mini
+_begin_cleanup: mock=False
+show_transcript_for_cleanup: transcript_len=42
+start: transcript_len=42
+_run: calling API model=gpt-5.4-nano
 _run: first delta received, len=6
-_run: complete, cleaned_len=19
+_run: complete, cleaned_len=38
+_on_cleanup_done: cleaned_len=38
 transition: CLEANING -> READY allowed=True
+_show_session_costs: live_usage={...} batch_usage={...} cleanup_usage={...}
+show_session_costs: live=$0.0004 batch=$0.0012 cleanup=$0.0002
 ```
 
 ### Red flags to look for
 
 | Pattern | Meaning |
 |---------|---------|
-| `Send loop exited: 0 chunks sent` | Send loop never ran — WS connection issue |
-| `exit_reason=connection-closed` | WebSocket dropped during send |
-| `exit_reason=cancelled` on send loop | Send loop was cancelled (timeout or cancel) |
-| `speech_started` missing entirely | VAD never detected speech — pacing issue or silence |
-| `transcript_len=0` | No transcript — check for VAD issues or empty audio |
-| `_stop_providers: stopping transcription` takes >10s | Thread join timeout — asyncio thread stuck |
-| `qsize` stays high long after WS connected | Send loop is slow or stuck |
-| `audio stop: total_chunks` >> `chunks sent` | Audio was captured but not sent |
+| **Live preview (non-critical — throwaway)** | |
+| `Send loop exited: 0 chunks sent` | WS send loop never ran — connection issue (preview only) |
+| `exit_reason=connection-closed` on send loop | WS dropped — preview lost, batch still works |
+| `_on_ws_error` during RECORDING | WS failed — banner shown, audio continues |
+| **Batch transcription (critical — authoritative)** | |
+| `_run: complete, transcript_len=0` | Batch returned empty — check audio.wav with sox |
+| `_run: complete, transcript_len=` very small | Batch truncated — check batch_events.jsonl for `text_tokens` (prompt leak?) |
+| `Batch transcription failed:` | API error — check batch_events.jsonl for details |
+| `_on_batch_error:` | Batch failed, went to READY — user has WAV + recover.sh |
+| **Audio pipeline** | |
+| `audio stop: total_chunks` is 0 | Mic never captured — wrong device or permission |
+| `wav_size` is ~44 bytes | WAV has header but no PCM data |
+| **General** | |
+| `_initialize: skipped` | User cancelled before init completed |
+| `_start_batch:` followed by no `_run:` | Batch provider creation failed |
+| `cleaned_len=` very small vs `transcript_len=` | Cleanup model dropped content — check cleanup_events.jsonl |
 
-## 7. Batch Transcription for Verification
+## 7. Batch Transcription (the authoritative path)
 
-When the realtime API gives unexpected results, batch-transcribe the WAV to verify the audio content:
+Batch transcription is now the core of the pipeline, not a verification tool. The `batch.py` module streams `audio.wav` to `POST /audio/transcriptions` with `gpt-4o-transcribe` and `response_format=text`.
 
-```bash
-uv run python -c "
-from openai import OpenAI
-from voxize.checks import get_api_key
-client = OpenAI(api_key=get_api_key('openai'))
-with open('SESSION_DIR/audio.wav', 'rb') as f:
-    result = client.audio.transcriptions.create(model='gpt-4o-transcribe', file=f)
-print(repr(result.text))
-"
+### How to diagnose batch issues
+
+**Step 1: Check `batch_events.jsonl`.**
+
+A healthy batch session looks like:
+```
+{"type": "request", "model": "gpt-4o-transcribe", "wav_path": "...", "wav_size": 456960}
+{"delta": "This ", "type": "transcript.text.delta", ...}
+{"delta": "is a ", "type": "transcript.text.delta", ...}
+...
+{"text": "This is a test.", "type": "transcript.text.done", "usage": {"input_tokens": 95, "output_tokens": 19, ...}}
 ```
 
-If batch returns full text but realtime missed it: **VAD pacing issue** (see Section 3).
-If batch also returns empty/wrong text: **audio quality issue** (mic level, noise, wrong device).
+A broken batch session may show:
+```
+{"type": "request", ...}
+{"delta": "Voxize", "type": "transcript.text.delta", ...}
+{"text": "Voxize", "type": "transcript.text.done", "usage": {"input_tokens": 300, "output_tokens": 5, ..., "input_token_details": {"text_tokens": 5, ...}}}
+```
+
+If `text_tokens` > 0 in usage, a `prompt` was injected — this causes the `gpt-4o-transcribe` decoder to echo the prompt instead of transcribing. The `prompt` parameter must NOT be passed to this model.
+
+**Step 2: Check the debug log for batch timing.**
+
+```
+_start_batch: session_dir=...
+_run: calling API model=gpt-4o-transcribe wav_size=456960 (9.5s audio)
+_run: first delta received, len=3              ← should arrive within 2-5s
+_run: usage input_tokens=95 output_tokens=19
+_run: complete, transcript_len=42 events=22
+```
+
+If `first delta` never appears, the API call is hanging — check network.
+
+**Step 3: Compare `transcription.txt` with `recovered.txt`.**
+
+Run `recover.sh` in the session directory. It uses curl to batch-transcribe independently. If `recovered.txt` matches `transcription.txt`, the batch pipeline is working correctly. If they differ, check whether a `prompt` was accidentally injected.
+
+**Step 4: Verify the audio content.**
+
+```bash
+nix shell nixpkgs#sox -- sox SESSION_DIR/audio.wav -n stat
+```
+
+Check for: non-zero RMS amplitude (speech exists), rough frequency in human range (85-300 Hz fundamental, not 57 Hz mains hum), no DC bias.
+
+### File size limit
+
+The batch API has a 25 MB file limit. At 24kHz/16-bit/mono (48 KB/s), this allows ~9 minutes of audio. Typical dictation sessions are well under this.
 
 ## 8. Signal Handling
 

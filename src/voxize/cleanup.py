@@ -1,4 +1,4 @@
-"""Text cleanup via OpenAI GPT-5.4 Mini streaming (Responses API).
+"""Text cleanup via OpenAI GPT-5.4 Nano streaming (Responses API).
 
 Runs a synchronous OpenAI SDK streaming call in a daemon thread. Delta
 tokens are posted to the GTK main thread via GLib.idle_add.
@@ -20,7 +20,7 @@ from collections.abc import Callable
 
 logger = logging.getLogger(__name__)
 
-_MODEL = "gpt-5.4-mini"
+_MODEL = "gpt-5.4-nano"
 
 _SYSTEM_PROMPT = (
     "You are a transcription cleanup tool.\n"
@@ -79,7 +79,7 @@ _SYSTEM_PROMPT = (
 
 
 class Cleanup:
-    """Streams transcript through GPT-5.4 Mini for cleanup."""
+    """Streams transcript through GPT-5.4 Nano for cleanup."""
 
     def __init__(
         self,

@@ -1,7 +1,7 @@
-"""Mock providers for Phase 1 UI development.
+"""Mock providers for UI development.
 
 These emit predefined text on timers, simulating the real OpenAI Realtime
-transcription deltas and GPT-5.4 Mini cleanup streaming.
+transcription deltas and GPT-5.4 Nano cleanup streaming.
 """
 
 import logging
@@ -119,7 +119,12 @@ class MockCleanup:
         self._on_complete = None
 
     def start(
-        self, transcript: str, on_delta, on_complete, delay_ms: int = 2500
+        self,
+        transcript: str,
+        on_delta,
+        on_complete,
+        on_error=None,
+        delay_ms: int = 2500,
     ) -> None:
         logger.debug(
             "MockCleanup.start: transcript_len=%d delay_ms=%d words=%d",
@@ -133,6 +138,10 @@ class MockCleanup:
         self._pos = 0
         # Simulate API thinking time before first token
         self._source = GLib.timeout_add(delay_ms, self._begin)
+
+    @property
+    def usage(self):
+        return None
 
     def cancel(self) -> None:
         logger.debug("MockCleanup.cancel: pos=%d/%d", self._pos, len(self._words))

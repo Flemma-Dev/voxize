@@ -38,6 +38,7 @@ class OverlayWindow:
         self._text_pulse_source: int | None = None
         self._text_pulse_dim = False
         self._awaiting_cleanup = False
+        self._awaiting_batch = False
         self._destroyed = False
         self._session_dir: str | None = None
         self._speech_active = False
@@ -243,28 +244,35 @@ class OverlayWindow:
         self._context_label.set_visible(True)
 
     def show_session_costs(
-        self, transcription_cost: float | None, cleanup_cost: float | None
+        self,
+        live_cost: float | None,
+        batch_cost: float | None,
+        cleanup_cost: float | None,
     ) -> None:
         """Show session costs in the context bar (plain text)."""
         if self._destroyed:
             return
         logger.debug(
-            "show_session_costs: transcription=$%s cleanup=$%s",
-            f"{transcription_cost:.4f}" if transcription_cost is not None else "n/a",
+            "show_session_costs: live=$%s batch=$%s cleanup=$%s",
+            f"{live_cost:.4f}" if live_cost is not None else "n/a",
+            f"{batch_cost:.4f}" if batch_cost is not None else "n/a",
             f"{cleanup_cost:.4f}" if cleanup_cost is not None else "n/a",
         )
-        t_str = (
-            f"${transcription_cost:.4f}" if transcription_cost is not None else "\u2014"
-        )
-        c_str = f"${cleanup_cost:.4f}" if cleanup_cost is not None else "\u2014"
-        if transcription_cost is not None or cleanup_cost is not None:
-            total = (transcription_cost or 0) + (cleanup_cost or 0)
-            total_str = f"${total:.4f}"
+        parts = []
+        total = 0.0
+        for label, cost in [
+            ("Live", live_cost),
+            ("Batch", batch_cost),
+            ("Cleanup", cleanup_cost),
+        ]:
+            if cost is not None:
+                parts.append(f"{label} ${cost:.4f}")
+                total += cost
+        if parts:
+            sep = " \u00b7 "
+            self._context_label.set_text(f"Total ${total:.4f} \u2022 {sep.join(parts)}")
         else:
-            total_str = "\u2014"
-        self._context_label.set_text(
-            f"Total {total_str} \u2022 Transcription {t_str} \u00b7 Cleanup {c_str}"
-        )
+            self._context_label.set_text("Total \u2014")
         self._context_label.set_visible(True)
 
     # ── Text operations ──
@@ -287,11 +295,17 @@ class OverlayWindow:
             logger.debug("append_text: first text arrived, len=%d", len(text))
             self._had_first_text = True
             if self._machine.state == State.RECORDING:
-                self._status_label.set_text("Recording")
+                self._status_label.set_text("Listening\u2026")
         if self._spinner.get_spinning():
             self._spinner.set_spinning(False)
             self._spinner.set_visible(False)
-        if self._awaiting_cleanup:
+        if self._awaiting_batch and self._machine.state == State.TRANSCRIBING:
+            # First batch delta — swap out the pulsing live preview
+            logger.debug("append_text: first batch delta, swapping live preview")
+            self._awaiting_batch = False
+            self._stop_text_pulse()
+            self.clear_text()
+        if self._awaiting_cleanup and self._machine.state == State.CLEANING:
             # First cleanup token — swap out the pulsing transcript
             logger.debug("append_text: first cleanup token, swapping transcript")
             self._awaiting_cleanup = False
@@ -310,12 +324,12 @@ class OverlayWindow:
         self._text_view.get_buffer().set_text("")
 
     def show_transcript_for_cleanup(self, transcript: str) -> None:
-        """Show the final transcript and arm the cleanup swap.
+        """Show the batch transcript and arm the cleanup swap.
 
-        Called by app._start_cleanup after the transcription drain completes.
-        Updates the status label, sets the text buffer to the full transcript,
-        starts pulsing, and arms _awaiting_cleanup so the first cleanup token
-        clears and replaces it.
+        Called by app._begin_cleanup before cleanup streaming starts.
+        Sets the text buffer to the batch transcript, starts pulsing,
+        and arms _awaiting_cleanup so the first cleanup token clears
+        and replaces it.
         """
         if self._destroyed:
             return
@@ -371,15 +385,25 @@ class OverlayWindow:
     def _on_state_change(self, machine: StateMachine, old: State, new: State) -> None:
         logger.debug("_on_state_change: %s -> %s", old.name, new.name)
         # Update dot color class
-        for cls in ("recording", "cleaning", "ready", "error", "cancelled"):
+        for cls in (
+            "initializing",
+            "recording",
+            "transcribing",
+            "cleaning",
+            "ready",
+            "error",
+            "cancelled",
+        ):
             self._dot.remove_css_class(cls)
         self._dot.add_css_class(new.name.lower())
         self._stop_pulse()
         self._stop_text_pulse()
         self._stop_meter()
+        self._awaiting_batch = False
+        self._awaiting_cleanup = False
 
         if new == State.RECORDING:
-            self._status_label.set_text("Listening\u2026")
+            self._status_label.set_text("Recording")
             self._speech_active = False
             self._had_first_text = False
             self._timer_seconds = 0
@@ -399,22 +423,28 @@ class OverlayWindow:
             self._start_meter()
             self.clear_text()
 
-        elif new == State.CLEANING:
+        elif new == State.TRANSCRIBING:
             self._context_label.set_visible(False)
-            self._status_label.set_text("Finishing\u2026")
+            self._status_label.set_text("Transcribing\u2026")
             self._timer_label.set_visible(False)
             self._stop_timer()
             self._copy_btn.set_visible(False)
             self._cancel_btn.set_visible(True)
             self._action_btn.set_visible(False)
             self._window.set_default_widget(None)
+            # Keep the live preview pulsing — first batch delta will swap it out
+            self._awaiting_batch = True
+            self._had_first_text = False
             self._start_text_pulse()
-            # Keep spinner visible — deltas continue streaming during drain
-            # and append_text will dismiss the spinner on the first arrival.
-            # If no deltas arrive, show_transcript_for_cleanup handles it.
-            #
-            # Don't set _awaiting_cleanup here — _start_cleanup will show the
-            # final transcript and arm the swap after the drain completes.
+
+        elif new == State.CLEANING:
+            self._status_label.set_text("Cleaning up\u2026")
+            self._timer_label.set_visible(False)
+            self._copy_btn.set_visible(False)
+            self._cancel_btn.set_visible(True)
+            self._action_btn.set_visible(False)
+            self._window.set_default_widget(None)
+            # show_transcript_for_cleanup arms the swap and starts text pulse
 
         elif new == State.READY:
             self._status_label.set_text("Ready")
@@ -524,7 +554,7 @@ class OverlayWindow:
 
     def _on_cancel(self, _btn: Gtk.Button) -> None:
         logger.debug("_on_cancel: state=%s", self._machine.state.name)
-        if self._machine.state in (State.RECORDING, State.CLEANING):
+        if self._machine.state in (State.RECORDING, State.TRANSCRIBING, State.CLEANING):
             self._machine.transition(State.CANCELLED)
 
     def _on_action(self, _btn: Gtk.Button) -> None:
@@ -534,7 +564,7 @@ class OverlayWindow:
             if self._degraded:
                 self._machine.transition(State.CANCELLED)
             else:
-                self._machine.transition(State.CLEANING)
+                self._machine.transition(State.TRANSCRIBING)
         elif s in (State.READY, State.ERROR):
             self._window.close()
 

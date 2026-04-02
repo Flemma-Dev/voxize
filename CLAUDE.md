@@ -21,12 +21,17 @@ OpenAI API key must be in GNOME Keyring: `secret-tool store --label='OpenAI API 
 
 ## Architecture
 
-State machine drives: INITIALIZING -> RECORDING -> CLEANING -> READY (+ CANCELLED, ERROR).
+State machine drives: INITIALIZING -> RECORDING -> TRANSCRIBING -> CLEANING -> READY (+ CANCELLED, ERROR).
 
-**Three threads during recording:**
+**Three-phase transcription:**
+1. **Live preview** (RECORDING) — `gpt-4o-mini-transcribe` via realtime WS. Cheap, throwaway, gives visual feedback.
+2. **Batch transcription** (TRANSCRIBING) — `gpt-4o-transcribe` via `POST /audio/transcriptions`. Accurate, authoritative.
+3. **Cleanup** (CLEANING) — `gpt-5.4-nano` text reformatting. Light touchup of already-clean batch output.
+
+**Threads during recording:**
 1. GTK main thread (UI)
 2. sounddevice callback thread (audio capture -> WAV + asyncio queue)
-3. asyncio daemon thread (`voxize-ws`) — WebSocket send/receive
+3. asyncio daemon thread (`voxize-ws`) — WebSocket send/receive (live preview)
 
 Thread bridge: `GLib.idle_add` (worker -> GTK), `call_soon_threadsafe` (GTK -> asyncio).
 
@@ -40,8 +45,9 @@ Thread bridge: `GLib.idle_add` (worker -> GTK), `call_soon_threadsafe` (GTK -> a
 | `ui.py` | Widgets, CSS loading, text area, header bar |
 | `state.py` | State machine (pure logic, no GTK) |
 | `audio.py` | `AudioCapture` (sounddevice) + `WavWriter` (crash-safe WAV) + `LevelMeter` (passive RMS) |
-| `transcribe.py` | OpenAI Realtime WebSocket client (`gpt-4o-transcribe`, `semantic_vad`) |
-| `cleanup.py` | GPT-5.4 Mini text cleanup (Responses API, streaming) |
+| `transcribe.py` | Live preview: realtime WS client (`gpt-4o-mini-transcribe`, `server_vad`, throwaway) |
+| `batch.py` | Batch transcription: `POST /audio/transcriptions` (`gpt-4o-transcribe`, streaming) |
+| `cleanup.py` | GPT-5.4 Nano text cleanup (Responses API, streaming) |
 | `mock.py` | Mock providers for testing without API calls |
 | `prompt.py` | Focused-window detection, WHISPER.txt loading |
 | `recover.py` | Generates per-session `recover.sh` for batch re-transcription |
@@ -53,13 +59,17 @@ Thread bridge: `GLib.idle_add` (worker -> GTK), `call_soon_threadsafe` (GTK -> a
 
 ## Key technical decisions
 
-- **GPT-5.4 Mini for cleanup** (not Haiku) — OpenAI already a dependency, cheaper, no second vendor SDK.
-- **`semantic_vad` with `eagerness: "high"`** — server_vad was unreliable with startup audio bursts. Semantic VAD handles burst-to-realtime transitions correctly. High eagerness keeps segments short — the model truncates long segments.
+- **Three-phase transcription** — realtime WS is unreliable for continuous dictation (server_vad over-segments, semantic_vad under-segments). Live preview is throwaway; batch transcription on the full WAV is the source of truth.
+- **`gpt-4o-mini-transcribe` for live preview** — 50% cheaper than full model, accuracy doesn't matter. `server_vad` with fast startup (audio before WS, burst drains at full speed).
+- **`gpt-4o-transcribe` for batch** — full model processes entire audio in one pass. No `prompt` parameter — `gpt-4o-transcribe` hallucinates the prompt text instead of transcribing. Vocabulary guidance is handled by the cleanup model's `<vocabulary-guidance>` block.
+- **GPT-5.4 Nano for cleanup** — batch transcript is already clean, cleanup is light touchup. Nano handles the explicit rules-based prompt well.
+- **WS failure is non-fatal** — during RECORDING, WS errors show a banner but audio continues. User can still stop and get batch transcription. Only mic failure is fatal.
+- **Fast startup** — audio capture starts before WS connects. Chunks queue, burst-drain when WS ready. If burst corrupts server_vad, live preview is garbled but batch fixes everything.
 - **Thread bridge over gbulb** — asyncio in daemon thread + `GLib.idle_add`. Simpler, no extra dependency.
-- **Audio starts before WS connects** — chunks queue in asyncio queue, burst-sent when WS ready.
 - **WAV placeholder header** — crash-safe; most tools read to EOF when size field is wrong.
 - **Pruning at termination, not startup** — avoids progressive session loss during crash loops.
 - **`finalize_wav()` separate from `stop()`** — signal handlers fix WAV header without risking deadlock on the audio stream.
+- **Clipboard: batch then cleanup** — first clipboard write at batch completion (accurate text), overwritten by cleanup result. No live preview junk in clipboard.
 
 ## Design documents
 
@@ -103,7 +113,7 @@ Libadwaita uses CSS custom properties (`--name` / `var(--name)`), not `@define-c
 
 ## Session data
 
-`~/.local/state/voxize/<ISO-timestamp>/` — `audio.wav`, `transcription.txt`, `cleaned.txt`, `ws_events.jsonl`, `debug.log`.
+`~/.local/state/voxize/<ISO-timestamp>/` — `audio.wav`, `live_transcript.txt`, `transcription.txt`, `cleaned.txt`, `ws_events.jsonl`, `batch_events.jsonl`, `cleanup_events.jsonl`, `debug.log`, `recover.sh`.
 
 ## Environment variables
 

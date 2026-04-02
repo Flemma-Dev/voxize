@@ -9,6 +9,7 @@ logger = logging.getLogger(__name__)
 class State(Enum):
     INITIALIZING = auto()
     RECORDING = auto()
+    TRANSCRIBING = auto()
     CLEANING = auto()
     READY = auto()
     CANCELLED = auto()
@@ -17,8 +18,9 @@ class State(Enum):
 
 _ALLOWED: dict[State, frozenset[State]] = {
     State.INITIALIZING: frozenset({State.RECORDING, State.CANCELLED, State.ERROR}),
-    State.RECORDING: frozenset({State.CLEANING, State.CANCELLED, State.ERROR}),
-    State.CLEANING: frozenset({State.READY, State.CANCELLED, State.ERROR}),
+    State.RECORDING: frozenset({State.TRANSCRIBING, State.CANCELLED}),
+    State.TRANSCRIBING: frozenset({State.CLEANING, State.READY, State.CANCELLED}),
+    State.CLEANING: frozenset({State.READY, State.CANCELLED}),
     State.READY: frozenset(),
     State.CANCELLED: frozenset(),
     State.ERROR: frozenset(),

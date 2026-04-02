@@ -40,11 +40,12 @@ headerbar {
     transition: opacity 400ms ease-in-out;
 }
 
-.status-dot.recording { color: var(--vox-red); }
-.status-dot.cleaning  { color: var(--vox-amber); }
-.status-dot.ready     { color: var(--vox-green); }
-.status-dot.error     { color: var(--vox-red); }
-.status-dot.cancelled { color: var(--vox-fg-dim); }
+.status-dot.recording    { color: var(--vox-red); }
+.status-dot.transcribing { color: var(--vox-amber); }
+.status-dot.cleaning     { color: var(--vox-amber); }
+.status-dot.ready        { color: var(--vox-green); }
+.status-dot.error        { color: var(--vox-red); }
+.status-dot.cancelled    { color: var(--vox-fg-dim); }
 .status-dot.dim       { opacity: 0.3; }
 
 /* Status label */
