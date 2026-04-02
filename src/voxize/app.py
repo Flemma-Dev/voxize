@@ -40,7 +40,7 @@ from voxize.checks import get_api_key  # noqa: E402
 from voxize.cleanup import Cleanup  # noqa: E402
 from voxize.lock import MicLock, MicLockError  # noqa: E402
 from voxize.mock import MockCleanup, MockTranscription  # noqa: E402
-from voxize.prompt import detect_prompt  # noqa: E402
+from voxize.prompt import PromptSource, detect_prompt  # noqa: E402
 from voxize.recover import write_recover_script  # noqa: E402
 from voxize.state import State, StateMachine  # noqa: E402
 from voxize.storage import create_session_dir, prune_sessions  # noqa: E402
@@ -66,7 +66,7 @@ class VoxizeApp(Gtk.Application):
         self._lock = None
         self._session_dir: str | None = None
         self._api_key: str | None = None
-        self._prompt: str | None = None
+        self._prompts: list[PromptSource] = []
         self._audio = None
         self._transcription = None
         self._batch = None
@@ -84,7 +84,6 @@ class VoxizeApp(Gtk.Application):
         self._cleanup_usage: dict[str, int] | None = None
 
         # Prompt detection (set in do_activate before window present)
-        self._prompt_cwd: str | None = None
 
         # Auto-close timer
         self._autoclose_source: int | None = None
@@ -97,10 +96,8 @@ class VoxizeApp(Gtk.Application):
         # window takes focus, the D-Bus focused-window query would return our
         # own PID instead of the window the user was working in.
         if not _MOCK:
-            self._prompt_cwd, self._prompt = detect_prompt()
-            logger.debug(
-                "do_activate: prompt_cwd=%s prompt=%s", self._prompt_cwd, self._prompt
-            )
+            self._prompts = detect_prompt()
+            logger.debug("do_activate: prompts=%d", len(self._prompts))
 
         # Load CSS theme
         css = Gtk.CssProvider()
@@ -130,8 +127,8 @@ class VoxizeApp(Gtk.Application):
         win.present()
         self._ui.setup_max_height()
 
-        if self._prompt:
-            self._ui.show_prompt_context(self._prompt, self._prompt_cwd)
+        if self._prompts:
+            self._ui.show_prompt_context(self._prompts)
 
         # Signal handlers — finalize WAV header before exit so the file is
         # a valid WAV (not just raw PCM with a placeholder header).
@@ -194,7 +191,7 @@ class VoxizeApp(Gtk.Application):
         logging.getLogger("voxize").setLevel(logging.DEBUG)
         self._log_handler = fh
         logger.debug("_initialize: file logging active")
-        logger.debug("_initialize: prompt=%s", self._prompt)
+        logger.debug("_initialize: prompts=%d", len(self._prompts))
 
         # Create providers
         logger.debug("_initialize: creating providers")
@@ -534,7 +531,7 @@ class VoxizeApp(Gtk.Application):
             )
         else:
             self._cleanup = Cleanup(
-                self._api_key, prompt=self._prompt, session_dir=self._session_dir
+                self._api_key, prompts=self._prompts, session_dir=self._session_dir
             )
             self._cleanup.start(
                 transcript=transcript,

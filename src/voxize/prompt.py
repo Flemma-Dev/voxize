@@ -1,15 +1,17 @@
-"""Detect transcription prompt from the focused window's working directory.
+"""Detect transcription prompts from the focused window's context.
 
 Best-effort chain:
-1. Get focused window PID via D-Bus (GNOME Shell extension).
+1. Get focused window metadata via D-Bus (GNOME Shell extension).
 2. Resolve the actual working directory:
    - Ghostty + tmux → nvim: read /proc/{nvim_pid}/cwd
    - Ghostty + tmux → other: tmux pane_current_path
    - Other: /proc/{pid}/cwd
 3. Read WHISPER.txt from the resolved directory if it exists.
+4. Load app-specific glossary from XDG config based on wm_class.
+5. Load context-specific glossary via per-app title extractors (e.g., Slack channel).
 
 Every step is wrapped in try/except — this feature must never block startup
-or raise. Returns None if anything fails.
+or raise. Returns empty list if anything fails.
 """
 
 from __future__ import annotations
@@ -18,50 +20,159 @@ import json
 import logging
 import os
 import subprocess
+from collections.abc import Callable
+from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
 
 _WHISPER_FILE = "WHISPER.txt"
 
 
-def detect_prompt() -> tuple[str | None, str | None]:
-    """Detect transcription prompt from the focused window's project directory.
+@dataclass
+class PromptSource:
+    """A single vocabulary guidance source."""
 
-    Returns:
-        (cwd, prompt) — both may be None if detection fails at any step.
+    path: str  # absolute file path
+    content: str  # stripped, non-empty content
+
+
+# ── Per-app title extractors ──
+
+
+def _extract_slack_context(title: str) -> str | None:
+    """Extract Slack channel or DM name from the window title.
+
+    Titles look like:
+        channel-name (Channel) - Workspace - notifications - Slack
+        Person Name (DM) - Workspace - notifications - Slack
     """
-    cwd = _detect_cwd()
-    if not cwd:
-        return None, None
-
-    prompt = _read_whisper(cwd)
-    return cwd, prompt
-
-
-def _detect_cwd() -> str | None:
-    """Resolve the focused window's actual working directory."""
-    pid = _get_focused_window_pid()
-    if not pid:
+    idx = title.find(" (")
+    if idx <= 0:
+        logger.debug("prompt: Slack extractor: no ' (' in title=%s", title[:80])
         return None
-
-    cmdline = _read_cmdline(pid)
-    if not cmdline:
-        # Fall back to /proc/{pid}/cwd
-        return _read_proc_cwd(pid)
-
-    logger.debug("prompt: focused pid=%d cmdline=%s", pid, cmdline[:120])
-
-    # Ghostty + tmux — delve into the tmux pane
-    if "/ghostty" in cmdline and "/tmux" in cmdline:
-        logger.debug("prompt: Ghostty+tmux detected")
-        return _resolve_tmux_cwd()
-
-    # Default: /proc/{pid}/cwd
-    return _read_proc_cwd(pid)
+    context = title[:idx]
+    logger.debug("prompt: Slack extractor: context=%s", context)
+    return context
 
 
-def _get_focused_window_pid() -> int | None:
-    """Get the PID of the focused window via GNOME Shell D-Bus extension."""
+_EXTRACTORS: dict[str, Callable[[str], str | None]] = {
+    "Slack": _extract_slack_context,
+}
+
+
+# ── Public API ──
+
+
+def detect_prompt() -> list[PromptSource]:
+    """Detect transcription prompts from the focused window's context.
+
+    Returns a list of PromptSource in specificity order (highest first):
+    1. WHISPER.txt from the focused window's working directory
+    2. Extractor context (e.g., Slack channel glossary)
+    3. App-level glossary (e.g., Slack.txt)
+    """
+    window = _get_focused_window()
+    sources: list[PromptSource] = []
+
+    # 1. WHISPER.txt from CWD
+    if window:
+        cwd = _detect_cwd(window["pid"])
+        if cwd:
+            whisper = _read_whisper(cwd)
+            if whisper:
+                sources.append(whisper)
+
+    # 2. Extractor context + 3. App glossary
+    if window and window.get("wm_class"):
+        try:
+            wm_class = _sanitize_filename(window["wm_class"])
+            title = window.get("title", "")
+            prompts_base = _prompts_dir()
+
+            context_source = _load_context_glossary(wm_class, title, prompts_base)
+            app_source = _load_app_glossary(wm_class, prompts_base)
+
+            if context_source:
+                sources.append(context_source)
+            if app_source:
+                sources.append(app_source)
+        except Exception:
+            logger.debug("prompt: glossary loading failed", exc_info=True)
+
+    logger.debug(
+        "prompt: detect_prompt returning %d source(s): %s",
+        len(sources),
+        [s.path for s in sources],
+    )
+    return sources
+
+
+# ── XDG glossary files ──
+
+
+def _prompts_dir() -> str:
+    """Return $XDG_CONFIG_HOME/voxize/prompts/, creating it if needed."""
+    base = os.environ.get("XDG_CONFIG_HOME", os.path.expanduser("~/.config"))
+    path = os.path.join(base, "voxize", "prompts")
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def _ensure_and_load(path: str) -> PromptSource | None:
+    """Create file if missing, read and strip, return PromptSource or None."""
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        if not os.path.exists(path):
+            with open(path, "w") as f:
+                pass
+            logger.debug("prompt: created empty glossary %s", path)
+        with open(path) as f:
+            content = f.read().strip()
+        if not content:
+            logger.debug("prompt: glossary %s is empty", path)
+            return None
+        logger.debug("prompt: loaded glossary %s (%d chars)", path, len(content))
+        return PromptSource(path=path, content=content)
+    except Exception:
+        logger.debug("prompt: failed to load glossary %s", path, exc_info=True)
+    return None
+
+
+def _load_app_glossary(wm_class: str, prompts_base: str) -> PromptSource | None:
+    """Load the app-level glossary file for a given wm_class."""
+    path = os.path.join(prompts_base, f"{wm_class}.txt")
+    return _ensure_and_load(path)
+
+
+def _sanitize_filename(name: str) -> str:
+    """Sanitize an extractor-produced name for use as a filename."""
+    name = name.replace("/", "-").replace("\0", "")
+    name = name.lstrip(".").rstrip(".").strip()
+    return name or "unknown"
+
+
+def _load_context_glossary(
+    wm_class: str, title: str, prompts_base: str
+) -> PromptSource | None:
+    """Run the title extractor for wm_class, load the context glossary file."""
+    extractor = _EXTRACTORS.get(wm_class)
+    if not extractor:
+        logger.debug("prompt: no extractor for wm_class=%s", wm_class)
+        return None
+    context = extractor(title)
+    if not context:
+        logger.debug("prompt: extractor for %s returned no context", wm_class)
+        return None
+    context = _sanitize_filename(context)
+    path = os.path.join(prompts_base, wm_class, f"{context}.txt")
+    return _ensure_and_load(path)
+
+
+# ── Focused window detection ──
+
+
+def _get_focused_window() -> dict | None:
+    """Get metadata for the focused window via GNOME Shell D-Bus extension."""
     try:
         from gi.repository import Gio
 
@@ -90,13 +201,43 @@ def _get_focused_window_pid() -> int | None:
             if win.get("focus"):
                 pid = win.get("pid")
                 if pid:
-                    logger.debug("prompt: focused window pid=%d", pid)
-                    return int(pid)
+                    logger.debug(
+                        "prompt: focused window pid=%d wm_class=%s title=%s",
+                        pid,
+                        win.get("wm_class", ""),
+                        (win.get("title", ""))[:80],
+                    )
+                    return {
+                        "pid": int(pid),
+                        "wm_class": win.get("wm_class", ""),
+                        "title": win.get("title", ""),
+                    }
 
         logger.debug("prompt: no focused window found in D-Bus response")
     except Exception:
         logger.debug("prompt: D-Bus focused window lookup failed", exc_info=True)
     return None
+
+
+# ── CWD resolution ──
+
+
+def _detect_cwd(pid: int) -> str | None:
+    """Resolve the focused window's actual working directory."""
+    cmdline = _read_cmdline(pid)
+    if not cmdline:
+        # Fall back to /proc/{pid}/cwd
+        return _read_proc_cwd(pid)
+
+    logger.debug("prompt: focused pid=%d cmdline=%s", pid, cmdline[:120])
+
+    # Ghostty + tmux — delve into the tmux pane
+    if "/ghostty" in cmdline and "/tmux" in cmdline:
+        logger.debug("prompt: Ghostty+tmux detected")
+        return _resolve_tmux_cwd()
+
+    # Default: /proc/{pid}/cwd
+    return _read_proc_cwd(pid)
 
 
 def _read_cmdline(pid: int) -> str | None:
@@ -197,8 +338,11 @@ def _resolve_nvim_cwd() -> str | None:
     return None
 
 
-def _read_whisper(cwd: str) -> str | None:
-    """Read WHISPER.txt from the given directory, return content or None."""
+# ── WHISPER.txt ──
+
+
+def _read_whisper(cwd: str) -> PromptSource | None:
+    """Read WHISPER.txt from the given directory, return PromptSource or None."""
     path = os.path.join(cwd, _WHISPER_FILE)
     try:
         if not os.path.isfile(path):
@@ -214,7 +358,7 @@ def _read_whisper(cwd: str) -> str | None:
         # Collapse newlines to spaces (matches old record.sh behavior)
         content = " ".join(content.split())
         logger.debug("prompt: loaded %s (%d chars)", path, len(content))
-        return content
+        return PromptSource(path=path, content=content)
 
     except Exception:
         logger.debug("prompt: failed to read %s", path, exc_info=True)

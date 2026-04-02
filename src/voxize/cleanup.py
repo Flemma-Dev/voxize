@@ -18,6 +18,8 @@ import secrets
 import threading
 from collections.abc import Callable
 
+from voxize.prompt import PromptSource
+
 logger = logging.getLogger(__name__)
 
 _MODEL = "gpt-5.4-nano"
@@ -84,11 +86,11 @@ class Cleanup:
     def __init__(
         self,
         api_key: str,
-        prompt: str | None = None,
+        prompts: list[PromptSource] | None = None,
         session_dir: str | None = None,
     ) -> None:
         self._api_key = api_key
-        self._prompt = prompt
+        self._prompts = prompts or []
         self._session_dir = session_dir
         self._thread: threading.Thread | None = None
         self._cancelled = False
@@ -163,12 +165,14 @@ class Cleanup:
 
         nonce = secrets.token_hex(8)
         system = _SYSTEM_PROMPT.replace("{nonce}", nonce)
-        if self._prompt:
+        if self._prompts:
+            combined = "\n".join(s.content for s in self._prompts)
             system += (
                 "\n\n<vocabulary-guidance>\n"
                 "The transcription may contain vocabulary errors for domain-specific terms. "
-                "A WHISPER.txt file from the user's project provided the following hints:\n\n"
-                f'"""\n{self._prompt}\n"""\n\n'
+                "Vocabulary guidance files from the user's environment provided the following "
+                "hints:\n\n"
+                f'"""\n{combined}\n"""\n\n'
                 "When the transcription contains a word or phrase that is phonetically similar "
                 "to a term in the hints above, replace it with the correct term if the "
                 "surrounding context supports it. Only apply replacements when the intended "

@@ -14,6 +14,7 @@ gi.require_version("Gtk", "4.0")
 # gi.require_version() above is executable code; all subsequent imports trigger E402.
 from gi.repository import Gdk, Gio, GLib, Gtk, Pango  # noqa: E402
 
+from voxize.prompt import PromptSource  # noqa: E402
 from voxize.state import State, StateMachine  # noqa: E402
 
 _VU_ZONE_CLASSES = ("vu-low", "vu-good", "vu-hot", "vu-clip")
@@ -224,23 +225,28 @@ class OverlayWindow:
 
     # ── Context statusbar ──
 
-    def show_prompt_context(self, prompt: str, cwd: str) -> None:
-        """Show a persistent context bar with the active WHISPER.txt prompt."""
+    def show_prompt_context(self, prompts: list[PromptSource]) -> None:
+        """Show a persistent context bar with active vocabulary guidance sources."""
         if self._destroyed:
             return
-        logger.debug("show_prompt_context: cwd=%s prompt_len=%d", cwd, len(prompt))
+        logger.debug("show_prompt_context: sources=%d", len(prompts))
         import os
 
-        file_uri = GLib.filename_to_uri(os.path.join(cwd, "WHISPER.txt"), None)
         # Link color must be set in Pango markup — GtkLabel ignores CSS for
         # link colors (it uses the accent color internally).
         # NOTE: this matches --vox-fg-dim in style.css; update both if the palette changes.
         link_color = "#ffffff80"
-        self._context_label.set_markup(
-            f'<a href="{GLib.markup_escape_text(file_uri)}">'
-            f'<span foreground="{link_color}"><b>WHISPER.txt</b></span></a>'
-            f"  {GLib.markup_escape_text(prompt)}"
-        )
+        parts = []
+        for source in prompts:
+            file_uri = GLib.filename_to_uri(source.path, None)
+            name = os.path.basename(source.path)
+            parts.append(
+                f'<a href="{GLib.markup_escape_text(file_uri)}">'
+                f'<span foreground="{link_color}"><b>'
+                f"{GLib.markup_escape_text(name)}</b></span></a>"
+                f"  {GLib.markup_escape_text(source.content)}"
+            )
+        self._context_label.set_markup(" | ".join(parts))
         self._context_label.set_visible(True)
 
     def show_session_costs(
