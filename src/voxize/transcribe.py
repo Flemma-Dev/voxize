@@ -56,6 +56,7 @@ class RealtimeTranscription:
         self._audio_queue: asyncio.Queue | None = None
         self._done: asyncio.Event | None = None
         self._log_file = None
+        self._data_ready = threading.Event()
 
         self._transcript = ""
         self._current_item_id: str | None = None
@@ -96,6 +97,7 @@ class RealtimeTranscription:
         self._loop = asyncio.new_event_loop()
         self._audio_queue = asyncio.Queue()
         self._done = asyncio.Event()
+        self._data_ready = threading.Event()
 
         logger.debug("start: launching WS thread")
         self._thread = threading.Thread(target=self._run, daemon=True, name="voxize-ws")
@@ -109,13 +111,15 @@ class RealtimeTranscription:
     def stop(self) -> None:
         """Stop immediately — the live transcript is throwaway.
 
-        No drain, no waiting for trailing events. Just close the WS.
+        Signals cancellation and waits for transcript/usage to stabilise
+        (tasks cancelled), but does NOT block on the WS close handshake
+        which can take seconds.  The daemon thread finishes on its own.
         """
         logger.debug("stop: requested")
         self._running = False
         self._cancelled = True
         self._signal_done()
-        self._join()
+        self._data_ready.wait(timeout=2.0)
 
     def cancel(self) -> None:
         """Cancel immediately — same as stop for the live preview."""
@@ -157,6 +161,8 @@ class RealtimeTranscription:
             self._loop.run_until_complete(self._session())
         except Exception:
             logger.exception("WebSocket thread crashed")
+        finally:
+            self._data_ready.set()  # safety net
 
     # ── Async session ──
 
@@ -200,6 +206,10 @@ class RealtimeTranscription:
                 except asyncio.CancelledError:
                     pass
 
+                # Transcript + usage are stable — unblock stop() before
+                # the WS close handshake (which can take seconds).
+                self._data_ready.set()
+
                 self._ws = None
 
         except websockets.exceptions.InvalidStatus as e:
@@ -218,6 +228,7 @@ class RealtimeTranscription:
             if self._on_error:
                 GLib.idle_add(self._on_error, msg)
         finally:
+            self._data_ready.set()  # ensure signal on error paths
             if self._log_file:
                 self._log_file.close()
                 self._log_file = None
