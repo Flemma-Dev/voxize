@@ -5,7 +5,7 @@ synchronous OpenAI SDK call in a daemon thread. Delta text is posted to
 the GTK main thread via GLib.idle_add.
 
 Lifecycle:
-    b = BatchTranscription(api_key, session_dir=...)
+    b = BatchTranscription(client, session_dir=...)
     b.start(wav_path=..., on_delta=..., on_complete=..., on_error=...)
     b.cancel()
 """
@@ -16,9 +16,14 @@ import json
 import logging
 import os
 import threading
+import time
 from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 from voxize.audio import CHANNELS, SAMPLE_RATE, WAV_HEADER_SIZE
+
+if TYPE_CHECKING:
+    from openai import OpenAI
 
 logger = logging.getLogger(__name__)
 
@@ -31,10 +36,10 @@ class BatchTranscription:
 
     def __init__(
         self,
-        api_key: str,
+        client: OpenAI,
         session_dir: str | None = None,
     ) -> None:
-        self._api_key = api_key
+        self._client = client
         self._session_dir = session_dir
         self._thread: threading.Thread | None = None
         self._cancelled = False
@@ -83,7 +88,6 @@ class BatchTranscription:
         on_error: Callable[[str], None] | None,
     ) -> None:
         from gi.repository import GLib
-        from openai import OpenAI
 
         log_file = None
         if self._session_dir:
@@ -107,9 +111,10 @@ class BatchTranscription:
                 except Exception:
                     pass
 
-        client = OpenAI(api_key=self._api_key)
         accumulated: list[str] = []
         wav_file = None
+        t_call = 0.0
+        t_first_delta = 0.0
 
         try:
             wav_size = os.path.getsize(wav_path)
@@ -130,51 +135,68 @@ class BatchTranscription:
             )
 
             wav_file = open(wav_path, "rb")  # noqa: SIM115 — closed in finally
-            try:
-                stream = client.audio.transcriptions.create(
-                    model=_MODEL,
-                    file=wav_file,
-                    response_format="text",
-                    stream=True,
-                )
-            except Exception:
-                wav_file.close()
-                raise
-
-            first_delta = True
-            events_received = 0
-            for event in stream:
-                _log_event(event)
-                events_received += 1
-                if self._cancelled:
-                    logger.debug(
-                        "_run: cancelled during streaming, events=%d",
-                        events_received,
-                    )
-                    stream.close()
-                    return
-                if event.type == "transcript.text.delta":
-                    text = event.delta
-                    accumulated.append(text)
-                    if first_delta:
-                        logger.debug("_run: first delta received, len=%d", len(text))
-                        first_delta = False
-                    GLib.idle_add(on_delta, text)
-                elif event.type == "transcript.text.done":
-                    usage = getattr(event, "usage", None)
-                    if usage:
-                        self._usage = {
-                            "input_tokens": getattr(usage, "input_tokens", 0),
-                            "output_tokens": getattr(usage, "output_tokens", 0),
-                        }
+            t_call = time.monotonic()
+            # `with` ensures stream.close() fires before we hand off to the
+            # cleanup phase, so the pooled TLS socket is returned to httpx
+            # before Cleanup's thread asks for one.
+            with self._client.audio.transcriptions.create(
+                model=_MODEL,
+                file=wav_file,
+                response_format="text",
+                stream=True,
+            ) as stream:
+                first_delta = True
+                events_received = 0
+                for event in stream:
+                    _log_event(event)
+                    events_received += 1
+                    if self._cancelled:
                         logger.debug(
-                            "_run: usage input_tokens=%d output_tokens=%d",
-                            self._usage["input_tokens"],
-                            self._usage["output_tokens"],
+                            "_run: cancelled during streaming, events=%d",
+                            events_received,
                         )
+                        return
+                    if event.type == "transcript.text.delta":
+                        text = event.delta
+                        accumulated.append(text)
+                        if first_delta:
+                            t_first_delta = time.monotonic()
+                            logger.debug(
+                                "_run: first delta received, len=%d", len(text)
+                            )
+                            first_delta = False
+                        GLib.idle_add(on_delta, text)
+                    elif event.type == "transcript.text.done":
+                        usage = getattr(event, "usage", None)
+                        if usage:
+                            self._usage = {
+                                "input_tokens": getattr(usage, "input_tokens", 0),
+                                "output_tokens": getattr(usage, "output_tokens", 0),
+                            }
+                            logger.debug(
+                                "_run: usage input_tokens=%d output_tokens=%d",
+                                self._usage["input_tokens"],
+                                self._usage["output_tokens"],
+                            )
 
             if not self._cancelled:
                 transcript = "".join(accumulated)
+                t_end = time.monotonic()
+                ttft_ms = int((t_first_delta - t_call) * 1000) if t_first_delta else 0
+                streaming_ms = (
+                    int((t_end - t_first_delta) * 1000) if t_first_delta else 0
+                )
+                total_ms = int((t_end - t_call) * 1000)
+                out_tokens = self._usage["output_tokens"] if self._usage else 0
+                logger.debug(
+                    "phase_timing: ttft_ms=%d streaming_ms=%d total_ms=%d "
+                    "out_tokens=%d chars=%d",
+                    ttft_ms,
+                    streaming_ms,
+                    total_ms,
+                    out_tokens,
+                    len(transcript),
+                )
                 logger.debug(
                     "_run: complete, transcript_len=%d events=%d",
                     len(transcript),

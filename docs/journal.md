@@ -572,3 +572,27 @@ Four rounds of code review caught: MockCleanup missing `usage` property (crash i
 **Why hand-rolled writer, not `tomli_w`/`tomlkit`:** every line in the template is `# key = value`, so the "serializer" is a 30-line string constant — zero value in pulling in a writer lib.
 
 **Reads synchronous, in-memory:** `CONFIG` is assigned once by `load()`. Modules that want stable reads use `from voxize import config; config.CONFIG.ducking.apps`. Importing the `CONFIG` name directly would capture the pre-load default — intentional pattern to keep the module as the source of truth.
+
+---
+
+### 2026-04-21 — Reuse TLS connection across batch and cleanup
+
+**Problem:** each phase (batch transcription, cleanup) constructed its own `OpenAI(api_key=...)` and therefore its own httpx `Client`. Both hit `api.openai.com`, but the connection pool wasn't shared — every phase paid a fresh TCP + TLS handshake. Measured baseline on a 2:46 dictation: batch TTFT 3632 ms, cleanup TTFT 1084 ms, total post-stop wait ~11.6 s.
+
+**Three-part fix:**
+
+1. **Shared client.** `app.py` now creates one `OpenAI(http_client=httpx.Client(limits=httpx.Limits(keepalive_expiry=900)))` in `_initialize` and hands it to both `BatchTranscription` and `Cleanup`. A single httpx pool spans the session.
+
+2. **Warmup pings.** On entering `RECORDING`, a `client.models.list()` fires in a daemon thread to establish the TLS socket. A `GLib.timeout_add_seconds(45, ...)` re-pings every 45 s while `RECORDING` is active, safely under typical cloud LB idle timeouts of 60–120 s. The 900 s `keepalive_expiry` is a client-side ceiling that accommodates 15-minute dictations if the user ever does one. Timer is removed on any transition out of `RECORDING`.
+
+3. **Drain patch on `openai._streaming.Stream.__stream__`.** Root cause of a residual cleanup regression: the SDK `break`s out of its SSE iterator when it sees `data: [DONE]` — which the `/v1/audio/transcriptions` endpoint emits — leaving the HTTP/1.1 chunked-transfer terminator unread. httpx treats a body that wasn't fully drained as unpoolable and opens a fresh connection for the next request. `src/voxize/openai_patches.py` monkey-patches `Stream.__stream__` to `continue` instead of `break`; the iterator then exhausts naturally and the body is fully drained. Installed once from `__main__.py`. Remove the `install()` call and the file to revert if upstream ships a fix.
+
+**Measurement logging:**
+
+- New `phase_timing: ttft_ms=... streaming_ms=... total_ms=... out_tokens=... chars=...` line in `batch.py` and `cleanup.py` using `time.monotonic()` deltas. Makes before/after diffs trivial.
+- `openai`, `httpx`, `httpcore` loggers are attached to the session `debug.log`; `httpcore.connection` at DEBUG records TCP connect + TLS handshake events so the exact reuse pattern is visible. `httpcore.http11`/`http2` held at INFO to avoid per-frame spam.
+- `warmup: start` / `warmup: complete duration_ms=...` for every ping.
+
+**Deterministic stream close in our code:** `batch.py` and `cleanup.py` wrap the streams in `with ... as stream:` so even without the SDK patch the stream is closed synchronously after iteration, not when GC decides. This alone did nothing for `/audio/transcriptions` (the patch does the actual work), but it keeps the lifecycle explicit and matters for the `/responses` endpoint where naturally-exhausting iteration already drained cleanly.
+
+**Measured end state (session 2026-04-21T20-32-22):** exactly one TCP+TLS handshake for the whole session (the initial warmup). Batch and cleanup both reuse it — no further `connect_tcp.started` entries. Batch TTFT 611 ms, cleanup TTFT 678 ms, total TTFT 1289 ms (down from 4716 ms baseline — **−3.4 s, −73 %**).

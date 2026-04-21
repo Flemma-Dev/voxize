@@ -19,12 +19,17 @@ if not os.environ.get("VOXIZE_MOCK"):
 
     exit_on_failure()
 
-from voxize import config  # noqa: E402
+from voxize import config, openai_patches  # noqa: E402
 from voxize.app import VoxizeApp  # noqa: E402 — must follow exit_on_failure()
 
 # Load user config exactly once, before any module reads it. First launch
 # creates ~/.config/voxize/voxize.toml populated with commented defaults.
 config.load()
+
+# Patch openai SDK so its streaming responses drain cleanly and httpx can
+# reuse the underlying TCP/TLS connection across batch → cleanup. Remove
+# this call (and src/voxize/openai_patches.py) if upstream fixes the bug.
+openai_patches.install()
 
 
 def main() -> None:

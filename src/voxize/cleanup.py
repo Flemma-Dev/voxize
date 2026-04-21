@@ -4,7 +4,7 @@ Runs a synchronous OpenAI SDK streaming call in a daemon thread. Delta
 tokens are posted to the GTK main thread via GLib.idle_add.
 
 Lifecycle:
-    c = Cleanup(api_key)
+    c = Cleanup(client)
     c.start(transcript=..., on_delta=..., on_complete=..., on_error=...)
     c.cancel()  # immediate — thread exits on next chunk
 """
@@ -16,9 +16,14 @@ import logging
 import os
 import secrets
 import threading
+import time
 from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 from voxize.prompt import PromptSource
+
+if TYPE_CHECKING:
+    from openai import OpenAI
 
 logger = logging.getLogger(__name__)
 
@@ -143,11 +148,11 @@ class Cleanup:
 
     def __init__(
         self,
-        api_key: str,
+        client: OpenAI,
         prompts: list[PromptSource] | None = None,
         session_dir: str | None = None,
     ) -> None:
-        self._api_key = api_key
+        self._client = client
         self._prompts = prompts or []
         self._session_dir = session_dir
         self._thread: threading.Thread | None = None
@@ -197,7 +202,6 @@ class Cleanup:
         on_error: Callable[[str], None] | None,
     ) -> None:
         from gi.repository import GLib
-        from openai import OpenAI
 
         log_file = None
         if self._session_dir:
@@ -241,47 +245,69 @@ class Cleanup:
             f"<transcription-{nonce}>\n{transcript}\n</transcription-{nonce}>"
         )
 
-        client = OpenAI(api_key=self._api_key)
         accumulated: list[str] = []
+        t_call = 0.0
+        t_first_delta = 0.0
 
         try:
             logger.debug("_run: calling API model=%s", _MODEL)
             _log_event(
                 {"type": "request", "model": _MODEL, "transcript_len": len(transcript)}
             )
-            stream = client.responses.create(
+            t_call = time.monotonic()
+            # `with` closes the stream deterministically so the pooled
+            # socket is returned to httpx promptly (matters less here than
+            # for batch, but keeps the two phases symmetrical).
+            with self._client.responses.create(
                 model=_MODEL,
                 reasoning={"effort": "low"},
                 instructions=system,
                 input=[{"role": "user", "content": user_message}],
                 stream=True,
                 store=False,
-            )
-
-            first_delta = True
-            for event in stream:
-                _log_event(event)
-                if self._cancelled:
-                    logger.debug("_run: cancelled during streaming")
-                    stream.close()
-                    return
-                if event.type == "response.output_text.delta":
-                    text = event.delta
-                    accumulated.append(text)
-                    if first_delta:
-                        logger.debug("_run: first delta received, len=%d", len(text))
-                        first_delta = False
-                    GLib.idle_add(on_delta, text)
-                elif event.type == "response.completed":
-                    usage = event.response.usage
-                    if usage:
-                        self._usage = {
-                            "input_tokens": usage.input_tokens,
-                            "output_tokens": usage.output_tokens,
-                        }
+            ) as stream:
+                first_delta = True
+                for event in stream:
+                    _log_event(event)
+                    if self._cancelled:
+                        logger.debug("_run: cancelled during streaming")
+                        return
+                    if event.type == "response.output_text.delta":
+                        text = event.delta
+                        accumulated.append(text)
+                        if first_delta:
+                            t_first_delta = time.monotonic()
+                            logger.debug(
+                                "_run: first delta received, len=%d", len(text)
+                            )
+                            first_delta = False
+                        GLib.idle_add(on_delta, text)
+                    elif event.type == "response.completed":
+                        usage = event.response.usage
+                        if usage:
+                            self._usage = {
+                                "input_tokens": usage.input_tokens,
+                                "output_tokens": usage.output_tokens,
+                            }
 
             if not self._cancelled:
                 cleaned = "".join(accumulated)
+                t_end = time.monotonic()
+                ttft_ms = int((t_first_delta - t_call) * 1000) if t_first_delta else 0
+                streaming_ms = (
+                    int((t_end - t_first_delta) * 1000) if t_first_delta else 0
+                )
+                total_ms = int((t_end - t_call) * 1000)
+                out_tokens = self._usage["output_tokens"] if self._usage else 0
+                logger.debug(
+                    "phase_timing: ttft_ms=%d streaming_ms=%d total_ms=%d "
+                    "out_tokens=%d chars=%d",
+                    ttft_ms,
+                    streaming_ms,
+                    total_ms,
+                    out_tokens,
+                    len(cleaned),
+                )
                 logger.debug("_run: complete, cleaned_len=%d", len(cleaned))
                 GLib.idle_add(on_complete, cleaned)
 

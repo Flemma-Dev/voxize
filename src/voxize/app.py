@@ -19,6 +19,7 @@ import logging
 import os
 import signal
 import threading
+import time
 from pathlib import Path
 
 import gi
@@ -27,7 +28,9 @@ gi.require_version("Gdk", "4.0")
 gi.require_version("Gtk", "4.0")
 
 # gi.require_version() above is executable code; all subsequent imports trigger E402.
+import httpx  # noqa: E402
 from gi.repository import Gdk, Gio, GLib, Gtk  # noqa: E402
+from openai import OpenAI  # noqa: E402
 
 from voxize import clipboard, config  # noqa: E402
 from voxize.audio import (  # noqa: E402
@@ -52,6 +55,12 @@ from voxize.ui import OverlayWindow  # noqa: E402
 logger = logging.getLogger(__name__)
 
 _MOCK = bool(os.environ.get("VOXIZE_MOCK"))
+
+# Connection pool keepalive for the shared OpenAI client. Client-side
+# upper bound; the server may idle-close sooner, which is why we also
+# fire periodic warmup pings while RECORDING.
+_KEEPALIVE_SECONDS = 900  # 15 minutes
+_WARMUP_INTERVAL_SECONDS = 45  # safely under typical LB idle timeouts (~60-120s)
 
 
 def _autoclose_seconds() -> int:
@@ -83,6 +92,12 @@ class VoxizeApp(Gtk.Application):
         self._transcription = None
         self._batch = None
         self._cleanup = None
+
+        # Shared OpenAI client for batch + cleanup. Single httpx connection
+        # pool so the TLS/HTTP1.1 keep-alive socket established during one
+        # phase can be reused by the next.
+        self._client: OpenAI | None = None
+        self._warmup_timer_id: int | None = None
 
         # Mock transcription (only in mock mode)
         self._mock_transcription: MockTranscription | None = None
@@ -205,9 +220,31 @@ class VoxizeApp(Gtk.Application):
         )
         logging.getLogger("voxize").addHandler(fh)
         logging.getLogger("voxize").setLevel(logging.DEBUG)
+        # Merge httpx/httpcore/openai logs into the session debug.log so we
+        # can see TLS handshakes, connection opens/closes, and connection
+        # reuse events alongside our own phase_timing lines. httpcore.http11
+        # and httpcore.http2 are per-frame noisy — keep them at INFO.
+        for name in ("openai", "httpx", "httpcore"):
+            lg = logging.getLogger(name)
+            lg.addHandler(fh)
+            lg.setLevel(logging.DEBUG)
+        logging.getLogger("httpcore.http11").setLevel(logging.INFO)
+        logging.getLogger("httpcore.http2").setLevel(logging.INFO)
         self._log_handler = fh
         logger.debug("_initialize: file logging active")
         logger.debug("_initialize: prompts=%d", len(self._prompts))
+
+        # Shared OpenAI client with extended keep-alive. httpx pools the
+        # TLS connection to api.openai.com; batch → cleanup (and warmed
+        # connections from the periodic ping) hit the same pool.
+        http_client = httpx.Client(
+            limits=httpx.Limits(keepalive_expiry=_KEEPALIVE_SECONDS),
+        )
+        self._client = OpenAI(api_key=self._api_key, http_client=http_client)
+        logger.debug(
+            "_initialize: openai client ready shared=True keepalive_expiry=%ds",
+            _KEEPALIVE_SECONDS,
+        )
 
         # Create providers
         logger.debug("_initialize: creating providers")
@@ -331,8 +368,19 @@ class VoxizeApp(Gtk.Application):
             if _MOCK:
                 self._mock_transcription = MockTranscription()
                 self._mock_transcription.start(on_delta=self._ui.append_text)
+            else:
+                # Warm the shared client's HTTP pool so batch's first call
+                # lands on an established TLS socket. Recurring pings keep
+                # the connection alive past typical LB idle timeouts.
+                self._start_warmup()
 
-        elif new == State.TRANSCRIBING:
+        # Leaving RECORDING — stop the warmup timer. We do this on every
+        # transition out (TRANSCRIBING, CANCELLED, ERROR) so the timer
+        # never outlives the recording phase.
+        if old == State.RECORDING:
+            self._stop_warmup()
+
+        if new == State.TRANSCRIBING:
             # Defer to next idle so the UI repaints with TRANSCRIBING state first
             GLib.idle_add(self._begin_transcribing)
 
@@ -365,6 +413,59 @@ class VoxizeApp(Gtk.Application):
 
         elif new == State.ERROR:
             self._teardown_async()
+
+    # ── Connection warmup ──
+
+    def _start_warmup(self) -> None:
+        """Fire an initial warmup ping and schedule recurring pings."""
+        if not self._client:
+            return
+        self._schedule_warmup_ping()
+        self._warmup_timer_id = GLib.timeout_add_seconds(
+            _WARMUP_INTERVAL_SECONDS, self._warmup_tick
+        )
+        logger.debug(
+            "_start_warmup: initial ping fired, timer_id=%s interval=%ds",
+            self._warmup_timer_id,
+            _WARMUP_INTERVAL_SECONDS,
+        )
+
+    def _stop_warmup(self) -> None:
+        if self._warmup_timer_id is not None:
+            GLib.source_remove(self._warmup_timer_id)
+            logger.debug("_stop_warmup: timer_id=%s removed", self._warmup_timer_id)
+            self._warmup_timer_id = None
+
+    def _warmup_tick(self) -> bool:
+        """GLib timer callback — fires every _WARMUP_INTERVAL_SECONDS."""
+        if not self._machine or self._machine.state != State.RECORDING:
+            self._warmup_timer_id = None
+            return False  # stop timer
+        self._schedule_warmup_ping()
+        return True  # keep timer
+
+    def _schedule_warmup_ping(self) -> None:
+        """Fire a warmup ping in a daemon thread (non-blocking)."""
+        threading.Thread(
+            target=self._warmup_ping,
+            daemon=True,
+            name="voxize-warmup",
+        ).start()
+
+    def _warmup_ping(self) -> None:
+        """Lightweight API call that opens / reuses the pooled TLS socket."""
+        client = self._client
+        if not client:
+            return
+        t0 = time.monotonic()
+        logger.debug("warmup: start")
+        try:
+            client.models.list()
+            duration_ms = int((time.monotonic() - t0) * 1000)
+            logger.debug("warmup: complete duration_ms=%d status=ok", duration_ms)
+        except Exception as e:
+            duration_ms = int((time.monotonic() - t0) * 1000)
+            logger.warning("warmup: failed duration_ms=%d error=%s", duration_ms, e)
 
     # ── Phase 1 → Phase 2 transition ──
 
@@ -467,7 +568,7 @@ class VoxizeApp(Gtk.Application):
             self._show_session_costs()
             return False
 
-        self._batch = BatchTranscription(self._api_key, session_dir=session_dir)
+        self._batch = BatchTranscription(self._client, session_dir=session_dir)
         self._batch.start(
             wav_path=wav_path,
             on_delta=self._ui.append_text,
@@ -546,7 +647,7 @@ class VoxizeApp(Gtk.Application):
             )
         else:
             self._cleanup = Cleanup(
-                self._api_key, prompts=self._prompts, session_dir=self._session_dir
+                self._client, prompts=self._prompts, session_dir=self._session_dir
             )
             self._cleanup.start(
                 transcript=transcript,
@@ -735,6 +836,7 @@ class VoxizeApp(Gtk.Application):
             self._ducker.restore_sync()
         except Exception:
             logger.exception("Close: failed to restore ducked volumes")
+        self._stop_warmup()
         self._teardown_async()
         if self._mock_transcription:
             self._mock_transcription.cancel()
@@ -742,6 +844,12 @@ class VoxizeApp(Gtk.Application):
             self._batch.cancel()
         if self._cleanup:
             self._cleanup.cancel()
+        if self._client:
+            try:
+                self._client.close()
+            except Exception:
+                logger.debug("Close: failed to close OpenAI client", exc_info=True)
+            self._client = None
         if self._ui:
             self._ui.destroy()
         # Prune old sessions (best-effort, at termination time)
@@ -751,7 +859,8 @@ class VoxizeApp(Gtk.Application):
             logger.debug("_on_close_request: prune_sessions failed", exc_info=True)
         # Remove session file log handler
         if self._log_handler:
-            logging.getLogger("voxize").removeHandler(self._log_handler)
+            for name in ("voxize", "openai", "httpx", "httpcore"):
+                logging.getLogger(name).removeHandler(self._log_handler)
             self._log_handler.close()
             self._log_handler = None
         # Redirect stdio to /dev/null so any parent process (e.g., GNOME Shell
