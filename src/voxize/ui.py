@@ -28,7 +28,12 @@ def _dbfs_to_fraction(dbfs: float) -> float:
 class OverlayWindow:
     """Builds and manages the Voxize overlay UI widgets."""
 
-    def __init__(self, window: Gtk.ApplicationWindow, machine: StateMachine) -> None:
+    def __init__(
+        self,
+        window: Gtk.ApplicationWindow,
+        machine: StateMachine,
+        autoclose_seconds: int = 0,
+    ) -> None:
         self._window = window
         self._machine = machine
         self._timer_seconds = 0
@@ -46,6 +51,9 @@ class OverlayWindow:
         self._had_first_text = False
         self._meter_source: int | None = None
         self._level_meter = None  # set via set_level_meter()
+        self._autoclose_total = autoclose_seconds
+        self._autoclose_remaining = 0
+        self._autoclose_source: int | None = None
         self._build()
         machine.on_change(self._on_state_change)
 
@@ -77,7 +85,9 @@ class OverlayWindow:
         header.pack_start(status)
 
         # Action buttons (end) — pack_end adds right-to-left
-        self._action_btn = Gtk.Button(label="Stop")
+        self._action_btn = Gtk.Button()
+        self._action_btn_label = Gtk.Label(label="Stop", use_markup=True)
+        self._action_btn.set_child(self._action_btn_label)
         self._action_btn.connect("clicked", self._on_action)
         self._action_btn.set_visible(False)
         header.pack_end(self._action_btn)
@@ -368,7 +378,7 @@ class OverlayWindow:
         self._stop_timer()
         self._degraded = True
         self._cancel_btn.set_visible(False)
-        self._action_btn.set_label("Close")
+        self._action_btn_label.set_label("Close")
         self._action_btn.add_css_class("flat")
         self._action_btn.set_visible(True)
         self._window.set_default_widget(self._action_btn)
@@ -405,6 +415,7 @@ class OverlayWindow:
         self._stop_pulse()
         self._stop_text_pulse()
         self._stop_meter()
+        self._stop_autoclose_countdown()
         self._awaiting_batch = False
         self._awaiting_cleanup = False
 
@@ -417,7 +428,7 @@ class OverlayWindow:
             self._timer_label.set_visible(True)
             self._copy_btn.set_visible(False)
             self._cancel_btn.set_visible(True)
-            self._action_btn.set_label("Stop")
+            self._action_btn_label.set_label("Stop")
             self._action_btn.remove_css_class("flat")
             self._action_btn.set_visible(True)
             self._window.set_default_widget(self._action_btn)
@@ -457,10 +468,12 @@ class OverlayWindow:
             self._timer_label.set_visible(False)
             self._copy_btn.set_visible(True)
             self._cancel_btn.set_visible(False)
-            self._action_btn.set_label("Close")
+            self._action_btn_label.set_label("Close")
             self._action_btn.add_css_class("flat")
             self._action_btn.set_visible(True)
             self._window.set_default_widget(self._action_btn)
+            if self._autoclose_total > 0 and self._window.is_active():
+                self._start_autoclose_countdown()
 
         elif new == State.CANCELLED:
             self._stop_timer()
@@ -475,7 +488,7 @@ class OverlayWindow:
             self._timer_label.set_visible(False)
             self._stop_timer()
             self._cancel_btn.set_visible(False)
-            self._action_btn.set_label("Close")
+            self._action_btn_label.set_label("Close")
             self._action_btn.add_css_class("flat")
             self._action_btn.set_visible(True)
             self._window.set_default_widget(self._action_btn)
@@ -488,6 +501,11 @@ class OverlayWindow:
             self._text_view.remove_css_class("backdrop")
         else:
             self._text_view.add_css_class("backdrop")
+        if self._machine.state == State.READY and self._autoclose_total > 0:
+            if active:
+                self._start_autoclose_countdown()
+            else:
+                self._stop_autoclose_countdown()
 
     # ── Level meter ──
 
@@ -591,6 +609,42 @@ class OverlayWindow:
         self._timer_label.set_text(f"{m:02d}:{s:02d}")
         return True
 
+    # ── Auto-close countdown ──
+
+    def _start_autoclose_countdown(self) -> None:
+        """Start (or restart) the countdown to auto-close the window.
+
+        Always restarts from the full duration — regaining focus after a
+        blur gives the user a fresh window to interact with the overlay.
+        The remaining seconds are appended to the Close button label.
+        """
+        self._stop_autoclose_countdown()
+        self._autoclose_remaining = self._autoclose_total
+        self._update_autoclose_label()
+        self._autoclose_source = GLib.timeout_add_seconds(1, self._tick_autoclose)
+
+    def _stop_autoclose_countdown(self) -> None:
+        if self._autoclose_source is None:
+            return
+        GLib.source_remove(self._autoclose_source)
+        self._autoclose_source = None
+        self._action_btn_label.set_label("Close")
+
+    def _update_autoclose_label(self) -> None:
+        self._action_btn_label.set_label(
+            f'Close <span weight="light" fgalpha="50%">'
+            f"({self._autoclose_remaining}s)</span>"
+        )
+
+    def _tick_autoclose(self) -> bool:
+        self._autoclose_remaining -= 1
+        if self._autoclose_remaining <= 0:
+            self._autoclose_source = None
+            self._window.close()
+            return False
+        self._update_autoclose_label()
+        return True
+
     # ── Pulse animation ──
 
     def _start_pulse(self) -> None:
@@ -647,3 +701,4 @@ class OverlayWindow:
         self._stop_pulse()
         self._stop_text_pulse()
         self._stop_meter()
+        self._stop_autoclose_countdown()

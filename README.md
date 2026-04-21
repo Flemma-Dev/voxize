@@ -89,7 +89,7 @@ Backend modules (`state.py`, `audio.py`, `transcribe.py`, `cleanup.py`, `storage
 
 **WHISPER.txt** — Place a `WHISPER.txt` file in your working directory. On launch, Voxize resolves the focused window's CWD (via the [Window Calls](https://extensions.gnome.org/extension/4724/window-calls/) extension and `/proc`) and loads the file as transcription context, improving accuracy for domain-specific vocabulary. There is no upward search — the file must be in the exact directory the focused process is running from.
 
-**`VOXIZE_AUTOCLOSE`** — Seconds before the overlay auto-closes in READY state. Default `30`. Set to `0` to disable.
+**`VOXIZE_AUTOCLOSE`** — Seconds of focused READY state before the overlay auto-closes. Default `30`. The countdown is shown in the title bar and pauses when the window loses focus — regaining focus restarts it from the full duration. Set to `0` to disable.
 
 **Session data** — `~/.local/state/voxize/`. Each session directory contains `audio.wav`, `transcription.txt`, `cleaned.txt`, `ws_events.jsonl`, and `debug.log`.
 

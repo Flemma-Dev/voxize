@@ -85,9 +85,6 @@ class VoxizeApp(Gtk.Application):
 
         # Prompt detection (set in do_activate before window present)
 
-        # Auto-close timer
-        self._autoclose_source: int | None = None
-
         # Session-level file log handler
         self._log_handler = None
 
@@ -122,7 +119,7 @@ class VoxizeApp(Gtk.Application):
         # State machine + UI
         self._machine = StateMachine()
         self._machine.on_change(self._on_state_change)
-        self._ui = OverlayWindow(win, self._machine)
+        self._ui = OverlayWindow(win, self._machine, autoclose_seconds=_AUTOCLOSE)
 
         win.present()
         self._ui.setup_max_height()
@@ -299,14 +296,6 @@ class VoxizeApp(Gtk.Application):
 
     def _on_state_change(self, machine: StateMachine, old: State, new: State) -> None:
         logger.debug("_on_state_change: %s -> %s", old.name, new.name)
-        # Cancel pending timers
-        self._cancel_autoclose()
-
-        if new == State.READY and _AUTOCLOSE > 0:
-            logger.debug("_on_state_change: scheduling autoclose in %ds", _AUTOCLOSE)
-            self._autoclose_source = GLib.timeout_add_seconds(
-                _AUTOCLOSE, self._on_autoclose
-            )
 
         if new == State.RECORDING:
             self._live_usage = None
@@ -688,22 +677,6 @@ class VoxizeApp(Gtk.Application):
             win.close()
         return True
 
-    def _on_autoclose(self) -> bool:
-        """Auto-close the window after the READY timeout."""
-        logger.debug("_on_autoclose: firing")
-        self._autoclose_source = None
-        if self._machine and self._machine.state == State.READY:
-            win = self.get_active_window()
-            if win:
-                win.close()
-        return GLib.SOURCE_REMOVE
-
-    def _cancel_autoclose(self) -> None:
-        if self._autoclose_source is not None:
-            logger.debug("_cancel_autoclose: removing pending autoclose timer")
-            GLib.source_remove(self._autoclose_source)
-            self._autoclose_source = None
-
     def _on_signal(self, sig: int) -> bool:
         """Handle SIGTERM/SIGINT — finalize WAV, release lock, quit."""
         logger.debug("_on_signal: sig=%s", sig)
@@ -724,7 +697,6 @@ class VoxizeApp(Gtk.Application):
 
     def _on_close_request(self, _win) -> bool:
         logger.debug("_on_close_request: entry")
-        self._cancel_autoclose()
         self._teardown_async()
         if self._mock_transcription:
             self._mock_transcription.cancel()

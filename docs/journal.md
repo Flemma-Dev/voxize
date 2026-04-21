@@ -526,3 +526,13 @@ Removed all drain machinery: `_draining` flag, `_drain_complete` event, `_items_
 ### Review findings (four passes)
 
 Four rounds of code review caught: MockCleanup missing `usage` property (crash in mock mode), `_batch_transcript` not initialized, file handle leak in batch.py, CSS class leak (`transcribing`/`initializing` not in removal list), missing `.status-dot.transcribing` CSS rule, stale WS delta race (fixed with state check in `_awaiting_batch` swap), hardcoded WAV byte rate (replaced with audio.py constants), `_initialize` state guard (cancel-during-init race).
+
+---
+
+### 2026-04-21 — Focus-aware auto-close countdown
+
+**Problem:** fixed 30s auto-close fires even when the window is blurred, so if the user alt-tabs into another app for longer than 30s there's nothing to come back to.
+
+**Change:** the countdown is now gated on window focus — cancel on blur, restart from the full duration on refocus. Ownership moved from `app.py` to `ui.py`, which already manages the recording timer and listens to `notify::is-active`. The remaining seconds are shown inline on the Close button as `Close (30s)`, `Close (29s)`, … so there's no layout shift and no ambiguity about what the number means. The `(Ns)` span is rendered with `weight="light" fgalpha="50%"` via Pango markup — requires a custom `Gtk.Label` child on the button since `Gtk.Button.set_label()` is plaintext-only.
+
+`VOXIZE_AUTOCLOSE=0` still disables the behaviour entirely.

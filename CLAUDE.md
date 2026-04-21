@@ -119,4 +119,4 @@ Libadwaita uses CSS custom properties (`--name` / `var(--name)`), not `@define-c
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `VOXIZE_AUTOCLOSE` | `30` | Seconds before overlay auto-closes in READY state. `0` to disable. |
+| `VOXIZE_AUTOCLOSE` | `30` | Seconds of focused READY state before overlay auto-closes. Countdown resets on blur and restarts on refocus. `0` to disable. |
