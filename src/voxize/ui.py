@@ -441,7 +441,6 @@ class OverlayWindow:
             self.clear_text()
 
         elif new == State.TRANSCRIBING:
-            self._context_label.set_visible(False)
             self._status_label.set_text("Transcribing\u2026")
             self._timer_label.set_visible(False)
             self._stop_timer()
