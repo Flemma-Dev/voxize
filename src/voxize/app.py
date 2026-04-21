@@ -32,6 +32,7 @@ import httpx  # noqa: E402
 from gi.repository import Gdk, Gio, GLib, Gtk  # noqa: E402
 from openai import OpenAI  # noqa: E402
 
+from voxize import cleanup as cleanup_mod  # noqa: E402
 from voxize import clipboard, config  # noqa: E402
 from voxize.audio import (  # noqa: E402
     CHANNELS,
@@ -453,16 +454,34 @@ class VoxizeApp(Gtk.Application):
         ).start()
 
     def _warmup_ping(self) -> None:
-        """Lightweight API call that opens / reuses the pooled TLS socket."""
+        """Warm the pooled TLS socket.
+
+        We call ``client.models.retrieve(MODEL)`` because gpt-5.4-nano does
+        not participate in OpenAI's automatic prompt caching (see the
+        2026-04-21 journal entry). A heavier ``responses.create`` warmup
+        aimed at priming the cache was tried and empirically confirmed to
+        return 0 cached tokens on every subsequent cleanup call; we
+        reverted to the cheap lookup until OpenAI lights caching up for
+        the gpt-5 nano/mini tier.
+
+        If/when auto caching starts working for our model, flip this back
+        to the ``responses.create``-shaped warmup (see git history for
+        commit that introduced it) and re-enable the
+        ``_accumulate_warmup_usage`` call that populates the Pings cost
+        line.
+        """
         client = self._client
         if not client:
             return
         t0 = time.monotonic()
         logger.debug("warmup: start")
         try:
-            client.models.list()
+            client.models.retrieve(cleanup_mod.MODEL)
             duration_ms = int((time.monotonic() - t0) * 1000)
-            logger.debug("warmup: complete duration_ms=%d status=ok", duration_ms)
+            logger.debug(
+                "warmup: complete duration_ms=%d status=ok kind=models.retrieve",
+                duration_ms,
+            )
         except Exception as e:
             duration_ms = int((time.monotonic() - t0) * 1000)
             logger.warning("warmup: failed duration_ms=%d error=%s", duration_ms, e)
@@ -505,8 +524,13 @@ class VoxizeApp(Gtk.Application):
         return False  # one-shot idle
 
     def _stop_and_batch(self, audio, transcription, session_dir) -> None:
-        """Background thread: stop audio + WS, then start batch on GTK thread."""
-        # Stop audio capture first (fast — finalizes WAV header)
+        """Background thread: stop audio, kick off batch, tear down WS in parallel.
+
+        Once ``audio.stop()`` has finalized the WAV, the batch POST has
+        everything it needs. Firing it before ``transcription.stop()``
+        overlaps the WS close/usage-wait (~100ms) with batch TTFT.
+        """
+        # Step 1: stop audio — must complete before batch reads the WAV.
         logger.debug("_stop_and_batch: stopping audio")
         try:
             if audio:
@@ -515,7 +539,23 @@ class VoxizeApp(Gtk.Application):
             logger.exception("Failed to stop audio")
         logger.debug("_stop_and_batch: audio stopped")
 
-        # Cancel WS immediately — no drain, live transcript is throwaway
+        # Log WAV file info (cheap; do before the handoff).
+        wav_path = os.path.join(session_dir, "audio.wav") if session_dir else None
+        if wav_path and os.path.exists(wav_path):
+            wav_size = os.path.getsize(wav_path)
+            logger.debug(
+                "_stop_and_batch: wav_size=%d (%.1fs audio)",
+                wav_size,
+                (wav_size - WAV_HEADER_SIZE) / (SAMPLE_RATE * CHANNELS * 2),
+            )
+
+        # Step 2: kick off batch now. It runs concurrently with the
+        # transcription teardown that follows.
+        logger.debug("_stop_and_batch: dispatching batch start")
+        GLib.idle_add(self._start_batch, session_dir)
+
+        # Step 3: cancel WS (live_transcript.stop() can wait up to 2s for
+        # usage events — that's what we're parallelising away).
         logger.debug("_stop_and_batch: cancelling transcription")
         live_usage = None
         live_transcript = ""
@@ -538,22 +578,17 @@ class VoxizeApp(Gtk.Application):
             except Exception:
                 logger.exception("Failed to save live_transcript.txt")
 
-        # Log WAV file info
-        wav_path = os.path.join(session_dir, "audio.wav") if session_dir else None
-        if wav_path and os.path.exists(wav_path):
-            wav_size = os.path.getsize(wav_path)
-            logger.debug(
-                "_stop_and_batch: wav_size=%d (%.1fs audio)",
-                wav_size,
-                (wav_size - WAV_HEADER_SIZE) / (SAMPLE_RATE * CHANNELS * 2),
-            )
+        # Step 4: hand live-preview usage back to GTK for the cost summary.
+        GLib.idle_add(self._set_live_usage, live_usage)
 
-        # Post back to GTK thread to start batch transcription
-        GLib.idle_add(self._start_batch, session_dir, live_usage)
-
-    def _start_batch(self, session_dir: str, live_usage) -> bool:
-        """GTK thread: start batch transcription of the WAV file."""
+    def _set_live_usage(self, live_usage) -> bool:
+        """GTK thread: store live-preview usage once WS teardown settles."""
+        logger.debug("_set_live_usage: live_usage=%s", live_usage)
         self._live_usage = live_usage
+        return False
+
+    def _start_batch(self, session_dir: str) -> bool:
+        """GTK thread: start batch transcription of the WAV file."""
         logger.debug("_start_batch: session_dir=%s", session_dir)
 
         # Guard against stale callback (e.g., user cancelled during stop)
@@ -755,7 +790,22 @@ class VoxizeApp(Gtk.Application):
     _BATCH_INPUT_PRICE = 2.50  # gpt-4o-transcribe
     _BATCH_OUTPUT_PRICE = 10.00
     _CLEANUP_INPUT_PRICE = 0.20  # gpt-5.4-nano
+    _CLEANUP_CACHED_INPUT_PRICE = 0.02  # 10% of standard (benchlm.ai pricing guide)
     _CLEANUP_OUTPUT_PRICE = 1.25
+
+    def _nano_cost(self, usage: dict[str, int] | None) -> float | None:
+        """Cost for a nano call, splitting cached vs non-cached input tokens."""
+        if not usage:
+            return None
+        inp = usage.get("input_tokens", 0)
+        out = usage.get("output_tokens", 0)
+        cached = usage.get("cached_tokens", 0) or 0
+        uncached = max(inp - cached, 0)
+        return (
+            uncached * self._CLEANUP_INPUT_PRICE
+            + cached * self._CLEANUP_CACHED_INPUT_PRICE
+            + out * self._CLEANUP_OUTPUT_PRICE
+        ) / 1_000_000
 
     def _show_session_costs(self) -> None:
         """Compute dollar costs from provider usage and display in UI."""
@@ -779,8 +829,12 @@ class VoxizeApp(Gtk.Application):
         b_cost = _cost(
             self._batch_usage, self._BATCH_INPUT_PRICE, self._BATCH_OUTPUT_PRICE
         )
-        c_cost = _cost(
-            self._cleanup_usage, self._CLEANUP_INPUT_PRICE, self._CLEANUP_OUTPUT_PRICE
+        c_cost = self._nano_cost(self._cleanup_usage)
+        logger.debug(
+            "_show_session_costs: live=%s batch=%s cleanup=%s",
+            f"{l_cost:.4f}" if l_cost is not None else "n/a",
+            f"{b_cost:.4f}" if b_cost is not None else "n/a",
+            f"{c_cost:.4f}" if c_cost is not None else "n/a",
         )
 
         if l_cost is not None or b_cost is not None or c_cost is not None:

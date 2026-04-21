@@ -596,3 +596,137 @@ Four rounds of code review caught: MockCleanup missing `usage` property (crash i
 **Deterministic stream close in our code:** `batch.py` and `cleanup.py` wrap the streams in `with ... as stream:` so even without the SDK patch the stream is closed synchronously after iteration, not when GC decides. This alone did nothing for `/audio/transcriptions` (the patch does the actual work), but it keeps the lifecycle explicit and matters for the `/responses` endpoint where naturally-exhausting iteration already drained cleanly.
 
 **Measured end state (session 2026-04-21T20-32-22):** exactly one TCP+TLS handshake for the whole session (the initial warmup). Batch and cleanup both reuse it — no further `connect_tcp.started` entries. Batch TTFT 611 ms, cleanup TTFT 678 ms, total TTFT 1289 ms (down from 4716 ms baseline — **−3.4 s, −73 %**).
+
+---
+
+### 2026-04-21 — gpt-5.4-nano prompt-cache dead end (verbose post-mortem)
+
+This entry is long on purpose. A future session resuming this work needs the full picture of what we tried, what the evidence said, and which doors remain open. Do not trim.
+
+**Starting hypothesis (brainstorm round 2, post the TLS-reuse win above):** if we could engage OpenAI's *automatic prompt caching* on the 1300-token cleanup system prompt, we'd chop another 150–400 ms off cleanup TTFT **and** halve the input-token cost. The Opus agent's ranked idea list named three levers that compound into that goal:
+
+- **Idea #2 — nonce out of the system prompt.** The anti-prompt-injection nonce was embedded in `_SYSTEM_PROMPT` as `{nonce}` three times, so every cleanup call rendered a byte-different prompt and thus a different prefix hash. No two calls could ever match the cache.
+- **Idea #3 — pre-warm the cache during RECORDING.** Fire a throwaway `responses.create` with the real cleanup system prompt while the user is still talking, so by the time cleanup runs the cache prefix is already populated.
+- **Idea #5 — reorder `_stop_and_batch`.** Hand off to batch on the GTK thread before `transcription.stop()` waits for the WS usage events (up to 2 s).
+- **Idea #8 — fallback.** If the combined responses-based warmup misbehaved, fall back to `models.retrieve(MODEL)` which is a single-item lookup (cheaper than `models.list()`).
+
+#### What landed in this iteration
+
+1. **`_SYSTEM_PROMPT` is now nonce-free.** `src/voxize/cleanup.py` — the `{nonce}` template variable was scrubbed from the Safety section (line ~42) and Reminders #3 (line ~141). The Safety paragraph now describes the wrapper tag pattern abstractly: "`<transcription-XXXX>...</transcription-XXXX>` where XXXX is a random identifier chosen fresh per request". The per-call nonce (`secrets.token_hex(8)`) still wraps the **user message** — so the injection defence holds (the attacker can't guess the closing tag) while the system-prompt prefix is byte-stable across calls. This change is **keeper** regardless of whether caching ever engages.
+2. **`build_system_prompt(prompts)` helper in `cleanup.py`.** Assembles `_SYSTEM_PROMPT` + the optional `<vocabulary-guidance>` block. Both the real `Cleanup._run` and any warmup that wants to prime the cache can call it with the same argument and get bit-identical output.
+3. **`MODEL` exported as a module-level public constant** (was `_MODEL`). Used by `app.py` so the warmup targets the exact model the real cleanup call will use.
+4. **`cached_tokens` in the cleanup `phase_timing` log** and in `self._usage`. Pulled from `response.usage.input_tokens_details.cached_tokens` on `response.completed`. Zero today; we want the column there the day it's non-zero.
+5. **`_stop_and_batch` reorder (idea #5).** After `audio.stop()` finalises the WAV, we `GLib.idle_add(_start_batch, session_dir)` **before** calling `transcription.stop()`. Batch's HTTP POST runs concurrently with the WS-close / `_data_ready.wait(timeout=2.0)`. Live-preview usage arrives later via a separate `_set_live_usage` idle callback. Expected saving ~50–150 ms; the actual win is masked by OpenAI backend latency variance, but the reorder is still correct and cost-free.
+6. **Cached-token-aware cleanup cost** (`_nano_cost` helper, `_CLEANUP_CACHED_INPUT_PRICE = 0.02`). Cached vs non-cached input tokens are split and billed separately at the benchlm.ai-documented rate (gpt-5.4-nano: `$0.20/M` standard, `$0.02/M` cached — 10 % of standard). Today this is a no-op because cleanup returns `cached_tokens=0`; the day caching works, cost accounting is already correct.
+
+All six items above are in the working tree.
+
+#### What we tried and reverted: responses.create-based warmup
+
+Originally the warmup did `client.models.list()` (from the prior TLS-reuse work). We swapped it for:
+
+```python
+client.responses.create(
+    model=cleanup_mod.MODEL,                                  # gpt-5.4-nano
+    reasoning={"effort": "low"},
+    instructions=cleanup_mod.build_system_prompt(self._prompts),
+    input=[{"role": "user", "content": "."}],
+    max_output_tokens=16,
+    stream=False,
+    store=False,
+)
+```
+
+The intent: one call per 45 s ping that (a) keeps the TLS socket warm and (b) primes the automatic prompt cache for the cleanup system prompt. Byte-identical `instructions`, same model, same `reasoning.effort`.
+
+**Session 2026-04-21T21-15-10** — the test run:
+- Warmup at T+0: `in_tokens=1393 cached_tokens=0 out_tokens=16` — `status=incomplete` because `max_output_tokens=16` got eaten by the model's reasoning tokens. 888 ms TCP+TLS establish plus ping.
+- Cleanup at T+12 s: `in_tokens=1460 cached_tokens=0` — **zero cache hit**. Same `instructions`, same model, same reasoning effort.
+- Cleanup TTFT 450 ms, total 969 ms — better than the 678 ms cleanup TTFT baseline but within variance. Not attributable to caching.
+- Cleanup connection was pooled (no `connect_tcp.started` on voxize-cleanup thread); drain patch still working.
+
+#### Empirical deep-dive on the miss
+
+Ran a sequence of probes against the live API (`dangerouslyDisableSandbox: true`):
+
+1. **Does `max_output_tokens=16` → `status=incomplete` block cache writes?** Tested same request with `max_output_tokens=128` (→ `status=completed`). Three back-to-back calls: `cached=0, 0, 0`. **Completed status does not fix it.**
+2. **Does `store=True` help?** Three back-to-back with `store=True`: `cached=0, 0, 0`. Two with `store=False`: `cached=0, 0`. **`store` parameter does not affect caching.**
+3. **Identical user message (to rule out user-side prefix mismatch):** three back-to-back with identical `<transcription-abc12345>Hey world! How are you?...</transcription-abc12345>`: `cached=0, 0, 0`.
+4. **Cross-model comparison, same org, same prompt, 1300-ish shared tokens:**
+   - gpt-4o-mini: `cached=0, 0, 1152` (hit on call 3 of 3)
+   - gpt-4o: `cached=0, 0, 0`
+   - gpt-4.1: `cached=0, 0, 1280` (hit on call 3)
+   - gpt-4.1-mini: `cached=0, 0, 0`
+   - gpt-4.1-nano: `cached=0, 0, 0`
+   - gpt-5: `cached=0, 0, 1280`
+   - gpt-5-mini: `cached=0, 1280, 1280`
+   - gpt-5-nano: `cached=0, 1152, 0`
+   - **gpt-5.4-nano: `cached=0, 0, 0`**
+5. **After ~5–10 min propagation delay**, repeated 5 calls per model:
+   - gpt-5.4-nano: **0/5 hits** (10/10 misses over full test)
+   - gpt-4o: 2/5
+   - gpt-4.1-nano: 2/5
+   - gpt-4.1-mini: 0/5
+   - gpt-4o-mini: 1/5
+
+Cache hit rates are flaky for every model (2/5 is "working"), which looks like request-routing to different backend replicas — a prefix on replica A is invisible to replica B. But **gpt-5.4-nano produced zero hits across 15 attempts** spanning ~15 minutes while sibling nano-tier models (`gpt-4.1-nano`, `gpt-5-nano`) did hit in the same window. The model, not our org/region/code, is the variable.
+
+#### Community research (four sources, full read-through)
+
+See the end of this entry for URLs. Summary:
+
+- **Dedicated "gpt-5.4-nano zero cache hits" thread (2026-04-03):** OP reports exactly our symptom — ~1213-token shared prefix, 0 cache hits, while `gpt-5-nano` on the same gateway caches. OpenAI_Support reply (2026-04-20): "please confirm if it persists." Nothing else. No bug ID, no workaround.
+- **"Caching is borked for gpt-5 models" megathread (2025-09 → 2026-01):** Same issue across the gpt-5 nano/mini tier. Multiple independent benchmarks (posters "_j", "prompteer", "stroop") confirm gpt-5-nano / gpt-5-mini / gpt-5.2 all hit 0% while gpt-5 / gpt-5.1 hit 100%. Community tried `prompt_cache_key=<stable_value>` (no effect), `user=<stable_value>` (no effect), `role: developer` in `input=` vs `instructions=` (no effect), Chat Completions instead of Responses (no effect), Azure with `api-version=2025-04-01-preview` (Azure-specific fix, not applicable). OpenAI staff Foxalabs acknowledged and escalated internally in Oct 2025; by Jan 2026 OpenAI_Support said "we don't have any known cache issues." No fix committed.
+- **"problem caching system prompt" thread (2025-08):** OP blames `instructions=` parameter, moves prompt into `input=` with `role: developer`. Confirms no improvement. Another poster speculates `previous_response_id` might help — **no hard evidence in any of these threads** that it engages caching on nano.
+- **benchlm.ai pricing guide (2026-04-13):** Documents gpt-5.4-nano at `$0.20/M` input, `$0.02/M` cached input (10 % of uncached), "automatic, no code changes, no special flag." So caching is *supposed* to work. Reality on nano-5.4: it doesn't.
+
+#### What's in place after the revert (code state as of this commit)
+
+- `src/voxize/cleanup.py`: nonce-free `_SYSTEM_PROMPT`, public `MODEL`, `build_system_prompt()`, `cached_tokens` threaded through `phase_timing` and `self._usage`.
+- `src/voxize/app.py`:
+  - `_warmup_ping` now calls `client.models.retrieve(cleanup_mod.MODEL)` — a cheap single-item lookup (idea #8 fallback). No usage returned, no cost tracked.
+  - `_accumulate_warmup_usage`, `self._warmup_usage`, and the "Pings" UI entry were stripped out with the revert — they were scaffolding tied to the responses.create warmup and would have been dead code under models.retrieve. They show up clearly in `git log` if/when someone wants to restore them.
+  - `_CLEANUP_CACHED_INPUT_PRICE = 0.02` and `_nano_cost` helper are kept — the cleanup cost already does cached-vs-uncached accounting the day caching lights up.
+  - `_stop_and_batch` reorder + `_set_live_usage` callback are kept.
+  - `ui.py` `show_session_costs` is back to its three-cost signature (no warmup_cost parameter).
+
+#### What's deferred (the "revisit one day" list)
+
+Three levers we did not exercise. Each has enough context below to pick up cold.
+
+**D1. `previous_response_id` chaining (community-suggested, untested on nano).** The Responses API lets you thread `previous_response_id=<prior id>` onto a new call, which the docs describe as reusing the server-side rendered prompt. Requires `store=True`, which flips on server-side retention (costs storage, typically 30-day retention). Shape:
+- Fire an initial `client.responses.create(..., store=True)` as a warmup, save the returned `response.id`.
+- On real cleanup, call `client.responses.create(..., previous_response_id=warmup_id, store=True)` and omit `instructions=` (inherited from the parent response).
+- Measure `cached_tokens` on the cleanup response.
+- If it works: build a per-session chain — the warmup response's id rotates into each subsequent cleanup.
+- Risks: (a) still no evidence from the community that this path caches on gpt-5.4-nano; (b) parent response may be GC'd unexpectedly; (c) chain drift if we ever fork the system prompt shape mid-session.
+
+**D2. Switch cleanup model.** `gpt-5` and `gpt-5.1` (full-size) were the only models that reliably cached in every test. Pricing is ~10× gpt-5.4-nano per token, but if cache hits at 90 %+ the effective price is closer to 2–3× while gaining reliable ~150–400 ms TTFT reduction. **Before switching, need an A/B quality check** — the prompt has been tuned specifically for nano-class weakness patterns (over-bolding, paragraph splitting). A bigger model will likely behave differently. Two weeks of saved test transcripts live in `~/.local/state/voxize/` — re-running cleanup on a handful through `gpt-5` or `gpt-5.1` is the natural A/B harness.
+
+**D3. Trim the cleanup system prompt (Opus agent idea #6).** Currently ~1320 tokens. Target ~600. Worked-example could be halved, "DO NOT BOLD OR ITALICIZE" list could be compressed, "Reminders" section is partly redundant with "Process". Uncached TTFT cost of the 700 extra tokens is roughly ~50–100 ms at nano-class prefill speeds; bigger win is input-token cost. **Risk: quality regression**, since the prompt has been iterated on carefully (see commit f26002c "feat: rewrite cleanup prompt for Nano-tier model"). Any trim needs re-testing against saved transcripts in `~/.local/state/voxize/`, not just a one-off prose rewrite.
+
+#### How to resume if/when OpenAI fixes nano caching
+
+1. Run the probe script pattern used in this session (see command history): three back-to-back `responses.create` calls with `instructions=build_system_prompt()` against `gpt-5.4-nano`, read `usage.input_tokens_details.cached_tokens`. Expect hits if fixed.
+2. If hits appear: re-enable the responses-based warmup in `_warmup_ping`. The shape we used is in `git log` — look for the commit that first introduced the `responses.create` call in `app.py` and port: the `responses.create(model, reasoning, instructions=build_system_prompt(prompts), input=[{"role":"user","content":"."}], max_output_tokens=..., store=False, stream=False)` body replaces the `models.retrieve` body. Re-add the `_warmup_usage` accumulator, the `_accumulate_warmup_usage` method, the `warmup_cost` feed into `_show_session_costs`, and the `Pings` entry in `ui.py.show_session_costs` (all of which were in the pre-revert commit).
+3. Tune `max_output_tokens`: with `reasoning.effort=low`, 11 reasoning tokens + a few output tokens is typical, so **at least 64** to avoid `status=incomplete`. Higher is wasteful but safe. Or drop the parameter entirely — a completed 50-output-token response still costs a small fraction of a cent per ping.
+4. Verify `cached_tokens` non-zero in the cleanup `phase_timing` log (this log line is in place).
+5. Cost accounting: `_CLEANUP_CACHED_INPUT_PRICE = 0.02` is already set to the benchlm.ai-documented gpt-5.4-nano cached rate ($0.02/M, 10 % of standard input). Verify this hasn't drifted in OpenAI's pricing before relying on it.
+
+#### Reference URLs
+
+- https://community.openai.com/t/gpt-5-4-nano-appears-to-return-zero-prompt-cache-hits-despite-1024-token-shared-prefixes/1378432
+- https://community.openai.com/t/problem-caching-system-prompt/1346849
+- https://community.openai.com/t/caching-is-borked-for-gpt-5-models/1359574
+- https://benchlm.ai/blog/posts/openai-api-pricing
+
+#### Measured wins that *did* stick this iteration
+
+Ignoring the cache miss, what's in the tree vs the pre-iteration baseline:
+
+- **TLS-reuse + drain patch (prior commit 32311fb):** kept. Batch 611 ms, cleanup 678 ms, total TTFT 1289 ms.
+- **`_stop_and_batch` reorder:** 50–150 ms saved on transcription teardown (measured as "transcription cancelled" log line firing ~1 ms after "dispatching batch start" — effectively all overlap). Net effect in `2026-04-21T21-15-10`: cleanup TTFT 450 ms (down from 678 ms); batch TTFT 1163 ms (up, backend variance). Session total 969 ms from Stop → transcript-ready.
+- **Nonce-free system prompt:** no measurable wall-clock change (caching doesn't engage anyway), but the prefix is byte-stable and ready for the day it does.
+- **Pings revert to `models.retrieve`:** cost per ping ~$0 (no usage returned); TLS socket still kept warm at the 45 s cadence.
+
+Upstream cap without caching is roughly the server-side processing time: `openai-processing-ms` header for this session showed batch `971 ms` and cleanup `126 ms`. Cleanup is the clear sub-100 ms-TTFT target the day caching does engage; batch is dominated by audio upload + Whisper-family inference and won't benefit from prompt caching at all.

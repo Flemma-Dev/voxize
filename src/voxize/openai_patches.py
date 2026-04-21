@@ -79,12 +79,14 @@ def install() -> None:
                             request=self.response.request,
                             body=data["error"],
                         )
+                    opts = getattr(self, "_options", None)
+                    synthesize = bool(
+                        opts is not None
+                        and getattr(opts, "synthesize_event_and_data", False)
+                    )
                     yield process_data(
                         data=(
-                            {"data": data, "event": sse.event}
-                            if self._options is not None
-                            and self._options.synthesize_event_and_data
-                            else data
+                            {"data": data, "event": sse.event} if synthesize else data
                         ),
                         cast_to=cast_to,
                         response=response,

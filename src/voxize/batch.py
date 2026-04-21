@@ -207,7 +207,7 @@ class BatchTranscription:
         except Exception as e:
             if not self._cancelled:
                 msg = f"Batch transcription failed: {e}"
-                logger.error(msg)
+                logger.error(msg, exc_info=True)
                 _log_event({"type": "error", "message": msg})
                 if on_error:
                     GLib.idle_add(on_error, msg)
