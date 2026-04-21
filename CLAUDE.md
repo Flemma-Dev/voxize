@@ -52,6 +52,8 @@ Thread bridge: `GLib.idle_add` (worker -> GTK), `call_soon_threadsafe` (GTK -> a
 | `prompt.py` | Focused-window detection, WHISPER.txt loading |
 | `recover.py` | Generates per-session `recover.sh` for batch re-transcription |
 | `clipboard.py` | Gdk.Clipboard (Wayland-native, best-effort) |
+| `ducking.py` | Per-app volume ducking via `pw-dump` + `wpctl` (snapshot on RECORD, restore on exit) |
+| `config.py` | User config loaded once from `$XDG_CONFIG_HOME/voxize/voxize.toml` (frozen dataclass, synchronous reads) |
 | `storage.py` | XDG state directory, session rotation (keep 8) |
 | `lock.py` | Mic lock via `fcntl.flock()` |
 | `checks.py` | Startup dependency validation |

@@ -19,7 +19,12 @@ if not os.environ.get("VOXIZE_MOCK"):
 
     exit_on_failure()
 
+from voxize import config  # noqa: E402
 from voxize.app import VoxizeApp  # noqa: E402 — must follow exit_on_failure()
+
+# Load user config exactly once, before any module reads it. First launch
+# creates ~/.config/voxize/voxize.toml populated with commented defaults.
+config.load()
 
 
 def main() -> None:

@@ -536,3 +536,39 @@ Four rounds of code review caught: MockCleanup missing `usage` property (crash i
 **Change:** the countdown is now gated on window focus — cancel on blur, restart from the full duration on refocus. Ownership moved from `app.py` to `ui.py`, which already manages the recording timer and listens to `notify::is-active`. The remaining seconds are shown inline on the Close button as `Close (30s)`, `Close (29s)`, … so there's no layout shift and no ambiguity about what the number means. The `(Ns)` span is rendered with `weight="light" fgalpha="50%"` via Pango markup — requires a custom `Gtk.Label` child on the button since `Gtk.Button.set_label()` is plaintext-only.
 
 `VOXIZE_AUTOCLOSE=0` still disables the behaviour entirely.
+
+---
+
+### 2026-04-21 — Per-app volume ducking during recording
+
+**Problem:** when recording with a Bluetooth headset, switching from A2DP into HFP/hands-free profile drops Chrome audio into the same low-bandwidth mono stream as the mic. Whatever is playing in the browser becomes a loud, garbled distraction. Pausing audio manually before every recording is a reliable source of friction.
+
+**Change:** new `ducking.py` module snapshots the current volume of matching PipeWire playback streams on entering `RECORDING`, sets them to `DUCK_VOLUME` (default `0.0` — silent), and restores the snapshot on leaving `RECORDING`. Target apps live in the module-level constant `DUCKED_APPS`; default is `["chrome", "chromium", "brave", "firefox"]`.
+
+**Why snapshot-and-restore, not clamp-to-100%:** PipeWire/PulseAudio has no override layer, just a volume. "Remove overrides" is faked by saving the pre-duck value and writing it back — the user's pre-existing volume is preserved if they had Chrome at 50% or already muted.
+
+**Why `pw-dump` + `wpctl`:** `pactl` isn't in the stock NixOS/GNOME profile; `pw-dump` (JSON object listing) and `wpctl` (`get-volume` / `set-volume` by numeric node id) are. Both tools missing = silent no-op; recording continues normally.
+
+**Matching is exact, not substring.** "chrome" matches a playback stream whose `application.process.binary` is exactly `chrome`, not `chromium` or `chrome_crashpad_handler`. Candidate properties are `application.process.binary`, `application.process.name`, `application.name`, `application.id`, `node.name` — a node matches if **any** of them equals (case-insensitively) any entry in `DUCKED_APPS`. This lets the user list binary names, friendly names, or reverse-DNS app ids interchangeably.
+
+**Thread model:** `duck()` and `restore()` spawn a short-lived daemon thread (`voxize-duck` / `voxize-unduck`) to run pw-dump + wpctl — the GTK main loop never blocks on subprocess. A `threading.Lock` serialises them so restore always sees the full snapshot even if fired immediately after duck. On shutdown paths (window close, SIGTERM) `restore_sync()` runs on the caller's thread: daemon threads die with the process, so fire-and-forget would risk leaving browser audio muted forever.
+
+**Mock mode is exempt.** `VOXIZE_MOCK=1` instantiates the ducker with an empty app list, so UI tests don't silence the user's actual browser.
+
+---
+
+### 2026-04-21 — TOML user config at `$XDG_CONFIG_HOME/voxize/voxize.toml`
+
+**Problem:** `DUCKED_APPS` and `VOXIZE_AUTOCLOSE` were the first two user-tunable knobs (one a module constant, one an env var). Tuning either meant editing the source or fiddling with environment. Not a long-term answer as more preferences appear.
+
+**Change:** new `config.py` module owns user preferences as a frozen dataclass tree (`Config → DuckingConfig | UIConfig`). `config.load()` runs once from `__main__.py`, creating `~/.config/voxize/voxize.toml` if absent. `config.CONFIG` is then read synchronously from anywhere — `ducking.py` pulls `apps` / `volume`, `app.py` resolves `autoclose_seconds`.
+
+**Bootstrap on first run:** writes a template where every default is commented out. Uncommenting a line is a pure "override" gesture; the user never has to copy-paste a full default. No drift handling — if defaults change in a new version, the existing user file is left alone. The user can delete the file to regenerate the up-to-date template.
+
+**Error handling:** missing tools, unreadable/unwritable dir, malformed TOML — any of these fall back silently to the in-code defaults via a per-field parse. Config is never fatal, never raises.
+
+**Env var override for autoclose:** `VOXIZE_AUTOCLOSE=0` still works for quick testing. Precedence: env > config > in-code default. The other `VOXIZE_*` env vars (`MOCK`, `ERROR`, `STOP`) are test-mode overrides and are intentionally *not* in the TOML — they describe how the app boots, not a user preference.
+
+**Why hand-rolled writer, not `tomli_w`/`tomlkit`:** every line in the template is `# key = value`, so the "serializer" is a 30-line string constant — zero value in pulling in a writer lib.
+
+**Reads synchronous, in-memory:** `CONFIG` is assigned once by `load()`. Modules that want stable reads use `from voxize import config; config.CONFIG.ducking.apps`. Importing the `CONFIG` name directly would capture the pre-load default — intentional pattern to keep the module as the source of truth.

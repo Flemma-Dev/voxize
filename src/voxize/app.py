@@ -9,7 +9,8 @@ Environment variables:
     VOXIZE_MOCK=1          Use mock transcription (no mic, no API)
     VOXIZE_ERROR=<ms>      Simulate WebSocket error after <ms>
     VOXIZE_STOP=<ms>       Auto-stop recording after <ms>
-    VOXIZE_AUTOCLOSE=<s>   Auto-close after READY state (default 30, 0 to disable)
+    VOXIZE_AUTOCLOSE=<s>   Overrides [ui] autoclose_seconds from voxize.toml
+                           (0 disables the auto-close timer)
 """
 
 from __future__ import annotations
@@ -28,7 +29,7 @@ gi.require_version("Gtk", "4.0")
 # gi.require_version() above is executable code; all subsequent imports trigger E402.
 from gi.repository import Gdk, Gio, GLib, Gtk  # noqa: E402
 
-from voxize import clipboard  # noqa: E402
+from voxize import clipboard, config  # noqa: E402
 from voxize.audio import (  # noqa: E402
     CHANNELS,
     SAMPLE_RATE,
@@ -38,6 +39,7 @@ from voxize.audio import (  # noqa: E402
 from voxize.batch import BatchTranscription  # noqa: E402
 from voxize.checks import get_api_key  # noqa: E402
 from voxize.cleanup import Cleanup  # noqa: E402
+from voxize.ducking import VolumeDucker  # noqa: E402
 from voxize.lock import MicLock, MicLockError  # noqa: E402
 from voxize.mock import MockCleanup, MockTranscription  # noqa: E402
 from voxize.prompt import PromptSource, detect_prompt  # noqa: E402
@@ -50,7 +52,17 @@ from voxize.ui import OverlayWindow  # noqa: E402
 logger = logging.getLogger(__name__)
 
 _MOCK = bool(os.environ.get("VOXIZE_MOCK"))
-_AUTOCLOSE = int(os.environ.get("VOXIZE_AUTOCLOSE", "30"))
+
+
+def _autoclose_seconds() -> int:
+    """Resolve autoclose: VOXIZE_AUTOCLOSE overrides ``[ui] autoclose_seconds``."""
+    env = os.environ.get("VOXIZE_AUTOCLOSE")
+    if env is not None:
+        try:
+            return int(env)
+        except ValueError:
+            logger.debug("VOXIZE_AUTOCLOSE=%r is not an int, ignoring", env)
+    return config.CONFIG.ui.autoclose_seconds
 
 
 class VoxizeApp(Gtk.Application):
@@ -84,6 +96,11 @@ class VoxizeApp(Gtk.Application):
         self._cleanup_usage: dict[str, int] | None = None
 
         # Prompt detection (set in do_activate before window present)
+
+        # Per-app volume ducking while recording. Disabled in mock mode so
+        # UI tests don't silence the user's browser tabs. Edit DUCKED_APPS
+        # in voxize.ducking to change which apps are targeted.
+        self._ducker = VolumeDucker(apps=[] if _MOCK else None)
 
         # Session-level file log handler
         self._log_handler = None
@@ -119,7 +136,9 @@ class VoxizeApp(Gtk.Application):
         # State machine + UI
         self._machine = StateMachine()
         self._machine.on_change(self._on_state_change)
-        self._ui = OverlayWindow(win, self._machine, autoclose_seconds=_AUTOCLOSE)
+        self._ui = OverlayWindow(
+            win, self._machine, autoclose_seconds=_autoclose_seconds()
+        )
 
         win.present()
         self._ui.setup_max_height()
@@ -296,6 +315,13 @@ class VoxizeApp(Gtk.Application):
 
     def _on_state_change(self, machine: StateMachine, old: State, new: State) -> None:
         logger.debug("_on_state_change: %s -> %s", old.name, new.name)
+
+        # Per-app volume ducking — orthogonal to the phase-specific logic
+        # below. Entering RECORDING snapshots and ducks, leaving restores.
+        if new == State.RECORDING:
+            self._ducker.duck()
+        elif old == State.RECORDING:
+            self._ducker.restore()
 
         if new == State.RECORDING:
             self._live_usage = None
@@ -692,11 +718,23 @@ class VoxizeApp(Gtk.Application):
                 self._lock = None
             except Exception:
                 pass
+        # Restore ducked volumes synchronously — daemon threads die with
+        # the process, so fire-and-forget is not safe here.
+        try:
+            self._ducker.restore_sync()
+        except Exception:
+            logger.exception("Signal handler: failed to restore ducked volumes")
         self.quit()
         return GLib.SOURCE_REMOVE
 
     def _on_close_request(self, _win) -> bool:
         logger.debug("_on_close_request: entry")
+        # Restore ducked volumes synchronously — if the user closes the
+        # window mid-recording we'd otherwise leave apps silent forever.
+        try:
+            self._ducker.restore_sync()
+        except Exception:
+            logger.exception("Close: failed to restore ducked volumes")
         self._teardown_async()
         if self._mock_transcription:
             self._mock_transcription.cancel()
