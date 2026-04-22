@@ -54,7 +54,7 @@ Thread bridge: `GLib.idle_add` (worker -> GTK), `call_soon_threadsafe` (GTK -> a
 | `clipboard.py` | Gdk.Clipboard (Wayland-native, best-effort) |
 | `ducking.py` | Per-app volume ducking via `pw-dump` + `wpctl` (snapshot on RECORD, restore on exit) |
 | `config.py` | User config loaded once from `$XDG_CONFIG_HOME/voxize/voxize.toml` (frozen dataclass, synchronous reads) |
-| `storage.py` | XDG state directory, session rotation (keep 8) |
+| `storage.py` | XDG state directory, session retention (configurable count + age) |
 | `lock.py` | Mic lock via `fcntl.flock()` |
 | `checks.py` | Startup dependency validation |
 | `style.css` | GTK4/libadwaita CSS theme |
@@ -116,6 +116,8 @@ Libadwaita uses CSS custom properties (`--name` / `var(--name)`), not `@define-c
 ## Session data
 
 `~/.local/state/voxize/<ISO-timestamp>/` — `audio.wav`, `live_transcript.txt`, `transcription.txt`, `cleaned.txt`, `ws_events.jsonl`, `batch_events.jsonl`, `cleanup_events.jsonl`, `debug.log`, `recover.sh`.
+
+Retention is controlled by `[storage]` in `voxize.toml`. Defaults: keep the 500 newest sessions AND drop anything older than 14 days (strict/OR — either limit can prune). Set either key to `0` to disable that limit; set both to `0` to disable pruning entirely. Pruning runs on app close and trashes via `Gio.File.trash()` (recoverable from the system trash).
 
 ## Environment variables
 

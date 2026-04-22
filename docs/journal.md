@@ -730,3 +730,24 @@ Ignoring the cache miss, what's in the tree vs the pre-iteration baseline:
 - **Pings revert to `models.retrieve`:** cost per ping ~$0 (no usage returned); TLS socket still kept warm at the 45 s cadence.
 
 Upstream cap without caching is roughly the server-side processing time: `openai-processing-ms` header for this session showed batch `971 ms` and cleanup `126 ms`. Cleanup is the clear sub-100 ms-TTFT target the day caching does engage; batch is dominated by audio upload + Whisper-family inference and won't benefit from prompt caching at all.
+
+---
+
+### 2026-04-22 — Configurable session retention (500 sessions / 14 days)
+
+**Problem:** `prune_sessions()` was hardcoded to keep only the 8 most recent session directories. Fine as a safety net against a runaway state dir, but far too aggressive for building up a corpus of real-world sessions to mine for performance analysis (e.g. the D1/D2/D3 experiments noted in the prompt-cache post-mortem above all want "two weeks of saved test transcripts" as their A/B harness).
+
+**Change:** retention is now driven by a new `[storage]` block in `voxize.toml`. Two independent knobs:
+
+- `max_sessions` (default `500`) — beyond-the-N-newest gets pruned.
+- `max_age_days` (default `14`) — start-time older than cutoff gets pruned.
+
+Strict/OR semantics: a session is pruned if it trips *either* rule. Setting a key to `0` disables that rule individually; setting both to `0` disables pruning entirely. Negative values are clamped to `0` at parse time (safer than "fall back to default" — the user explicitly overrode, we honor the intent as "disabled" rather than silently re-enabling a limit).
+
+**Age source:** the session directory name (`YYYY-MM-DDTHH-MM-SS`) parsed back to a naive `datetime`. Matches the session's *start* time, which is what "14 days ago" intuitively means. Immune to mtime drift (backup tools, manual edits, relatime). Names that don't parse are exempted from age-based pruning but still count toward the `max_sessions` ranking via the existing lexical sort — so a stray folder can't escape both rules.
+
+**Still uses `Gio.File.trash()`:** no permanent delete. The explicit "recoverable from system trash" property from the 8-session era stays. Scales to hundreds of trashed entries without special casing — trashing 500 small dirs at once is still just rename-into-trash at the filesystem layer.
+
+**Existing-user note:** the `_parse()` tolerance pattern means a `voxize.toml` without `[storage]` (i.e. every existing install) quietly uses the new 500/14 defaults. The template on disk is *not* rewritten to show the new commented keys — that matches the ducking/autoclose rollout behavior. Adding `[storage]` to an existing file is manual (or: delete and regenerate).
+
+**Why not `max_total_bytes` too:** considered and dropped. Cumulative-size pruning means walking every session dir on every close to sum file sizes — disk churn proportional to retention depth. Count + age are cheap (stat the top-level list, string-parse names); a byte-budget would flip that. The observed need is "keep more, not less" right now; tightening later is easy.

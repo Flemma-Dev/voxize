@@ -47,9 +47,16 @@ class UIConfig:
 
 
 @dataclass(frozen=True)
+class StorageConfig:
+    max_sessions: int = 500
+    max_age_days: int = 14
+
+
+@dataclass(frozen=True)
 class Config:
     ducking: DuckingConfig = field(default_factory=DuckingConfig)
     ui: UIConfig = field(default_factory=UIConfig)
+    storage: StorageConfig = field(default_factory=StorageConfig)
 
 
 # Replaced by load(). Modules that read at import time see the in-code
@@ -81,6 +88,17 @@ _TEMPLATE = """\
 # 0 disables the timer entirely. Overridden by the VOXIZE_AUTOCLOSE env
 # var if it is set.
 # autoclose_seconds = 30
+
+[storage]
+# Maximum number of session directories to keep. Pruned on app close
+# (oldest first, based on the directory name). 0 disables the
+# count-based limit.
+# max_sessions = 500
+
+# Maximum age in days for a session directory, based on its start time
+# parsed from the directory name. Pruned on app close. 0 disables the
+# age-based limit.
+# max_age_days = 14
 """
 
 
@@ -125,6 +143,16 @@ def _parse(data: dict) -> Config:
     elif ui_raw is None:
         ui_raw = {}
 
+    storage_raw = data.get("storage")
+    if storage_raw is not None and not isinstance(storage_raw, dict):
+        logger.debug(
+            "config: [storage] is not a table (got %s), using defaults",
+            type(storage_raw).__name__,
+        )
+        storage_raw = {}
+    elif storage_raw is None:
+        storage_raw = {}
+
     apps_raw = ducking_raw.get("apps")
     if apps_raw is None:
         apps = defaults.ducking.apps
@@ -157,9 +185,32 @@ def _parse(data: dict) -> Config:
         )
         autoclose = defaults.ui.autoclose_seconds
 
+    max_sessions = storage_raw.get("max_sessions")
+    if max_sessions is None:
+        max_sessions = defaults.storage.max_sessions
+    elif not isinstance(max_sessions, int) or isinstance(max_sessions, bool):
+        logger.debug(
+            "config: storage.max_sessions is not an int (got %r), using default",
+            max_sessions,
+        )
+        max_sessions = defaults.storage.max_sessions
+    max_sessions = max(0, int(max_sessions))
+
+    max_age_days = storage_raw.get("max_age_days")
+    if max_age_days is None:
+        max_age_days = defaults.storage.max_age_days
+    elif not isinstance(max_age_days, int) or isinstance(max_age_days, bool):
+        logger.debug(
+            "config: storage.max_age_days is not an int (got %r), using default",
+            max_age_days,
+        )
+        max_age_days = defaults.storage.max_age_days
+    max_age_days = max(0, int(max_age_days))
+
     return Config(
         ducking=DuckingConfig(apps=apps, volume=float(volume)),
         ui=UIConfig(autoclose_seconds=int(autoclose)),
+        storage=StorageConfig(max_sessions=max_sessions, max_age_days=max_age_days),
     )
 
 
@@ -194,9 +245,12 @@ def load() -> None:
     CONFIG = _parse(data)
     logger.debug(
         "config: loaded from %s (ducking.apps=%s, ducking.volume=%s, "
-        "ui.autoclose_seconds=%s)",
+        "ui.autoclose_seconds=%s, storage.max_sessions=%s, "
+        "storage.max_age_days=%s)",
         path,
         CONFIG.ducking.apps,
         CONFIG.ducking.volume,
         CONFIG.ui.autoclose_seconds,
+        CONFIG.storage.max_sessions,
+        CONFIG.storage.max_age_days,
     )
