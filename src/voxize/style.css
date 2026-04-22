@@ -40,6 +40,7 @@ headerbar {
     transition: opacity 400ms ease-in-out;
 }
 
+.status-dot.warming      { color: var(--vox-amber); }
 .status-dot.recording    { color: var(--vox-red); }
 .status-dot.transcribing { color: var(--vox-amber); }
 .status-dot.cleaning     { color: var(--vox-amber); }

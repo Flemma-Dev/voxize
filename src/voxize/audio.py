@@ -117,16 +117,23 @@ class WavWriter:
                     self._fd = None
 
 
+def _noop_on_chunk(_pcm: bytes) -> None:
+    """Default per-chunk callback — discards the chunk."""
+
+
 class AudioCapture:
     """Captures microphone audio, writes WAV, and forwards PCM chunks."""
 
     def __init__(
         self,
         session_dir: str,
-        on_chunk: Callable[[bytes], None],
+        on_chunk: Callable[[bytes], None] | None = None,
     ) -> None:
         self._wav = WavWriter(os.path.join(session_dir, "audio.wav"))
-        self._on_chunk = on_chunk
+        # Callback is swappable: during fast startup we open the stream
+        # before the live-preview WS is set up, so chunks are discarded
+        # until set_on_chunk() wires in RealtimeTranscription.send_audio.
+        self._on_chunk = on_chunk or _noop_on_chunk
         self._meter = LevelMeter()
         self._stream: sd.RawInputStream | None = None
 
@@ -134,6 +141,15 @@ class AudioCapture:
     def meter(self) -> LevelMeter:
         """Access the level meter for UI polling."""
         return self._meter
+
+    def set_on_chunk(self, on_chunk: Callable[[bytes], None]) -> None:
+        """Swap the per-chunk forwarding callback.
+
+        Safe from any thread: attribute assignment is atomic under the
+        GIL. The sounddevice callback will pick up the new function on
+        its next invocation.
+        """
+        self._on_chunk = on_chunk
 
     def _callback(self, indata, frames, time_info, status) -> None:
         pcm = bytes(indata)

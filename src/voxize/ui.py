@@ -403,6 +403,7 @@ class OverlayWindow:
         # Update dot color class
         for cls in (
             "initializing",
+            "warming",
             "recording",
             "transcribing",
             "cleaning",
@@ -412,15 +413,25 @@ class OverlayWindow:
         ):
             self._dot.remove_css_class(cls)
         self._dot.add_css_class(new.name.lower())
-        self._stop_pulse()
         self._stop_text_pulse()
-        self._stop_meter()
         self._stop_autoclose_countdown()
         self._awaiting_batch = False
         self._awaiting_cleanup = False
+        # Keep the pulse, meter, and timer running across WARMING→RECORDING
+        # so the UI doesn't flicker; stop them only when leaving the
+        # audio-capture phase for good.
+        audio_phase = {State.WARMING, State.RECORDING}
+        if old in audio_phase and new not in audio_phase:
+            self._stop_pulse()
+            self._stop_meter()
+            self._stop_timer()
 
-        if new == State.RECORDING:
-            self._status_label.set_text("Recording")
+        if new == State.WARMING:
+            # Mic is open but audio may still be silence (e.g., BT headset
+            # profile switch). The dot pulses amber to tell the user
+            # "don't speak yet"; RECORDING flips as soon as real audio
+            # flows (see app._check_warming).
+            self._status_label.set_text("Warming up…")
             self._speech_active = False
             self._had_first_text = False
             self._timer_seconds = 0
@@ -435,10 +446,34 @@ class OverlayWindow:
             self._overlay.set_visible(False)
             self._spinner.set_visible(True)
             self._spinner.set_spinning(True)
-            self._start_timer()
             self._start_pulse()
             self._start_meter()
             self.clear_text()
+
+        elif new == State.RECORDING:
+            self._status_label.set_text("Recording")
+            # Coming from INITIALIZING (mock mode skips WARMING), reset
+            # the capture UI. Coming from WARMING, everything is already
+            # running — just flip the label.
+            if old != State.WARMING:
+                self._speech_active = False
+                self._had_first_text = False
+                self._timer_seconds = 0
+                self._timer_label.set_text("00:00")
+                self._overlay.set_visible(False)
+                self._spinner.set_visible(True)
+                self._spinner.set_spinning(True)
+                self.clear_text()
+                self._start_pulse()
+                self._start_meter()
+            self._timer_label.set_visible(True)
+            self._copy_btn.set_visible(False)
+            self._cancel_btn.set_visible(True)
+            self._action_btn_label.set_label("Stop")
+            self._action_btn.remove_css_class("flat")
+            self._action_btn.set_visible(True)
+            self._window.set_default_widget(self._action_btn)
+            self._start_timer()
 
         elif new == State.TRANSCRIBING:
             self._status_label.set_text("Transcribing\u2026")
@@ -577,13 +612,18 @@ class OverlayWindow:
 
     def _on_cancel(self, _btn: Gtk.Button) -> None:
         logger.debug("_on_cancel: state=%s", self._machine.state.name)
-        if self._machine.state in (State.RECORDING, State.TRANSCRIBING, State.CLEANING):
+        if self._machine.state in (
+            State.WARMING,
+            State.RECORDING,
+            State.TRANSCRIBING,
+            State.CLEANING,
+        ):
             self._machine.transition(State.CANCELLED)
 
     def _on_action(self, _btn: Gtk.Button) -> None:
         s = self._machine.state
         logger.debug("_on_action: state=%s degraded=%s", s.name, self._degraded)
-        if s == State.RECORDING:
+        if s in (State.WARMING, State.RECORDING):
             if self._degraded:
                 self._machine.transition(State.CANCELLED)
             else:

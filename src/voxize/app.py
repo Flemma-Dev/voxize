@@ -21,6 +21,7 @@ import signal
 import threading
 import time
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import gi
 
@@ -28,12 +29,10 @@ gi.require_version("Gdk", "4.0")
 gi.require_version("Gtk", "4.0")
 
 # gi.require_version() above is executable code; all subsequent imports trigger E402.
-import httpx  # noqa: E402
 from gi.repository import Gdk, Gio, GLib, Gtk  # noqa: E402
-from openai import OpenAI  # noqa: E402
 
-from voxize import cleanup as cleanup_mod  # noqa: E402
 from voxize import clipboard, config  # noqa: E402
+from voxize._trace import trace as _trace  # noqa: E402
 from voxize.audio import (  # noqa: E402
     CHANNELS,
     SAMPLE_RATE,
@@ -53,6 +52,9 @@ from voxize.storage import create_session_dir, prune_sessions  # noqa: E402
 from voxize.transcribe import RealtimeTranscription  # noqa: E402
 from voxize.ui import OverlayWindow  # noqa: E402
 
+if TYPE_CHECKING:
+    from openai import OpenAI
+
 logger = logging.getLogger(__name__)
 
 _MOCK = bool(os.environ.get("VOXIZE_MOCK"))
@@ -62,6 +64,18 @@ _MOCK = bool(os.environ.get("VOXIZE_MOCK"))
 # fire periodic warmup pings while RECORDING.
 _KEEPALIVE_SECONDS = 900  # 15 minutes
 _WARMUP_INTERVAL_SECONDS = 45  # safely under typical LB idle timeouts (~60-120s)
+
+# WARMING → RECORDING thresholds. The mic stream is open but BT headsets
+# switch A2DP → HFP on capture-open and may deliver silent zero-chunks
+# for 200-1500ms before real audio flows. Once the level meter crosses
+# the threshold for _WARMING_REQUIRED_LOUD_CHUNKS consecutive 40ms
+# blocks (≈80ms of audio), we call it "really recording" and flip the
+# UI. _WARMING_TIMEOUT_MS is the hard fallback — a very quiet room may
+# never cross the threshold, and we still want to show RECORDING.
+_WARMING_RMS_THRESHOLD_DBFS = -70.0
+_WARMING_REQUIRED_LOUD_CHUNKS = 2
+_WARMING_TIMEOUT_MS = 2000
+_WARMING_POLL_MS = 40  # same cadence as the level-meter UI tick
 
 
 def _autoclose_seconds() -> int:
@@ -96,9 +110,24 @@ class VoxizeApp(Gtk.Application):
 
         # Shared OpenAI client for batch + cleanup. Single httpx connection
         # pool so the TLS/HTTP1.1 keep-alive socket established during one
-        # phase can be reused by the next.
+        # phase can be reused by the next. Built lazily in the bootstrap
+        # thread so the openai SDK import does not block mic-open.
         self._client: OpenAI | None = None
         self._warmup_timer_id: int | None = None
+
+        # Bootstrap coordination: _initialize opens the mic immediately
+        # then kicks off a background thread to import openai, build the
+        # client, create RealtimeTranscription, and start the WS. Stop/
+        # cancel paths must wait for this Event before using self._client,
+        # and set _bootstrap_cancelled to short-circuit the thread.
+        self._bootstrap_done = threading.Event()
+        self._bootstrap_cancelled = False
+
+        # WARMING → RECORDING detector: polls the level meter until we
+        # see real audio (or a timeout fires).
+        self._warming_timer_id: int | None = None
+        self._warming_start_time = 0.0
+        self._warming_consecutive_loud = 0
 
         # Mock transcription (only in mock mode)
         self._mock_transcription: MockTranscription | None = None
@@ -122,11 +151,13 @@ class VoxizeApp(Gtk.Application):
         self._log_handler = None
 
     def do_activate(self) -> None:
+        _trace("do_activate entry")
         # Detect transcription prompt BEFORE presenting the window — once our
         # window takes focus, the D-Bus focused-window query would return our
         # own PID instead of the window the user was working in.
         if not _MOCK:
             self._prompts = detect_prompt()
+            _trace(f"detect_prompt done (prompts={len(self._prompts)})")
             logger.debug("do_activate: prompts=%d", len(self._prompts))
 
         # Load CSS theme
@@ -137,6 +168,7 @@ class VoxizeApp(Gtk.Application):
             css,
             Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION,
         )
+        _trace("CSS loaded")
 
         # Window
         win = Gtk.ApplicationWindow(application=self)
@@ -155,8 +187,10 @@ class VoxizeApp(Gtk.Application):
         self._ui = OverlayWindow(
             win, self._machine, autoclose_seconds=_autoclose_seconds()
         )
+        _trace("OverlayWindow constructed")
 
         win.present()
+        _trace("win.present() called")
         self._ui.setup_max_height()
 
         if self._prompts:
@@ -171,11 +205,22 @@ class VoxizeApp(Gtk.Application):
             GLib.idle_add(self._initialize_mock)
         else:
             GLib.idle_add(self._initialize)
+        _trace("do_activate returning (scheduled _initialize on idle)")
 
     # ── Real initialization (fast startup) ──
 
     def _initialize(self) -> bool:
-        """Acquire mic lock, start audio immediately, connect WS in background."""
+        """Acquire mic lock, start audio, enter RECORDING, then bootstrap WS.
+
+        Fast path: only the work needed to get PCM flowing into the WAV
+        runs synchronously on the GTK thread. The OpenAI client and the
+        live-preview WS are built in a background "voxize-bootstrap"
+        thread so the ~300ms openai SDK import does not block mic-open.
+
+        Batch transcription on stop waits on ``self._bootstrap_done``,
+        so the authoritative transcript path is never starved.
+        """
+        _trace("_initialize idle fired")
         # Guard: user may have cancelled during INITIALIZING before this idle fires
         if not self._machine or self._machine.state != State.INITIALIZING:
             logger.debug(
@@ -195,6 +240,7 @@ class VoxizeApp(Gtk.Application):
             self._machine.transition(State.ERROR, error=f"Lock failed: {e}")
             return False
         logger.debug("_initialize: lock acquired")
+        _trace("mic lock acquired")
 
         try:
             self._session_dir = create_session_dir()
@@ -205,6 +251,7 @@ class VoxizeApp(Gtk.Application):
             self._release_lock()
             self._machine.transition(State.ERROR, error=str(e))
             return False
+        _trace("session_dir created, api_key retrieved")
 
         # Session folder button + recovery script
         self._ui.set_session_dir(self._session_dir)
@@ -235,31 +282,11 @@ class VoxizeApp(Gtk.Application):
         logger.debug("_initialize: file logging active")
         logger.debug("_initialize: prompts=%d", len(self._prompts))
 
-        # Shared OpenAI client with extended keep-alive. httpx pools the
-        # TLS connection to api.openai.com; batch → cleanup (and warmed
-        # connections from the periodic ping) hit the same pool.
-        http_client = httpx.Client(
-            limits=httpx.Limits(keepalive_expiry=_KEEPALIVE_SECONDS),
-        )
-        self._client = OpenAI(api_key=self._api_key, http_client=http_client)
-        logger.debug(
-            "_initialize: openai client ready shared=True keepalive_expiry=%ds",
-            _KEEPALIVE_SECONDS,
-        )
-
-        # Create providers
-        logger.debug("_initialize: creating providers")
-        self._transcription = RealtimeTranscription(
-            self._api_key,
-            self._session_dir,
-        )
-
-        self._audio = AudioCapture(
-            self._session_dir,
-            self._transcription.send_audio,
-        )
-
-        # Start audio capture immediately (fast startup)
+        # Open the mic stream with a no-op chunk sink — the bootstrap
+        # thread swaps in ``RealtimeTranscription.send_audio`` once the
+        # WS is ready. Chunks that arrive before the swap are still
+        # written to the WAV, so batch transcription is never starved.
+        self._audio = AudioCapture(self._session_dir)
         logger.debug("_initialize: starting audio capture")
         try:
             self._audio.start()
@@ -267,22 +294,178 @@ class VoxizeApp(Gtk.Application):
             self._release_lock()
             self._machine.transition(State.ERROR, error=f"Microphone: {e}")
             return False
+        _trace("audio.start() returned (mic capturing)")
 
         self._ui.set_level_meter(self._audio.meter)
 
-        # Start WebSocket in background — burst drains when ready.
-        # WS failure is non-fatal during RECORDING (banner only).
-        logger.debug("_initialize: starting transcription WS")
-        self._transcription.start(
-            on_delta=self._ui.append_text,
-            on_error=self._on_ws_error,
-            on_ready=self._on_ws_ready,
-            on_speech=self._ui.on_speech,
+        logger.debug("_initialize: transitioning to WARMING")
+        self._machine.transition(State.WARMING)
+        _trace("WARMING state entered")
+
+        # Kick off the heavy setup in a background thread: openai SDK
+        # import, client construction, RealtimeTranscription + WS, and
+        # warmup scheduling. Audio capture continues uninterrupted.
+        self._bootstrap_done.clear()
+        self._bootstrap_cancelled = False
+        threading.Thread(
+            target=self._bootstrap_providers,
+            daemon=True,
+            name="voxize-bootstrap",
+        ).start()
+        _trace("bootstrap thread spawned")
+        return False  # one-shot idle
+
+    # ── WARMING → RECORDING detector ──
+
+    def _start_warming_detector(self) -> None:
+        """Watch the level meter and flip to RECORDING once audio is flowing."""
+        self._stop_warming_detector()
+        self._warming_start_time = time.monotonic()
+        self._warming_consecutive_loud = 0
+        self._warming_timer_id = GLib.timeout_add(_WARMING_POLL_MS, self._check_warming)
+        logger.debug(
+            "warming: detector armed threshold=%.1f dBFS timeout=%dms",
+            _WARMING_RMS_THRESHOLD_DBFS,
+            _WARMING_TIMEOUT_MS,
         )
 
-        logger.debug("_initialize: transitioning to RECORDING")
-        self._machine.transition(State.RECORDING)
-        return False  # one-shot idle
+    def _stop_warming_detector(self) -> None:
+        if self._warming_timer_id is not None:
+            GLib.source_remove(self._warming_timer_id)
+            self._warming_timer_id = None
+
+    def _mock_warming_to_recording(self) -> bool:
+        """GTK idle: skip the audio-detection wait in mock mode."""
+        if self._machine and self._machine.state == State.WARMING:
+            self._machine.transition(State.RECORDING)
+        return False
+
+    def _check_warming(self) -> bool:
+        """GLib timer: poll the level meter, transition when audio flows."""
+        if not self._machine or self._machine.state != State.WARMING:
+            self._warming_timer_id = None
+            return False
+        elapsed_ms = (time.monotonic() - self._warming_start_time) * 1000
+        audio = self._audio
+        level = audio.meter.level_dbfs if audio else -96.0
+        if level > _WARMING_RMS_THRESHOLD_DBFS:
+            self._warming_consecutive_loud += 1
+            if self._warming_consecutive_loud >= _WARMING_REQUIRED_LOUD_CHUNKS:
+                logger.debug(
+                    "warming: audio detected level=%.1f dBFS after %dms",
+                    level,
+                    int(elapsed_ms),
+                )
+                _trace(f"warming: audio detected at {int(elapsed_ms)}ms")
+                self._warming_timer_id = None
+                self._machine.transition(State.RECORDING)
+                return False
+        else:
+            self._warming_consecutive_loud = 0
+        if elapsed_ms >= _WARMING_TIMEOUT_MS:
+            logger.debug(
+                "warming: timeout after %dms, transitioning anyway (last level=%.1f dBFS)",
+                int(elapsed_ms),
+                level,
+            )
+            _trace(f"warming: timeout at {int(elapsed_ms)}ms")
+            self._warming_timer_id = None
+            self._machine.transition(State.RECORDING)
+            return False
+        return True
+
+    def _bootstrap_providers(self) -> None:
+        """Background thread: import openai, build client, start WS.
+
+        Runs after ``_initialize`` has entered RECORDING so the user's
+        audio is already being captured while the openai SDK loads
+        (~300ms warm, more on cold cache). Respects
+        ``self._bootstrap_cancelled`` at checkpoints so Escape-during-
+        startup doesn't leave a half-wired client behind.
+        """
+        _trace("bootstrap: entry")
+        if self._bootstrap_cancelled:
+            _trace("bootstrap: cancelled before client build")
+            self._bootstrap_done.set()
+            return
+
+        client: OpenAI | None = None
+        try:
+            import httpx
+            from openai import OpenAI as _OpenAI
+
+            from voxize import openai_patches
+
+            _trace("bootstrap: openai + httpx imported")
+            openai_patches.install()
+            _trace("bootstrap: openai_patches installed")
+
+            http_client = httpx.Client(
+                limits=httpx.Limits(keepalive_expiry=_KEEPALIVE_SECONDS),
+            )
+            client = _OpenAI(api_key=self._api_key, http_client=http_client)
+            logger.debug(
+                "bootstrap: openai client ready keepalive_expiry=%ds",
+                _KEEPALIVE_SECONDS,
+            )
+            _trace("bootstrap: OpenAI client built")
+        except Exception:
+            logger.exception("bootstrap: failed to build OpenAI client")
+            self._bootstrap_done.set()
+            return
+
+        if self._bootstrap_cancelled:
+            _trace("bootstrap: cancelled after client build")
+            try:
+                client.close()
+            except Exception:
+                logger.debug("bootstrap: client close failed", exc_info=True)
+            self._bootstrap_done.set()
+            return
+
+        # Publish the client so the batch/cleanup/stop paths can see it.
+        self._client = client
+
+        # Create RealtimeTranscription, wire it to the audio callback,
+        # and start the WS. Audio chunks already in flight are routed
+        # once ``set_on_chunk`` swaps the forwarder; earlier chunks go
+        # to the WAV only, which is what the live preview lost anyway
+        # during the current BT/VAD startup burst.
+        transcription: RealtimeTranscription | None = None
+        try:
+            transcription = RealtimeTranscription(
+                self._api_key,
+                self._session_dir,
+            )
+            audio = self._audio
+            if audio is not None and not self._bootstrap_cancelled:
+                audio.set_on_chunk(transcription.send_audio)
+                logger.debug("bootstrap: audio callback swapped to WS")
+            if self._bootstrap_cancelled:
+                _trace("bootstrap: cancelled before WS start")
+                self._bootstrap_done.set()
+                return
+            self._transcription = transcription
+            transcription.start(
+                on_delta=self._ui.append_text,
+                on_error=self._on_ws_error,
+                on_ready=self._on_ws_ready,
+                on_speech=self._ui.on_speech,
+            )
+            _trace("bootstrap: transcription.start() invoked")
+        except Exception:
+            logger.exception("bootstrap: failed to start transcription WS")
+
+        # Schedule warmup on the GTK thread if we're still RECORDING.
+        GLib.idle_add(self._kick_warmup_after_bootstrap)
+        self._bootstrap_done.set()
+        _trace("bootstrap: complete")
+
+    def _kick_warmup_after_bootstrap(self) -> bool:
+        """GTK thread: start warmup pings once bootstrap has produced a client."""
+        if self._machine and self._machine.state == State.RECORDING:
+            self._start_warmup()
+        return False
 
     def _on_ws_ready(self) -> None:
         """WS session configured — just bookkeeping, not a state gate."""
@@ -355,17 +538,34 @@ class VoxizeApp(Gtk.Application):
         logger.debug("_on_state_change: %s -> %s", old.name, new.name)
 
         # Per-app volume ducking — orthogonal to the phase-specific logic
-        # below. Entering RECORDING snapshots and ducks, leaving restores.
-        if new == State.RECORDING:
+        # below. Duck from the moment the mic opens (WARMING) so that the
+        # BT A2DP→HFP transition isn't fighting music; restore once we
+        # leave the capture phase for good.
+        if new == State.WARMING:
             self._ducker.duck()
-        elif old == State.RECORDING:
+        elif old in (State.WARMING, State.RECORDING) and new not in (
+            State.WARMING,
+            State.RECORDING,
+        ):
             self._ducker.restore()
 
-        if new == State.RECORDING:
+        if new == State.WARMING:
             self._live_usage = None
             self._batch_usage = None
             self._cleanup_usage = None
             self._batch_transcript = ""
+            if _MOCK:
+                # Mock flow doesn't need real audio — transition straight
+                # to RECORDING so existing mock tests behave identically.
+                GLib.idle_add(self._mock_warming_to_recording)
+            else:
+                self._start_warming_detector()
+
+        if old == State.WARMING and new != State.RECORDING:
+            # Bail out on cancel / error / direct-to-transcribing paths.
+            self._stop_warming_detector()
+
+        if new == State.RECORDING:
             if _MOCK:
                 self._mock_transcription = MockTranscription()
                 self._mock_transcription.start(on_delta=self._ui.append_text)
@@ -390,6 +590,9 @@ class VoxizeApp(Gtk.Application):
             GLib.idle_add(self._begin_cleanup)
 
         elif new == State.CANCELLED:
+            # Tell the bootstrap thread to abandon its work (no live
+            # preview needed) and release any partial client it built.
+            self._bootstrap_cancelled = True
             # Stop mock providers on GTK thread (instant, uses GLib timers)
             if self._mock_transcription:
                 self._mock_transcription.cancel()
@@ -413,13 +616,19 @@ class VoxizeApp(Gtk.Application):
             self._teardown_async()
 
         elif new == State.ERROR:
+            self._bootstrap_cancelled = True
             self._teardown_async()
 
     # ── Connection warmup ──
 
     def _start_warmup(self) -> None:
-        """Fire an initial warmup ping and schedule recurring pings."""
-        if not self._client:
+        """Fire an initial warmup ping and schedule recurring pings.
+
+        Idempotent: `_on_state_change(RECORDING)` and
+        `_kick_warmup_after_bootstrap` can both call this depending on
+        which of "mic warmed up" vs "bootstrap finished" lands first.
+        """
+        if not self._client or self._warmup_timer_id is not None:
             return
         self._schedule_warmup_ping()
         self._warmup_timer_id = GLib.timeout_add_seconds(
@@ -473,10 +682,15 @@ class VoxizeApp(Gtk.Application):
         client = self._client
         if not client:
             return
+        # Lazy-import so the warmup path isn't what pulls voxize.cleanup
+        # into memory; it is already resident via the bootstrap thread
+        # by the time we get here.
+        from voxize.cleanup import MODEL as _CLEANUP_MODEL
+
         t0 = time.monotonic()
         logger.debug("warmup: start")
         try:
-            client.models.retrieve(cleanup_mod.MODEL)
+            client.models.retrieve(_CLEANUP_MODEL)
             duration_ms = int((time.monotonic() - t0) * 1000)
             logger.debug(
                 "warmup: complete duration_ms=%d status=ok kind=models.retrieve",
@@ -491,6 +705,11 @@ class VoxizeApp(Gtk.Application):
     def _begin_transcribing(self) -> bool:
         """Stop recording, cancel WS, start batch transcription."""
         logger.debug("_begin_transcribing: mock=%s", _MOCK)
+
+        # Short-circuit any bootstrap still importing openai or opening
+        # the WS — we no longer need the live preview, batch does the
+        # authoritative pass.
+        self._bootstrap_cancelled = True
 
         # Handle mock mode
         mock_transcript = ""
@@ -539,6 +758,16 @@ class VoxizeApp(Gtk.Application):
             logger.exception("Failed to stop audio")
         logger.debug("_stop_and_batch: audio stopped")
 
+        # Step 1b: wait for the bootstrap thread to settle so self._client
+        # is populated before we dispatch batch. On a fast stop (user hit
+        # Escape immediately after the window showed), openai may still
+        # be importing; we block up to 10s for it. Batch can't proceed
+        # without a client. Transcription stop-up below uses the local
+        # ``transcription`` snapshot so a late bootstrap finishing after
+        # cancellation does not leak a dangling WS.
+        if not self._bootstrap_done.wait(timeout=10.0):
+            logger.warning("_stop_and_batch: bootstrap did not finish within 10s")
+
         # Log WAV file info (cheap; do before the handoff).
         wav_path = os.path.join(session_dir, "audio.wav") if session_dir else None
         if wav_path and os.path.exists(wav_path):
@@ -559,6 +788,12 @@ class VoxizeApp(Gtk.Application):
         logger.debug("_stop_and_batch: cancelling transcription")
         live_usage = None
         live_transcript = ""
+        # Bootstrap may have populated self._transcription after our
+        # parent ``_begin_transcribing`` captured a None reference —
+        # grab the latest so we don't leave a dangling WS open.
+        if transcription is None:
+            transcription = self._transcription
+            self._transcription = None
         try:
             if transcription:
                 transcription.stop()
@@ -849,6 +1084,7 @@ class VoxizeApp(Gtk.Application):
         logger.debug("_on_key: Escape pressed, state=%s", s)
         if s in (
             State.INITIALIZING,
+            State.WARMING,
             State.RECORDING,
             State.TRANSCRIBING,
             State.CLEANING,
@@ -862,6 +1098,7 @@ class VoxizeApp(Gtk.Application):
         """Handle SIGTERM/SIGINT — finalize WAV, release lock, quit."""
         logger.debug("_on_signal: sig=%s", sig)
         logger.info("Signal %s received, shutting down", sig)
+        self._bootstrap_cancelled = True
         if self._audio:
             try:
                 self._audio.finalize_wav()
@@ -884,6 +1121,9 @@ class VoxizeApp(Gtk.Application):
 
     def _on_close_request(self, _win) -> bool:
         logger.debug("_on_close_request: entry")
+        # Tell any in-flight bootstrap to stop — we're closing, no point
+        # completing openai import / WS connect.
+        self._bootstrap_cancelled = True
         # Restore ducked volumes synchronously — if the user closes the
         # window mid-recording we'd otherwise leave apps silent forever.
         try:
