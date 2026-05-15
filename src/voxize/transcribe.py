@@ -180,7 +180,6 @@ class RealtimeTranscription:
         logger.debug("_session: connecting to WS url=%s", _WS_URL)
         headers = {
             "Authorization": f"Bearer {self._api_key}",
-            "OpenAI-Beta": "realtime=v1",
         }
         try:
             async with websockets.connect(
@@ -244,18 +243,26 @@ class RealtimeTranscription:
         await ws.send(
             json.dumps(
                 {
-                    "type": "transcription_session.update",
+                    "type": "session.update",
                     "session": {
-                        "input_audio_format": "pcm16",
-                        "input_audio_transcription": {
-                            "model": _MODEL,
-                            "language": "en",
-                        },
-                        "turn_detection": {
-                            "type": "server_vad",
-                        },
-                        "input_audio_noise_reduction": {
-                            "type": "near_field",
+                        "type": "transcription",
+                        "audio": {
+                            "input": {
+                                "format": {
+                                    "type": "audio/pcm",
+                                    "rate": 24000,
+                                },
+                                "transcription": {
+                                    "model": _MODEL,
+                                    "language": "en",
+                                },
+                                "turn_detection": {
+                                    "type": "server_vad",
+                                },
+                                "noise_reduction": {
+                                    "type": "near_field",
+                                },
+                            },
                         },
                     },
                 }
@@ -385,7 +392,7 @@ class RealtimeTranscription:
                     if self._on_speech:
                         GLib.idle_add(self._on_speech, False)
 
-                elif etype == "transcription_session.updated":
+                elif etype == "session.updated":
                     logger.debug("_recv: type=%s", etype)
                     if self._on_ready:
                         GLib.idle_add(self._on_ready)
