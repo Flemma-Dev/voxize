@@ -41,7 +41,7 @@ from voxize.meeting.capture import OUTPUT_CHANNELS, SAMPLE_RATE  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
-OPUS_BITRATE_KBPS = 48
+OPUS_BITRATE_KBPS = 96
 DURATION_TOLERANCE_S = 0.5
 _PROGRESS_TICK_S = 0.25
 _STDERR_TAIL_LINES = 8
@@ -106,6 +106,8 @@ def compress_meeting_wav(
         f"{OPUS_BITRATE_KBPS}k",
         "-ac",
         str(OUTPUT_CHANNELS),
+        "-mapping_family",
+        "255",
         opus_path,
     ]
     logger.debug("compress: ffmpeg cmd=%s", " ".join(cmd))
