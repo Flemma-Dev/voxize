@@ -21,10 +21,16 @@ def state_dir() -> str:
     return path
 
 
-def create_session_dir() -> str:
-    """Create and return a new session directory named by ISO timestamp."""
+def create_session_dir(suffix: str = "") -> str:
+    """Create and return a new session directory named by ISO timestamp.
+
+    ``suffix`` is appended verbatim to the timestamp (e.g. ``-meeting``)
+    so that distinct flavors of session — short dictation vs. multi-hour
+    meeting capture — can share the same parent directory, retention
+    policy, and pruning logic without separate state trees.
+    """
     now = datetime.now(UTC).astimezone()
-    name = now.strftime(_NAME_FORMAT)
+    name = now.strftime(_NAME_FORMAT) + suffix
     path = os.path.join(state_dir(), name)
     os.makedirs(path, exist_ok=True)
     logger.debug("create_session_dir: path=%s", path)
@@ -32,9 +38,16 @@ def create_session_dir() -> str:
 
 
 def _parse_start_time(name: str) -> datetime | None:
-    """Parse a session directory name back to a naive local datetime."""
+    """Parse a session directory name back to a naive local datetime.
+
+    The timestamp prefix is always 19 chars (``YYYY-MM-DDTHH-MM-SS``);
+    anything after that is a suffix (e.g. ``-meeting``) that doesn't
+    affect chronological ordering. Names shorter than 19 chars or with a
+    malformed prefix return ``None`` and are excluded from age-based
+    pruning but still ranked for the count-based limit.
+    """
     try:
-        return datetime.strptime(name, _NAME_FORMAT)
+        return datetime.strptime(name[:19], _NAME_FORMAT)
     except ValueError:
         return None
 

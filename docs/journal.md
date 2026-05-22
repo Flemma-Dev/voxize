@@ -778,3 +778,64 @@ Strict/OR semantics: a session is pruned if it trips *either* rule. Setting a ke
 **`_trace.py`:** stays in tree, opt-in. Zero runtime cost when `VOXIZE_TRACE` is unset (single dict lookup + early return on every `trace()` call). Handy for future perf regression hunts.
 
 **Follow-up (not done here):** cold-cache `.pyc` + `/nix/store` fetch can still push total startup to 5+ seconds on the very first invocation after long idle. A systemd user-service pre-warm would fix that without more code changes — deferred until someone actually hits it in daily use.
+
+---
+
+### 2026-05-22 — Meeting recorder (`voxize.meeting`)
+
+**Problem:** Voxize captures one mic at a time and transcribes it. For internal Slack meetings (no AI minutes service) there was no way to record *what other people said* — only what you said. The actionable gap was a crash-safe WAV of mic + system output for offline transcription/diarization later (WhisperX + a diarization model on the user's machine). No live transcription wanted in scope.
+
+**Shape:** new entry point `uv run python -m voxize.meeting` (also a `voxize-meet` console script in `pyproject.toml`). Lives inside the Voxize repo, under `src/voxize/meeting/`, reusing the audio/lock/storage/CSS pieces of the dictation app — but with its own Gtk.Application and lifecycle. The dictation overlay's WARMING/RECORDING/TRANSCRIBING/CLEANING dance is not a fit for multi-hour passive capture; the meeting app has one state ("recording") plus a brief "stopping" while parec shuts down.
+
+**Output:** stereo 48 kHz int16 PCM WAV, **L = mic / R = system output**. Conferencing apps send mono down the wire, so the system-monitor channel carries the remote participants mixed together; mic-L / system-R is the cleanest possible split between "you" and "everyone else combined." No mono mixdown — that throws away the diarization affordance for no real disk-savings win (a 1-hour stereo WAV is ~660 MB; mono would be ~330 MB, neither matters).
+
+**Capture: two `pw-cat --record` subprocesses, not sounddevice and not parec.** sounddevice was ruled out because PortAudio's ALSA backend (which it uses on Linux) doesn't reliably enumerate PipeWire source *names* — the default sink's monitor isn't a first-class addressable device through pipewire-alsa. I initially shipped this with `parec` + `pactl` (PulseAudio compat) for "works everywhere" portability, then reverted on user push-back: Voxize is a PipeWire app — `ducking.py` already declares that via its `pw-dump` + `wpctl` shell-outs — so introducing a sibling pulseaudio toolchain for the meeting recorder would be a regression of stance. Settled on `pw-cat --record --target=<sink-node-name> --capture-sink --rate=48000 --channels=1 --format=s16 --raw -` for the system side and the same minus `--target`/`--capture-sink` for the mic. Default-sink discovery via `wpctl inspect @DEFAULT_AUDIO_SINK@`, parsing `node.name` from the indented output (tolerant of `=` vs `:` separators and optional quoting). Each stream's stdout feeds a daemon reader thread → bounded queue with a per-stream `LevelMeter`; a separate writer thread pulls one block from each queue, interleaves via `array.array` slice assignment (CPython implements `int16[0::2] = mono_arr` at C level — fast enough at 25 Hz block rate without dragging numpy into the dep tree), and appends to the stereo WAV. No new dev-shell packages needed — `pw-cat` and `wpctl` are already on PATH from the same pipewire/wireplumber install that ducking.py depends on.
+
+**Mic non-exclusivity is the key PipeWire property:** the recorder opens its own parec against the default mic *while* Slack/Zoom/Meet/Firefox already have it open. PipeWire allows multiple non-exclusive capture clients on the same source — same property that already lets Voxize itself coexist with browser-tab mic users. No PA tee, no virtual node setup. Same applies to the `.monitor` source.
+
+**Drift / sync:** PipeWire's graph clock is shared across both sources, so the two parec processes deliver blocks in lockstep at steady state. The writer pulls one block per side per tick; if one queue is empty within 50 ms it pads silence on that channel and keeps going. If a queue fills (writer fell behind), the reader drops oldest. Per-channel backpressure rather than process-wide stalling — at worst one channel gets a brief gap, the other is preserved.
+
+**Crash safety:** the existing `WavWriter` placeholder-header trick is reused — that's why `WavWriter.__init__` now takes `sample_rate` and `channels` (default args preserve byte-identical behavior for `AudioCapture`). Added `rewrite_header()`, which touches only the two size fields at offsets 4 and 40 every 5 s during the writer loop, so a power-loss or `kill -9` leaves a WAV that's *playable up to ~5 s before the kill* rather than a placeholder header pointing past EOF. `finalize_wav()` (sync, called from the SIGTERM/SIGINT handler) does the same eight-byte fix before the normal stop path runs.
+
+**Session layout — same flat dir, suffixed name.** `~/.local/state/voxize/<ISO>-meeting/recording.wav` + `debug.log`. Explicitly *not* nested under a `meetings/` subdirectory: meetings get the same retention/pruning as dictation sessions, same `[storage]` config in `voxize.toml`, no second tree to manage. `storage._parse_start_time` was tightened to parse the leading 19 chars (the ISO timestamp prefix) so age-based pruning still recognizes meeting dirs; the existing dictation dirs were already 19 chars exactly, so they get the same parse path. No JSON-L sidecar — there are no API events to record. `debug.log` only, set up identically to the dictation app's session handler (verbose voxize logger at DEBUG, threadName in the format string).
+
+**Lock.** Distinct lock name (`voxize-meeting.lock` in `$XDG_RUNTIME_DIR`) so a meeting recording does *not* block running the dictation app at the same time — and vice versa. `MicLock.__init__` now takes an optional `lock_name` (default unchanged at `voxize-mic.lock`). Both processes can have the same mic open concurrently because of the non-exclusivity property above; the lock is per-app-instance, not per-device.
+
+**UI: small headerbar + content window.** Reuses `style.css`. Header: status dot (red ●), "Recording", elapsed `HH:MM:SS` (hours bucket because meetings *do* go past 60 min), folder button, Stop. Content: two `Gtk.ProgressBar` rows (`Mic` / `System`) styled with the existing `.osd.vu-meter` classes and zone CSS (`.vu-low` / `.vu-good` / `.vu-hot` / `.vu-clip`), plus a right-aligned live file-size readout. No state machine, no autoclose, no context bar, no transcript view — single state plus a "Stopping…" indicator while parec terminates (~1-3 s). Escape or window-close routes through the same `_request_stop` path so the WAV finalizes cleanly regardless of how the user ended the session.
+
+**Explicitly out of scope:** transcription, diarization, API calls, any model invocation. The deliverable is the WAV. WhisperX with `--diarize` (on the user's machine) is the downstream path; the L/R split is what makes that step trivial — even a naive "left = speaker A, right = everyone else" labeling is usable without a real diarization pass.
+
+**Files added:** `src/voxize/meeting/{__init__,__main__,app,capture,ui}.py`. **Files changed (additive only):** `src/voxize/audio.py` (WavWriter constructor takes optional rate/channels, new `rewrite_header()` + `data_bytes` accessors), `src/voxize/lock.py` (MicLock takes optional `lock_name`), `src/voxize/storage.py` (`create_session_dir(suffix="")`, `_parse_start_time` parses the leading 19 chars), `pyproject.toml` (adds `voxize-meet` script). The dictation app's behavior is byte-identical to before — verified by tracing that `WavWriter()` with no kwargs emits the same 44 header bytes as the pre-change code.
+
+---
+
+### 2026-05-22 — Meeting recorder: post-stop Opus compression
+
+**Problem:** stereo 48 kHz 16-bit PCM is 190 KB/s = 690 MB/hour. A weekly cadence of meeting recordings would chew through retention quota fast, and the WAVs are the bulk of what we keep around for downstream WhisperX runs anyway. WAV-as-deliverable was correct for the recording phase (crash-safe placeholder header, simple writer); WAV-as-archive is overkill.
+
+**Choice:** **Opus 48 kbps stereo** as the archive format. Picked over MP3 after a side-by-side: Opus ~22 MB/hr vs MP3 128k ~56 MB/hr at roughly equivalent perceived voice quality (2.5× smaller for the same audible result). Opus is the canonical voice codec (Discord/Zoom/Slack/Meet all use it under the hood), and every downstream tool we care about (WhisperX, pyannote, anything that reads via ffmpeg) handles it natively — no transcoding ever needed. The L/R split is preserved without ceremony; Opus is stereo-by-design.
+
+**Flow:** after `capture.stop()` finalizes the WAV but before `_finalize_app` destroys the window, `_stop_thread` runs:
+
+```
+ffmpeg -hide_banner -nostats -y -i recording.wav \
+    -c:a libopus -b:a 48k -ac 2 recording.opus
+```
+
+On clean exit, `ffprobe -v error -show_entries format=duration -of csv=p=0 recording.opus` reads the encoded duration; if it's within ±0.5 s of the expected duration (computed from `WavWriter.data_bytes / (sample_rate · channels · 2)`), the WAV is moved to the system trash via `Gio.File.trash()` — **never `os.unlink`** — so it stays recoverable. Encoder runs at 5-50× realtime on a CPU; a 1-hour meeting compresses in under two minutes.
+
+**UI phase:** the existing "Stopping…" amber-dot state extends into "Compressing…" with the timer label re-roled to show compress elapsed (the meeting elapsed isn't useful anymore at that point — the UI overwrites it with `00:00:00` then ticks it via `update_compress_elapsed` from the background thread every 250 ms). The Stop button stays disabled; Escape or window-close during this phase signals `_compress_abort`, terminates ffmpeg, removes the partial `.opus`, and proceeds to the normal `_finalize_app` path — the WAV is preserved because abort happens before the trash call.
+
+**Failure modes are all keep-the-WAV:**
+- ffmpeg crash / non-zero exit
+- ffprobe couldn't parse the duration (encoder produced something unreadable)
+- Duration delta > 0.5 s (probably encoder error — could be legitimate Opus padding, but we don't trust the encode in that case)
+- User abort
+
+Every failure writes `compress_error.txt` next to the WAV with the reason (and for ffmpeg crashes, the tail of ffmpeg's stderr — captured via the same line-by-line drain pattern used by the pw-cat readers in `capture.py`). The user spots the file via the session folder button after they re-open the folder.
+
+**Why not a `[meeting]` config block in `voxize.toml` from day one:** asked, declined. Sensible defaults first; if the bitrate or codec choice turns out to need tweaking, refactor later — the encoder call is one place, behind a function boundary.
+
+**Files added:** `src/voxize/meeting/compress.py`. **Files changed:** `src/voxize/meeting/app.py` (`_stop_thread` extended with compress phase + abort plumbing, `_on_close_request` now aborts compress instead of leaking ffmpeg), `src/voxize/meeting/ui.py` (`mark_compressing` / `update_compress_elapsed`).
+
+**Follow-up (same day):** added a "Done" state so the window stays open after a successful compress instead of disappearing. User report was the dictation app's READY state is reassuring ("I can see it actually finished, and the folder button is right there"), whereas the meeting recorder felt like a black box — "did it work, where did it go, what did I do." Now on compress success the UI flips to green dot + "Done" + meeting elapsed restored to the timer slot + size label showing the final opus size; the Stop button becomes a non-destructive "Close" that the user clicks when they're satisfied. On compress *failure* (non-abort) the same screen appears with an amber dot, "Saved (compress failed)" label, and the error banner showing the reason — the WAV is preserved, so the framing is honest. Abort still closes immediately (the user already wanted out). The actual close routes through `_finalize_app` exactly as before, so prune + log cleanup runs whether the user clicks Close / Escape / window-X. New flag `MeetingApp._session_done` gates the close-vs-abort decision in `_request_stop` and `_on_close_request`; new UI method `MeetingWindow.mark_done(success, file_size_bytes)`.

@@ -13,11 +13,15 @@ This project expects the [superpowers](https://github.com/obra/superpowers) plug
 ## Quick reference
 
 ```sh
-nix develop              # enter dev shell (all system deps)
-uv run python -m voxize  # launch (bind to a global hotkey)
+nix develop                      # enter dev shell (all system deps)
+uv run python -m voxize          # dictation overlay (bind to a global hotkey)
+uv run python -m voxize.meeting  # meeting recorder (mic + system → stereo WAV)
 ```
 
 OpenAI API key must be in GNOME Keyring: `secret-tool store --label='OpenAI API Key' service openai key api`
+
+The meeting recorder needs no API key — it produces a WAV only, for offline
+transcription/diarization with tools like WhisperX.
 
 ## Architecture
 
@@ -58,6 +62,7 @@ Thread bridge: `GLib.idle_add` (worker -> GTK), `call_soon_threadsafe` (GTK -> a
 | `lock.py` | Mic lock via `fcntl.flock()` |
 | `checks.py` | Startup dependency validation |
 | `style.css` | GTK4/libadwaita CSS theme |
+| `meeting/` | Meeting recorder package — separate Gtk.Application, dual-stream capture (mic + system) to stereo WAV via two `parec` subprocesses. No API calls. Shares `audio.py`/`lock.py`/`storage.py`/`style.css` with the dictation app; entry point `python -m voxize.meeting`. |
 
 ## Key technical decisions
 
@@ -116,6 +121,8 @@ Libadwaita uses CSS custom properties (`--name` / `var(--name)`), not `@define-c
 ## Session data
 
 `~/.local/state/voxize/<ISO-timestamp>/` — `audio.wav`, `live_transcript.txt`, `transcription.txt`, `cleaned.txt`, `ws_events.jsonl`, `batch_events.jsonl`, `cleanup_events.jsonl`, `debug.log`, `recover.sh`.
+
+Meeting recorder sessions live in the same parent directory with a `-meeting` suffix on the timestamp (e.g. `2026-05-22T11-05-13-meeting/`). Contents: `recording.opus` (the deliverable — Opus 48 kbps stereo, L=mic, R=system) and `debug.log`. The intermediate `recording.wav` is moved to the system trash post-compression and only stays if compression fails; in that case a `compress_error.txt` records why.
 
 Retention is controlled by `[storage]` in `voxize.toml`. Defaults: keep the 500 newest sessions AND drop anything older than 14 days (strict/OR — either limit can prune). Set either key to `0` to disable that limit; set both to `0` to disable pruning entirely. Pruning runs on app close and trashes via `Gio.File.trash()` (recoverable from the system trash).
 

@@ -61,36 +61,52 @@ class LevelMeter:
 
 
 class WavWriter:
-    """Streams PCM data to a WAV file with crash-safe placeholder header."""
+    """Streams PCM data to a WAV file with crash-safe placeholder header.
 
-    def __init__(self, path: str) -> None:
+    Defaults match the live-dictation pipeline (24 kHz mono int16). Pass
+    explicit values for the meeting recorder (48 kHz stereo) or any other
+    capture shape — the 44-byte header layout is fixed for PCM int16 so
+    only the rate/channel fields vary.
+    """
+
+    def __init__(
+        self,
+        path: str,
+        sample_rate: int = SAMPLE_RATE,
+        channels: int = CHANNELS,
+    ) -> None:
         self._path = path
+        self._sample_rate = sample_rate
+        self._channels = channels
         self._fd = None
         self._data_bytes = 0
         self._lock = threading.Lock()
 
     def open(self) -> None:
         with self._lock:
-            logger.debug("wav open: path=%s", self._path)
+            logger.debug(
+                "wav open: path=%s rate=%d ch=%d",
+                self._path,
+                self._sample_rate,
+                self._channels,
+            )
             self._fd = open(self._path, "wb")  # noqa: SIM115
-            # 44-byte RIFF/WAV header with placeholder sizes
+            byte_rate = self._sample_rate * self._channels * 2
+            block_align = self._channels * 2
             self._fd.write(b"RIFF")
-            self._fd.write(
-                struct.pack("<I", 0xFFFFFFFF)
-            )  # RIFF chunk size (placeholder)
+            self._fd.write(struct.pack("<I", 0xFFFFFFFF))  # RIFF size placeholder
             self._fd.write(b"WAVE")
             # fmt sub-chunk (16 bytes)
             self._fd.write(b"fmt ")
-            self._fd.write(struct.pack("<I", 16))  # sub-chunk size
+            self._fd.write(struct.pack("<I", 16))
             self._fd.write(struct.pack("<H", 1))  # PCM format
-            self._fd.write(struct.pack("<H", CHANNELS))
-            self._fd.write(struct.pack("<I", SAMPLE_RATE))
-            self._fd.write(struct.pack("<I", SAMPLE_RATE * CHANNELS * 2))  # byte rate
-            self._fd.write(struct.pack("<H", CHANNELS * 2))  # block align
+            self._fd.write(struct.pack("<H", self._channels))
+            self._fd.write(struct.pack("<I", self._sample_rate))
+            self._fd.write(struct.pack("<I", byte_rate))
+            self._fd.write(struct.pack("<H", block_align))
             self._fd.write(struct.pack("<H", 16))  # bits per sample
-            # data sub-chunk
             self._fd.write(b"data")
-            self._fd.write(struct.pack("<I", 0xFFFFFFFF))  # data size (placeholder)
+            self._fd.write(struct.pack("<I", 0xFFFFFFFF))  # data size placeholder
             self._fd.flush()
             self._data_bytes = 0
 
@@ -100,6 +116,31 @@ class WavWriter:
                 self._fd.write(pcm)
                 self._fd.flush()
                 self._data_bytes += len(pcm)
+
+    def rewrite_header(self) -> None:
+        """Update the size fields without closing the file.
+
+        Periodically called by the meeting recorder so that, on power loss
+        or hard kill, the resulting WAV is playable up to the most recent
+        rewrite — not just a placeholder header pointing past EOF.
+        """
+        with self._lock:
+            if not self._fd or self._data_bytes == 0:
+                return
+            pos = self._fd.tell()
+            try:
+                self._fd.seek(4)
+                self._fd.write(struct.pack("<I", 36 + self._data_bytes))
+                self._fd.seek(40)
+                self._fd.write(struct.pack("<I", self._data_bytes))
+                self._fd.flush()
+            finally:
+                self._fd.seek(pos)
+
+    @property
+    def data_bytes(self) -> int:
+        """Bytes of PCM written so far (excludes the 44-byte header)."""
+        return self._data_bytes
 
     def finalize(self) -> None:
         """Fix WAV header sizes and close the file."""
