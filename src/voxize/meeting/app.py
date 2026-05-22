@@ -33,7 +33,8 @@ from voxize.storage import create_session_dir, prune_sessions  # noqa: E402
 logger = logging.getLogger(__name__)
 
 _LOCK_NAME = "voxize-meeting.lock"
-_SESSION_SUFFIX = "-meeting"
+_BUCKET = "meeting"
+_SESSION_SUFFIX = f"-{_BUCKET}"
 _ERROR_POLL_INTERVAL_MS = 500
 
 
@@ -283,7 +284,7 @@ class MeetingApp(Gtk.Application):
         """GTK thread: prune, close logs, destroy window, quit."""
         logger.info("_finalize_app")
         try:
-            prune_sessions()
+            prune_sessions(_BUCKET)
         except Exception:
             logger.debug("prune_sessions failed", exc_info=True)
         if self._log_handler:

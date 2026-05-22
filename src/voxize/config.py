@@ -47,9 +47,30 @@ class UIConfig:
 
 
 @dataclass(frozen=True)
+class BucketStorageConfig:
+    """Fully-resolved retention values for one bucket (no inheritance)."""
+
+    max_sessions: int
+    max_age_days: int
+
+
+@dataclass(frozen=True)
 class StorageConfig:
     max_sessions: int = 500
     max_age_days: int = 14
+    # Per-bucket overrides keyed by bucket name (e.g. "meeting"). Values
+    # are already resolved against the top-level defaults at parse time,
+    # so for_bucket() can return them directly.
+    buckets: dict[str, BucketStorageConfig] = field(default_factory=dict)
+
+    def for_bucket(self, name: str) -> BucketStorageConfig:
+        """Resolve retention rules for a bucket. Falls back to defaults."""
+        if name in self.buckets:
+            return self.buckets[name]
+        return BucketStorageConfig(
+            max_sessions=self.max_sessions,
+            max_age_days=self.max_age_days,
+        )
 
 
 @dataclass(frozen=True)
@@ -90,7 +111,15 @@ _TEMPLATE = """\
 # autoclose_seconds = 30
 
 [storage]
-# Maximum number of session directories to keep. Pruned on app close
+# Session directories live in a single flat tree but belong to "buckets"
+# identified by a trailing -<tag> in the directory name. The dictation
+# overlay writes the "default" bucket (no suffix); the meeting recorder
+# writes the "meeting" bucket (-meeting suffix). Each app prunes only
+# its own bucket at close time, so heavy dictation use won't evict
+# meetings, and vice versa. The keys below set the defaults for every
+# bucket; per-bucket overrides go in [storage.<bucket>] subtables.
+
+# Maximum number of session directories per bucket. Pruned on app close
 # (oldest first, based on the directory name). 0 disables the
 # count-based limit.
 # max_sessions = 500
@@ -99,6 +128,12 @@ _TEMPLATE = """\
 # parsed from the directory name. Pruned on app close. 0 disables the
 # age-based limit.
 # max_age_days = 14
+
+# [storage.meeting]
+# Per-bucket override for meeting recordings. Missing keys inherit from
+# the [storage] defaults above, so you can override just one if you want.
+# max_sessions = 50
+# max_age_days = 90
 """
 
 
@@ -185,33 +220,62 @@ def _parse(data: dict) -> Config:
         )
         autoclose = defaults.ui.autoclose_seconds
 
-    max_sessions = storage_raw.get("max_sessions")
-    if max_sessions is None:
-        max_sessions = defaults.storage.max_sessions
-    elif not isinstance(max_sessions, int) or isinstance(max_sessions, bool):
-        logger.debug(
-            "config: storage.max_sessions is not an int (got %r), using default",
-            max_sessions,
-        )
-        max_sessions = defaults.storage.max_sessions
-    max_sessions = max(0, int(max_sessions))
+    max_sessions = _parse_nonneg_int(
+        storage_raw,
+        "max_sessions",
+        defaults.storage.max_sessions,
+        path="storage.max_sessions",
+    )
+    max_age_days = _parse_nonneg_int(
+        storage_raw,
+        "max_age_days",
+        defaults.storage.max_age_days,
+        path="storage.max_age_days",
+    )
 
-    max_age_days = storage_raw.get("max_age_days")
-    if max_age_days is None:
-        max_age_days = defaults.storage.max_age_days
-    elif not isinstance(max_age_days, int) or isinstance(max_age_days, bool):
-        logger.debug(
-            "config: storage.max_age_days is not an int (got %r), using default",
-            max_age_days,
+    # Bucket overrides — every dict-valued child of [storage] is a
+    # subtable [storage.<bucket>]. Scalar keys are top-level retention
+    # values (already parsed above). Missing keys per-bucket inherit from
+    # the top-level defaults so a partial override is a true override.
+    buckets: dict[str, BucketStorageConfig] = {}
+    for bucket_name, raw in storage_raw.items():
+        if not isinstance(raw, dict):
+            continue
+        buckets[bucket_name] = BucketStorageConfig(
+            max_sessions=_parse_nonneg_int(
+                raw,
+                "max_sessions",
+                max_sessions,
+                path=f"storage.{bucket_name}.max_sessions",
+            ),
+            max_age_days=_parse_nonneg_int(
+                raw,
+                "max_age_days",
+                max_age_days,
+                path=f"storage.{bucket_name}.max_age_days",
+            ),
         )
-        max_age_days = defaults.storage.max_age_days
-    max_age_days = max(0, int(max_age_days))
 
     return Config(
         ducking=DuckingConfig(apps=apps, volume=float(volume)),
         ui=UIConfig(autoclose_seconds=int(autoclose)),
-        storage=StorageConfig(max_sessions=max_sessions, max_age_days=max_age_days),
+        storage=StorageConfig(
+            max_sessions=max_sessions,
+            max_age_days=max_age_days,
+            buckets=buckets,
+        ),
     )
+
+
+def _parse_nonneg_int(raw: dict, key: str, default: int, *, path: str) -> int:
+    """Parse a non-negative int from a TOML table; fall back on type errors."""
+    val = raw.get(key)
+    if val is None:
+        return default
+    if not isinstance(val, int) or isinstance(val, bool):
+        logger.debug("config: %s is not an int (got %r), using default", path, val)
+        return default
+    return max(0, int(val))
 
 
 def load() -> None:
@@ -246,11 +310,12 @@ def load() -> None:
     logger.debug(
         "config: loaded from %s (ducking.apps=%s, ducking.volume=%s, "
         "ui.autoclose_seconds=%s, storage.max_sessions=%s, "
-        "storage.max_age_days=%s)",
+        "storage.max_age_days=%s, storage.buckets=%s)",
         path,
         CONFIG.ducking.apps,
         CONFIG.ducking.volume,
         CONFIG.ui.autoclose_seconds,
         CONFIG.storage.max_sessions,
         CONFIG.storage.max_age_days,
+        sorted(CONFIG.storage.buckets.keys()),
     )

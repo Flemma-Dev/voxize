@@ -124,7 +124,7 @@ Libadwaita uses CSS custom properties (`--name` / `var(--name)`), not `@define-c
 
 Meeting recorder sessions live in the same parent directory with a `-meeting` suffix on the timestamp (e.g. `2026-05-22T11-05-13-meeting/`). Contents: `recording.opus` (the deliverable — Opus 48 kbps stereo, L=mic, R=system) and `debug.log`. The intermediate `recording.wav` is moved to the system trash post-compression and only stays if compression fails; in that case a `compress_error.txt` records why.
 
-Retention is controlled by `[storage]` in `voxize.toml`. Defaults: keep the 500 newest sessions AND drop anything older than 14 days (strict/OR — either limit can prune). Set either key to `0` to disable that limit; set both to `0` to disable pruning entirely. Pruning runs on app close and trashes via `Gio.File.trash()` (recoverable from the system trash).
+Retention is bucketed: each app prunes only its own bucket at close. Buckets are detected from the trailing `-<tag>` on the directory name — dictation writes the `default` bucket (no suffix), the meeting recorder writes `meeting`. Heavy dictation use can't evict meetings, and vice versa. Defaults in `[storage]` (keep 500 newest AND drop > 14 days, strict/OR) apply to every bucket; per-bucket overrides go in `[storage.<bucket>]` and inherit any missing keys from the defaults. Set either key to `0` to disable that limit for the bucket; both `0` disables pruning entirely. Strays (directories whose names don't fit the scheme) are never pruned and get logged. Pruning trashes via `Gio.File.trash()` (recoverable from the system trash).
 
 ## Environment variables
 
