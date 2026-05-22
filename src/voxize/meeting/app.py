@@ -11,6 +11,7 @@ Lifecycle:
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import signal
@@ -36,6 +37,10 @@ _LOCK_NAME = "voxize-meeting.lock"
 _BUCKET = "meeting"
 _SESSION_SUFFIX = f"-{_BUCKET}"
 _ERROR_POLL_INTERVAL_MS = 500
+_WINDOW_CALLS_BUS_NAME = "org.gnome.Shell"
+_WINDOW_CALLS_OBJECT_PATH = "/org/gnome/Shell/Extensions/Windows"
+_WINDOW_CALLS_IFACE = "org.gnome.Shell.Extensions.Windows"
+_WM_CLASS = "dev.flemma.VoxizeMeeting"
 
 
 class MeetingApp(Gtk.Application):
@@ -156,6 +161,7 @@ class MeetingApp(Gtk.Application):
         self._error_poll_source = GLib.timeout_add(
             _ERROR_POLL_INTERVAL_MS, self._check_errors
         )
+        self._request_always_on_top()
         return False  # one-shot idle
 
     def _safe_data_bytes(self) -> int:
@@ -169,6 +175,38 @@ class MeetingApp(Gtk.Application):
         if err and self._ui:
             self._ui.show_error(err)
         return True
+
+    # ── Always-on-top (optional, via window-calls GNOME extension) ──
+
+    def _request_always_on_top(self) -> None:
+        try:
+            proxy = Gio.DBusProxy.new_for_bus_sync(
+                Gio.BusType.SESSION,
+                Gio.DBusProxyFlags.NONE,
+                None,
+                _WINDOW_CALLS_BUS_NAME,
+                _WINDOW_CALLS_OBJECT_PATH,
+                _WINDOW_CALLS_IFACE,
+                None,
+            )
+            result = proxy.call_sync("List", None, Gio.DBusCallFlags.NONE, 1000, None)
+            windows = json.loads(result.unpack()[0])
+            for w in windows:
+                if w.get("wm_class", "").lower() == _WM_CLASS.lower():
+                    proxy.call_sync(
+                        "MakeAbove",
+                        GLib.Variant("(u)", (w["id"],)),
+                        Gio.DBusCallFlags.NONE,
+                        1000,
+                        None,
+                    )
+                    logger.info("always-on-top: set via window-calls (id=%d)", w["id"])
+                    return
+            logger.debug(
+                "always-on-top: window not found in List (wm_class=%s)", _WM_CLASS
+            )
+        except Exception as e:
+            logger.debug("always-on-top: unavailable (%s)", e)
 
     # ── Stop / teardown ──
 
