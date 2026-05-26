@@ -21,6 +21,12 @@ _CSS = """
     border: 1px solid rgba(255, 255, 255, 0.15);
     border-radius: 12px;
     padding: 3px;
+    opacity: 0.5;
+    transition: opacity 250ms ease-in-out;
+}
+
+.mode-switcher-bar:hover .mode-switcher {
+    opacity: 1;
 }
 
 .mode-switcher button {
@@ -73,6 +79,7 @@ def build_titlebar(
     Returns a vertical Box suitable for ``window.set_titlebar()``.
     """
     top = Gtk.HeaderBar()
+    top.add_css_class("mode-switcher-bar")
     top.set_title_widget(build(active, on_switch))
 
     header.set_show_title_buttons(False)
