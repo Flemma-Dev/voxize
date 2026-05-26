@@ -5,6 +5,7 @@
 let
   runtimeDeps = with pkgs; [
     gtk4
+    libadwaita
     gobject-introspection
     portaudio
     libsecret # gi.repository.Secret (keyring access)

@@ -15,6 +15,8 @@ import json
 import logging
 import os
 import signal
+import subprocess
+import sys
 import threading
 from pathlib import Path
 
@@ -319,8 +321,22 @@ class MeetingApp(Gtk.Application):
             GLib.idle_add(self._ui.update_compress_elapsed, elapsed_s)
 
     def _finalize_app(self) -> bool:
-        """GTK thread: prune, close logs, destroy window, quit."""
+        """GTK thread: prune, spawn process app if done, close logs, quit."""
         logger.info("_finalize_app")
+        if self._session_done and self._session_dir:
+            try:
+                subprocess.Popen(
+                    [
+                        sys.executable,
+                        "-m",
+                        "voxize.meeting",
+                        "--process",
+                        self._session_dir,
+                    ],
+                )
+                logger.info("spawned process app for %s", self._session_dir)
+            except Exception:
+                logger.exception("failed to spawn process app")
         try:
             prune_sessions(_BUCKET)
         except Exception:

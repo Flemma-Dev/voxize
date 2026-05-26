@@ -136,6 +136,48 @@ headerbar button {
     font-size: 0.85em;
 }
 
+/* Tag entry — inline pill input for key terms */
+.tag-entry-frame.focused {
+    outline-color: color-mix(in srgb, var(--accent-color) 50%, transparent);
+    outline-width: 2px;
+    outline-offset: -2px;
+    outline-style: solid;
+}
+
+.tag-entry-frame .tag-view,
+.tag-entry-frame .tag-view text,
+.tag-entry-frame > box > text {
+    background: transparent;
+    outline: none;
+    box-shadow: none;
+}
+
+.tag-pill {
+    background: rgba(255, 255, 255, 0.08);
+    border-radius: 99px;
+    padding: 2px 2px 2px 10px;
+    min-height: 22px;
+}
+
+.tag-pill-selected {
+    background: rgba(255, 255, 255, 0.18);
+    outline: 1px solid var(--vox-fg-dim);
+    outline-offset: -1px;
+}
+
+.tag-pill button.tag-pill-close {
+    min-width: 20px;
+    min-height: 20px;
+    padding: 0;
+    margin: 0;
+    border-radius: 99px;
+    opacity: 0.5;
+}
+
+.tag-pill button.tag-pill-close:hover {
+    opacity: 1;
+}
+
 /* Context bar — persistent prompt indicator */
 .context-bar {
     background: transparent;
