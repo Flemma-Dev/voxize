@@ -317,6 +317,7 @@ class ProcessWindow:
         self._title_save_source: int | None = None
 
         self._params = params or TranscribeParams()
+        self._had_transcript = session.has_transcript
         self._build()
 
         if session.has_transcript:
@@ -343,6 +344,14 @@ class ProcessWindow:
         title_label.add_css_class("status-label")
         title_box.append(title_label)
         hb.set_title_widget(title_box)
+
+        self._copy_btn = Gtk.Button(icon_name="edit-copy-symbolic")
+        self._copy_btn.add_css_class("flat")
+        self._copy_btn.add_css_class("dim-label")
+        self._copy_btn.set_tooltip_text("Copy transcript")
+        self._copy_btn.set_visible(False)
+        self._copy_btn.connect("clicked", self._on_copy_clicked)
+        hb.pack_end(self._copy_btn)
 
         folder_btn = Gtk.Button(icon_name="folder-symbolic")
         folder_btn.add_css_class("flat")
@@ -416,11 +425,21 @@ class ProcessWindow:
         title_row.append(self._generate_title_btn)
         content.append(title_row)
 
-        # ── Speakers row (compact) ──
-        speakers_row = Gtk.Box(
-            orientation=Gtk.Orientation.HORIZONTAL,
-            spacing=10,
-        )
+        # ── Transcription settings (collapsible fieldset) ──
+        self._transcribe_frame = Gtk.Frame()
+        self._transcribe_frame.add_css_class("rename-section")
+
+        transcribe_label = Gtk.Label(label="Transcription")
+        transcribe_label.add_css_class("timer-label")
+        self._transcribe_expander = Gtk.Expander()
+        self._transcribe_expander.set_label_widget(transcribe_label)
+        self._transcribe_expander.set_expanded(not self._session.has_transcript)
+
+        transcribe_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        transcribe_box.set_margin_top(12)
+        transcribe_box.set_margin_bottom(4)
+
+        speakers_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
         speakers_label = Gtk.Label(label="Speakers")
         speakers_label.add_css_class("timer-label")
         speakers_label.set_xalign(0)
@@ -439,51 +458,39 @@ class ProcessWindow:
         self._speakers_spin.set_size_request(80, -1)
         self._speakers_spin.connect("value-changed", lambda _s: self._save_params())
         speakers_row.append(self._speakers_spin)
-        content.append(speakers_row)
+        transcribe_box.append(speakers_row)
 
-        # ── Key terms ──
         terms_label = Gtk.Label(label="Key terms")
         terms_label.add_css_class("timer-label")
         terms_label.set_xalign(0)
-        content.append(terms_label)
+        transcribe_box.append(terms_label)
 
         self._tag_entry = TagEntry(on_change=self._save_params)
         if self._params.keyterms:
             self._tag_entry.set_tags(self._params.keyterms)
-        content.append(self._tag_entry.widget)
+        transcribe_box.append(self._tag_entry.widget)
 
         hint = Gtk.Label(label="Press Enter to add (optional, +20% cost)")
         hint.add_css_class("timer-label")
         hint.set_xalign(0)
         hint.set_opacity(0.6)
-        content.append(hint)
-
-        # ── Action buttons ──
-        action_row = Gtk.Box(
-            orientation=Gtk.Orientation.HORIZONTAL,
-            spacing=8,
-        )
+        transcribe_box.append(hint)
 
         self._transcribe_btn = _icon_button("document-send-symbolic", "Transcribe")
         self._transcribe_btn.add_css_class("suggested-action")
-        self._transcribe_btn.set_hexpand(True)
+        self._transcribe_btn.set_margin_top(2)
         self._transcribe_btn.connect("clicked", self._on_transcribe_clicked)
-        action_row.append(self._transcribe_btn)
+        transcribe_box.append(self._transcribe_btn)
 
-        self._copy_btn = Gtk.Button(icon_name="edit-copy-symbolic")
-        self._copy_btn.set_sensitive(False)
-        self._copy_btn.set_tooltip_text("Copy transcript")
-        self._copy_btn.connect("clicked", self._on_copy_clicked)
-        action_row.append(self._copy_btn)
-
-        content.append(action_row)
-
-        # ── Status label (visible during transcription only) ──
         self._status_label = Gtk.Label()
         self._status_label.add_css_class("timer-label")
         self._status_label.set_xalign(0)
         self._status_label.set_visible(False)
-        content.append(self._status_label)
+        transcribe_box.append(self._status_label)
+
+        self._transcribe_expander.set_child(transcribe_box)
+        self._transcribe_frame.set_child(self._transcribe_expander)
+        content.append(self._transcribe_frame)
 
         # ── Transcript preview ──
         self._preview_frame = Gtk.Frame()
@@ -560,7 +567,8 @@ class ProcessWindow:
     def _show_done_state(self) -> None:
         self._dot.set_visible(True)
         self._dot.add_css_class("ready")
-        self._copy_btn.set_sensitive(True)
+        self._copy_btn.set_visible(True)
+        self._transcribe_expander.set_expanded(False)
         self._set_transcribe_label("Re-transcribe")
         self._load_preview()
         self._rename_frame.set_visible(True)
@@ -568,14 +576,16 @@ class ProcessWindow:
     def mark_transcribing(self) -> None:
         if self._destroyed:
             return
+        self._had_transcript = self._session.has_transcript
         self._dot.set_visible(True)
         for cls in ("ready", "cleaning"):
             self._dot.remove_css_class(cls)
         self._dot.add_css_class("transcribing")
         self._status_label.set_text("Downmixing…")
         self._status_label.set_visible(True)
+        self._transcribe_expander.set_expanded(True)
         self._transcribe_btn.set_sensitive(False)
-        self._copy_btn.set_sensitive(False)
+        self._copy_btn.set_visible(False)
         self._generate_title_btn.set_sensitive(False)
         self._speakers_spin.set_sensitive(False)
         self._tag_entry.set_sensitive(False)
@@ -604,7 +614,7 @@ class ProcessWindow:
         for cls in ("transcribing", "cleaning"):
             self._dot.remove_css_class(cls)
         self._dot.add_css_class("ready")
-        self._copy_btn.set_sensitive(True)
+        self._copy_btn.set_visible(True)
         self._generate_title_btn.set_sensitive(True)
         self._transcribe_btn.set_sensitive(True)
         self._set_transcribe_label("Re-transcribe")
@@ -616,6 +626,9 @@ class ProcessWindow:
         if result.audio_duration_s:
             duration = f" · {_format_duration(int(result.audio_duration_s))} audio"
         self._status_label.set_text(f"Transcribed in {elapsed}{duration}")
+
+        if not self._had_transcript:
+            self._transcribe_expander.set_expanded(False)
 
         self._load_preview()
         self._rename_frame.set_visible(True)
@@ -631,9 +644,12 @@ class ProcessWindow:
             self._dot.remove_css_class(cls)
         self._status_label.set_visible(False)
         self._transcribe_btn.set_sensitive(True)
-        self._set_transcribe_label("Transcribe")
+        label = "Re-transcribe" if self._had_transcript else "Transcribe"
+        self._set_transcribe_label(label)
         self._speakers_spin.set_sensitive(True)
         self._tag_entry.set_sensitive(True)
+        if self._had_transcript:
+            self._copy_btn.set_visible(True)
 
     def show_error(self, message: str) -> None:
         if self._destroyed:
