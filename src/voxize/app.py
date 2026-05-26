@@ -876,7 +876,10 @@ class VoxizeApp(Gtk.Application):
 
         # First clipboard write — batch transcript
         if transcript:
-            clipboard.copy(transcript)
+            clipboard.copy(
+                transcript,
+                window_active=self._ui._window.is_active(),
+            )
 
         if not transcript.strip():
             self._ui.clear_text()
@@ -949,7 +952,10 @@ class VoxizeApp(Gtk.Application):
                 except Exception:
                     logger.exception("Failed to save cleaned.txt")
             if cleaned:
-                clipboard.copy(cleaned)
+                clipboard.copy(
+                    cleaned,
+                    window_active=self._ui._window.is_active(),
+                )
             self._machine.transition(State.READY)
             self._show_session_costs()
 

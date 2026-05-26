@@ -542,6 +542,9 @@ class OverlayWindow:
         logger.debug("_on_active_changed: active=%s", active)
         if active:
             self._text_view.remove_css_class("backdrop")
+            from voxize import clipboard
+
+            clipboard.flush()
         else:
             self._text_view.add_css_class("backdrop")
         if self._machine.state == State.READY and self._autoclose_total > 0:
