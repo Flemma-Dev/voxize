@@ -178,6 +178,13 @@ headerbar button {
     opacity: 1;
 }
 
+/* Countdown — large number shown before meeting recording starts */
+.countdown-number {
+    font-size: 4em;
+    font-weight: 200;
+    color: var(--vox-fg);
+}
+
 /* Context bar — persistent prompt indicator */
 .context-bar {
     background: transparent;

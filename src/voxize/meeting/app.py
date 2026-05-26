@@ -1,12 +1,17 @@
 """Voxize Meeting Application — GTK wiring for the dual-stream recorder.
 
 Lifecycle:
-  do_activate → present window → idle_add(_initialize)
+  do_activate → present window → 3-second countdown
+  countdown completes (or user skips with Enter/Space) → _start_recording
+  _start_recording → build MeetingWindow → idle_add(_initialize)
   _initialize: acquire lock → create session dir + debug.log →
                start DualStreamCapture → wire UI → start error poller
   _request_stop (Stop / Escape / window close):
                mark UI stopping → bg thread runs capture.stop() →
                idle_add(_finalize_app) → prune sessions → destroy window
+
+Cancel / Escape / window close during countdown quits immediately with
+no side effects — no session directory, no lock, no disk writes.
 """
 
 from __future__ import annotations
@@ -45,6 +50,9 @@ _WINDOW_CALLS_IFACE = "org.gnome.Shell.Extensions.Windows"
 _WM_CLASS = "dev.flemma.VoxizeMeeting"
 
 
+_COUNTDOWN_SECONDS = 3
+
+
 class MeetingApp(Gtk.Application):
     def __init__(self) -> None:
         super().__init__(
@@ -61,6 +69,9 @@ class MeetingApp(Gtk.Application):
         self._stopping = False
         self._compress_abort = threading.Event()
         self._compress_running = False
+        self._countdown_remaining = _COUNTDOWN_SECONDS
+        self._countdown_source: int | None = None
+        self._countdown_label: Gtk.Label | None = None
         # True once capture + compress finish (success or non-abort failure).
         # In this state the window stays open with a green/amber dot until
         # the user explicitly closes it — matches the dictation overlay's
@@ -91,14 +102,76 @@ class MeetingApp(Gtk.Application):
         win.add_controller(ctrl)
 
         self._window = win
-        self._ui = MeetingWindow(win, on_stop=self._request_stop)
-        win.present()
 
         for sig in (signal.SIGTERM, signal.SIGINT):
             GLib.unix_signal_add(GLib.PRIORITY_HIGH, sig, self._on_signal, sig)
 
-        # Defer heavy bring-up so the window paints first; failures land
-        # in the visible error bar instead of an invisible crash.
+        self._show_countdown()
+        win.present()
+
+    # ── Countdown ──
+
+    def _show_countdown(self) -> None:
+        hb = Gtk.HeaderBar()
+        hb.set_show_title_buttons(False)
+        hb.set_title_widget(Gtk.Box())
+
+        status = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        dot = Gtk.Label(label="●")
+        dot.add_css_class("status-dot")
+        dot.add_css_class("warming")
+        status.append(dot)
+        label = Gtk.Label(label="Starting…")
+        label.add_css_class("status-label")
+        status.append(label)
+        hb.pack_start(status)
+
+        cancel_btn = Gtk.Button(label="Cancel")
+        cancel_btn.connect("clicked", lambda _b: self._cancel_countdown())
+        hb.pack_end(cancel_btn)
+
+        self._window.set_titlebar(hb)
+
+        content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        content.set_vexpand(True)
+        content.set_valign(Gtk.Align.CENTER)
+        content.set_halign(Gtk.Align.CENTER)
+
+        self._countdown_label = Gtk.Label(label=str(self._countdown_remaining))
+        self._countdown_label.add_css_class("countdown-number")
+        content.append(self._countdown_label)
+
+        self._window.set_child(content)
+        self._countdown_source = GLib.timeout_add(1000, self._countdown_tick)
+
+    def _countdown_tick(self) -> bool:
+        self._countdown_remaining -= 1
+        if self._countdown_remaining <= 0:
+            self._countdown_source = None
+            self._start_recording()
+            return False
+        self._countdown_label.set_text(str(self._countdown_remaining))
+        return True
+
+    def _cancel_countdown(self) -> None:
+        if self._countdown_source is not None:
+            GLib.source_remove(self._countdown_source)
+            self._countdown_source = None
+        try:
+            subprocess.Popen([sys.executable, "-m", "voxize.meeting"])
+        except Exception:
+            logger.exception("failed to spawn welcome screen")
+        self.quit()
+
+    def _skip_countdown(self) -> None:
+        if self._countdown_source is not None:
+            GLib.source_remove(self._countdown_source)
+            self._countdown_source = None
+        self._start_recording()
+
+    def _start_recording(self) -> None:
+        self._countdown_label = None
+        self._ui = MeetingWindow(self._window, on_stop=self._request_stop)
         GLib.idle_add(self._initialize)
 
     # ── Initialization ──
@@ -368,22 +441,22 @@ class MeetingApp(Gtk.Application):
     def _on_signal(self, sig: int) -> bool:
         """SIGTERM/SIGINT: finalize WAV header inline, then schedule clean stop."""
         logger.info("signal %s received", sig)
-        # Rewrite the WAV size fields synchronously so the file on disk
-        # is playable up to the moment we got the signal, even if the
-        # rest of teardown is interrupted (e.g. by SIGKILL after a grace
-        # period). Cheap — touches only 8 bytes.
+        if self._countdown_source is not None:
+            self._cancel_countdown()
+            return GLib.SOURCE_REMOVE
         if self._capture:
             try:
                 self._capture.finalize_wav()
             except Exception:
                 logger.exception("finalize_wav failed in signal handler")
-        # Kick off the normal stop path; if we're already mid-stop, this
-        # is a no-op.
         self._request_stop()
         return GLib.SOURCE_REMOVE
 
     def _on_close_request(self, _win) -> bool:
         """Window-X / Alt-F4: route through the same paths as the Close button."""
+        if self._countdown_source is not None:
+            self._cancel_countdown()
+            return True
         logger.debug(
             "_on_close_request stopping=%s compress_running=%s done=%s",
             self._stopping,
@@ -391,21 +464,25 @@ class MeetingApp(Gtk.Application):
             self._session_done,
         )
         if self._session_done:
-            # User dismissed the done screen — run the finalize path so
-            # logs are flushed, prune runs, and the app quits cleanly.
             GLib.idle_add(self._finalize_app)
-            return True  # block immediate close; _finalize_app destroys
+            return True
         if self._stopping:
             if self._compress_running:
-                # User wants out mid-compress: signal abort, keep the window
-                # open until the compress thread finalizes us via idle_add.
                 self._compress_abort.set()
                 return True
-            return False  # mid-stop with no compress running — allow close
+            return False
         self._request_stop()
-        return True  # block close; _finalize_app destroys the window
+        return True
 
     def _on_key(self, _ctrl, keyval, _code, _mod) -> bool:
+        if self._countdown_source is not None:
+            if keyval == Gdk.KEY_Escape:
+                self._cancel_countdown()
+                return True
+            if keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter, Gdk.KEY_space):
+                self._skip_countdown()
+                return True
+            return False
         if keyval == Gdk.KEY_Escape:
             logger.debug("Escape pressed")
             self._request_stop()
