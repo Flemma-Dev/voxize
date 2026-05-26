@@ -178,6 +178,19 @@ headerbar button {
     opacity: 1;
 }
 
+/* Speaker rename — collapsible fieldset */
+.rename-section {
+    border: 1px solid var(--vox-border);
+    border-radius: 10px;
+    padding: 6px 10px;
+}
+
+.rename-original {
+    color: var(--vox-fg-dim);
+    font-family: var(--monospace-font-family);
+    font-size: 0.9em;
+}
+
 /* Mode switcher — pill segmented control (button overrides loaded
    at PRIORITY_USER in Python to beat libadwaita headerbar rules) */
 .mode-switcher {

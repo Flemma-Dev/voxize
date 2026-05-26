@@ -5,7 +5,9 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 from collections.abc import Callable
+from datetime import datetime
 
 import gi
 
@@ -22,6 +24,11 @@ from voxize.meeting.sessions import MeetingSession, save_title  # noqa: E402
 from voxize.meeting.transcribe import TranscribeParams, TranscribeResult  # noqa: E402
 
 _TITLE_DEBOUNCE_MS = 300
+
+_TIMESTAMP_LINE_RE = re.compile(
+    r"^(\d{2}:\d{2}:\d{2},\d{3}\s*-->\s*\d{2}:\d{2}:\d{2},\d{3}\s+)\[(.+?)\](\s*)$",
+    re.MULTILINE,
+)
 
 
 class TagEntry:
@@ -501,6 +508,26 @@ class ProcessWindow:
         self._preview_frame.set_child(preview_scroll)
         content.append(self._preview_frame)
 
+        # ── Speaker rename (collapsible fieldset) ──
+        self._rename_frame = Gtk.Frame()
+        self._rename_frame.add_css_class("rename-section")
+        self._rename_frame.set_visible(False)
+
+        rename_label = Gtk.Label(label="Rename speakers")
+        rename_label.add_css_class("timer-label")
+        self._rename_expander = Gtk.Expander()
+        self._rename_expander.set_label_widget(rename_label)
+        self._rename_expander.connect("notify::expanded", self._on_rename_expanded)
+
+        self._rename_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        self._rename_box.set_margin_top(12)
+        self._rename_box.set_margin_bottom(4)
+        self._rename_entries: dict[str, Gtk.Entry] = {}
+        self._rename_apply_btn: Gtk.Button | None = None
+        self._rename_expander.set_child(self._rename_box)
+        self._rename_frame.set_child(self._rename_expander)
+        content.append(self._rename_frame)
+
         # ── Error bar ──
         self._error_bar = Gtk.Box(
             orientation=Gtk.Orientation.HORIZONTAL,
@@ -521,7 +548,11 @@ class ProcessWindow:
         self._error_bar.append(self._error_label)
         content.append(self._error_bar)
 
-        self._window.set_child(content)
+        scroll = Gtk.ScrolledWindow()
+        scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        scroll.set_propagate_natural_height(True)
+        scroll.set_child(content)
+        self._window.set_child(scroll)
         self._transcribe_btn.grab_focus()
 
     # ── State transitions ──
@@ -532,6 +563,7 @@ class ProcessWindow:
         self._copy_btn.set_sensitive(True)
         self._set_transcribe_label("Re-transcribe")
         self._load_preview()
+        self._rename_frame.set_visible(True)
 
     def mark_transcribing(self) -> None:
         if self._destroyed:
@@ -549,6 +581,8 @@ class ProcessWindow:
         self._tag_entry.set_sensitive(False)
         self._error_bar.set_visible(False)
         self._preview_frame.set_visible(False)
+        self._rename_expander.set_expanded(False)
+        self._rename_frame.set_visible(False)
 
     def update_transcribe_elapsed(self, phase: str, seconds: float) -> bool:
         if self._destroyed:
@@ -584,6 +618,7 @@ class ProcessWindow:
         self._status_label.set_text(f"Transcribed in {elapsed}{duration}")
 
         self._load_preview()
+        self._rename_frame.set_visible(True)
 
         if not self._title_entry.get_text().strip():
             self._on_generate_title(None)
@@ -639,6 +674,131 @@ class ProcessWindow:
         buf = self._preview_view.get_buffer()
         buf.set_text(text)
         self._preview_frame.set_visible(True)
+
+    # ── Speaker rename ──
+
+    def _on_rename_expanded(self, expander: Gtk.Expander, _pspec) -> None:
+        if expander.get_expanded():
+            self._populate_rename_rows()
+
+    def _populate_rename_rows(self) -> None:
+        self._rename_entries.clear()
+        child = self._rename_box.get_first_child()
+        while child is not None:
+            sibling = child.get_next_sibling()
+            self._rename_box.remove(child)
+            child = sibling
+
+        speakers = self._parse_speakers()
+        if not speakers:
+            empty = Gtk.Label(label="No speakers found in transcript")
+            empty.add_css_class("timer-label")
+            empty.set_xalign(0)
+            self._rename_box.append(empty)
+            self._rename_apply_btn = None
+            return
+
+        for name in speakers:
+            row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+            label = Gtk.Label(label=name)
+            label.add_css_class("rename-original")
+            label.set_xalign(0)
+            label.set_size_request(100, -1)
+            row.append(label)
+
+            arrow = Gtk.Label(label="→")
+            arrow.add_css_class("timer-label")
+            row.append(arrow)
+
+            entry = Gtk.Entry()
+            entry.set_text(name)
+            entry.set_hexpand(True)
+            entry.get_buffer().connect(
+                "notify::text", lambda *_: self._check_rename_dirty()
+            )
+            row.append(entry)
+
+            self._rename_entries[name] = entry
+            self._rename_box.append(row)
+
+        self._rename_apply_btn = Gtk.Button(label="Apply")
+        self._rename_apply_btn.set_margin_top(6)
+        self._rename_apply_btn.set_sensitive(False)
+        self._rename_apply_btn.connect("clicked", self._on_apply_rename)
+        self._rename_box.append(self._rename_apply_btn)
+
+    def _parse_speakers(self) -> list[str]:
+        transcript_path = os.path.join(self._session.path, "transcript.txt")
+        try:
+            with open(transcript_path) as f:
+                text = f.read()
+        except OSError:
+            return []
+        seen: set[str] = set()
+        ordered: list[str] = []
+        for m in _TIMESTAMP_LINE_RE.finditer(text):
+            name = m.group(2)
+            if name not in seen:
+                seen.add(name)
+                ordered.append(name)
+        return ordered
+
+    def _check_rename_dirty(self) -> None:
+        if self._rename_apply_btn is None:
+            return
+        has_change = False
+        for original, entry in self._rename_entries.items():
+            text = entry.get_text().strip()
+            if not text:
+                self._rename_apply_btn.set_sensitive(False)
+                return
+            if text != original:
+                has_change = True
+        self._rename_apply_btn.set_sensitive(has_change)
+
+    def _on_apply_rename(self, _btn: Gtk.Button) -> None:
+        transcript_path = os.path.join(self._session.path, "transcript.txt")
+        try:
+            with open(transcript_path) as f:
+                text = f.read()
+        except OSError:
+            self.show_error("Could not read transcript.txt")
+            return
+
+        rename_map: dict[str, str] = {}
+        for original, entry in self._rename_entries.items():
+            new_name = entry.get_text().strip()
+            if new_name and new_name != original:
+                rename_map[original] = new_name
+        if not rename_map:
+            return
+
+        stamp = datetime.now().strftime("%Y-%m-%dT%H-%M-%S")
+        backup_path = os.path.join(self._session.path, f"transcript.{stamp}.txt")
+        try:
+            with open(backup_path, "w") as f:
+                f.write(text)
+        except OSError:
+            self.show_error("Could not create transcript backup")
+            return
+
+        def _replace(m):
+            prefix, speaker, trailing = m.group(1), m.group(2), m.group(3)
+            return f"{prefix}[{rename_map.get(speaker, speaker)}]{trailing}"
+
+        new_text = _TIMESTAMP_LINE_RE.sub(_replace, text)
+
+        tmp = transcript_path + ".tmp"
+        try:
+            with open(tmp, "w") as f:
+                f.write(new_text)
+            os.replace(tmp, transcript_path)
+        except OSError:
+            self.show_error("Could not write transcript.txt")
+            return
+
+        self._load_preview()
+        self._populate_rename_rows()
 
     def _schedule_title_save(self) -> None:
         if self._title_save_source is not None:
