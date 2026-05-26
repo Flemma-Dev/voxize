@@ -35,6 +35,7 @@ class MeetingSession:
     has_transcript: bool
     duration_s: float | None
     file_size_bytes: int
+    title: str = ""
 
 
 def list_meeting_sessions() -> list[MeetingSession]:
@@ -69,6 +70,8 @@ def inspect_session(session_dir: str) -> MeetingSession:
             file_size_bytes = os.path.getsize(opus_path)
         duration_s = _probe_duration(opus_path)
 
+    title = load_title(session_dir)
+
     return MeetingSession(
         path=session_dir,
         name=name,
@@ -77,7 +80,30 @@ def inspect_session(session_dir: str) -> MeetingSession:
         has_transcript=has_transcript,
         duration_s=duration_s,
         file_size_bytes=file_size_bytes,
+        title=title,
     )
+
+
+def load_title(session_dir: str) -> str:
+    path = os.path.join(session_dir, "title.txt")
+    try:
+        with open(path) as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+
+def save_title(session_dir: str, title: str) -> None:
+    path = os.path.join(session_dir, "title.txt")
+    text = title.strip()
+    if not text:
+        with contextlib.suppress(FileNotFoundError):
+            os.remove(path)
+        return
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        f.write(text + "\n")
+    os.replace(tmp, path)
 
 
 def load_transcribe_params(session_dir: str) -> TranscribeParams | None:

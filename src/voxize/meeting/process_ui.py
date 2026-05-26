@@ -18,8 +18,10 @@ gi.require_version("Gtk", "4.0")
 from gi.repository import Adw, Gdk, Gio, GLib, Gtk  # noqa: E402
 
 from voxize.clipboard import copy as clipboard_copy  # noqa: E402
-from voxize.meeting.sessions import MeetingSession  # noqa: E402
+from voxize.meeting.sessions import MeetingSession, save_title  # noqa: E402
 from voxize.meeting.transcribe import TranscribeParams, TranscribeResult  # noqa: E402
+
+_TITLE_DEBOUNCE_MS = 300
 
 
 class TagEntry:
@@ -305,6 +307,7 @@ class ProcessWindow:
         self._on_transcribe = on_transcribe
         self._on_back = on_back
         self._destroyed = False
+        self._title_save_source: int | None = None
 
         self._params = params or TranscribeParams()
         self._build()
@@ -380,6 +383,31 @@ class ProcessWindow:
             info_row.append(detail_label)
 
         content.append(info_row)
+
+        # ── Title entry ──
+        title_row = Gtk.Box(
+            orientation=Gtk.Orientation.HORIZONTAL,
+            spacing=6,
+        )
+        self._title_entry = Gtk.Entry()
+        self._title_entry.set_placeholder_text("Meeting title…")
+        self._title_entry.set_hexpand(True)
+        if self._session.title:
+            self._title_entry.set_text(self._session.title)
+        self._title_entry.get_buffer().connect(
+            "notify::text", lambda *_: self._schedule_title_save()
+        )
+        title_row.append(self._title_entry)
+
+        self._generate_title_btn = Gtk.Button(
+            icon_name="error-correct-symbolic",
+        )
+        self._generate_title_btn.add_css_class("flat")
+        self._generate_title_btn.set_tooltip_text("Generate title from transcript")
+        self._generate_title_btn.set_sensitive(self._session.has_transcript)
+        self._generate_title_btn.connect("clicked", self._on_generate_title)
+        title_row.append(self._generate_title_btn)
+        content.append(title_row)
 
         # ── Speakers row (compact) ──
         speakers_row = Gtk.Box(
@@ -516,6 +544,7 @@ class ProcessWindow:
         self._status_label.set_visible(True)
         self._transcribe_btn.set_sensitive(False)
         self._copy_btn.set_sensitive(False)
+        self._generate_title_btn.set_sensitive(False)
         self._speakers_spin.set_sensitive(False)
         self._tag_entry.set_sensitive(False)
         self._error_bar.set_visible(False)
@@ -542,6 +571,7 @@ class ProcessWindow:
             self._dot.remove_css_class(cls)
         self._dot.add_css_class("ready")
         self._copy_btn.set_sensitive(True)
+        self._generate_title_btn.set_sensitive(True)
         self._transcribe_btn.set_sensitive(True)
         self._set_transcribe_label("Re-transcribe")
         self._speakers_spin.set_sensitive(True)
@@ -554,6 +584,9 @@ class ProcessWindow:
         self._status_label.set_text(f"Transcribed in {elapsed}{duration}")
 
         self._load_preview()
+
+        if not self._title_entry.get_text().strip():
+            self._on_generate_title(None)
 
     def mark_transcribe_idle(self) -> None:
         if self._destroyed:
@@ -575,6 +608,10 @@ class ProcessWindow:
 
     def destroy(self) -> None:
         self._destroyed = True
+        if self._title_save_source is not None:
+            GLib.source_remove(self._title_save_source)
+            self._title_save_source = None
+            save_title(self._session.path, self._title_entry.get_text())
 
     def _set_transcribe_label(self, text: str) -> None:
         icon = (
@@ -602,6 +639,18 @@ class ProcessWindow:
         buf = self._preview_view.get_buffer()
         buf.set_text(text)
         self._preview_frame.set_visible(True)
+
+    def _schedule_title_save(self) -> None:
+        if self._title_save_source is not None:
+            GLib.source_remove(self._title_save_source)
+        self._title_save_source = GLib.timeout_add(
+            _TITLE_DEBOUNCE_MS, self._flush_title
+        )
+
+    def _flush_title(self) -> bool:
+        self._title_save_source = None
+        save_title(self._session.path, self._title_entry.get_text())
+        return GLib.SOURCE_REMOVE
 
     def _save_params(self) -> None:
         data = json.dumps(
@@ -649,6 +698,41 @@ class ProcessWindow:
                 self._on_transcribe(params)
 
         dialog.choose(self._window, None, on_response)
+
+    def _on_generate_title(self, _btn: Gtk.Button) -> None:
+        self._generate_title_btn.set_sensitive(False)
+        self._title_entry.set_text("Generating…")
+        self._title_entry.set_sensitive(False)
+
+        import threading
+
+        from voxize.meeting.titling import generate_title
+
+        date_str = _format_session_date(self._session)
+
+        def _run():
+            try:
+                title = generate_title(self._session.path, date_str)
+                GLib.idle_add(self._on_title_generated, title)
+            except Exception as e:
+                logger.debug("generate_title failed", exc_info=True)
+                GLib.idle_add(self._on_title_generated, None, str(e))
+
+        threading.Thread(target=_run, daemon=True, name="meeting-title").start()
+
+    def _on_title_generated(self, title: str | None, error: str | None = None) -> bool:
+        if self._destroyed:
+            return False
+        self._title_entry.set_sensitive(True)
+        self._generate_title_btn.set_sensitive(True)
+        if title:
+            self._title_entry.set_text(title)
+            self._title_entry.set_position(-1)
+        else:
+            self._title_entry.set_text("")
+            if error:
+                self.show_error(f"Title generation failed: {error}")
+        return False
 
     def _on_copy_clicked(self, _btn: Gtk.Button) -> None:
         transcript_path = os.path.join(self._session.path, "transcript.txt")

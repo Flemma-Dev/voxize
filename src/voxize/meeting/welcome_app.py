@@ -18,7 +18,7 @@ import gi
 gi.require_version("Gdk", "4.0")
 gi.require_version("Gtk", "4.0")
 
-from gi.repository import Gdk, Gio, Gtk  # noqa: E402
+from gi.repository import Gdk, Gio, Gtk, Pango  # noqa: E402
 
 from voxize import mode_switcher  # noqa: E402
 from voxize.meeting.sessions import MeetingSession, list_meeting_sessions  # noqa: E402
@@ -112,6 +112,12 @@ class WelcomeApp(Gtk.Application):
         date_label.add_css_class("status-label")
         date_label.set_xalign(0)
         info_box.append(date_label)
+
+        if session.title:
+            title_label = Gtk.Label(label=session.title)
+            title_label.set_xalign(0)
+            title_label.set_ellipsize(Pango.EllipsizeMode.END)
+            info_box.append(title_label)
 
         details = []
         if session.duration_s is not None:
