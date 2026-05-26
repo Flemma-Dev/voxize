@@ -211,6 +211,8 @@ class MeetingApp(Gtk.Application):
         self._log_handler = fh
         logger.info("MeetingApp init: session_dir=%s", self._session_dir)
 
+        self._request_always_on_top()
+
         try:
             self._capture = DualStreamCapture(self._session_dir)
             self._capture.start()
@@ -236,7 +238,6 @@ class MeetingApp(Gtk.Application):
         self._error_poll_source = GLib.timeout_add(
             _ERROR_POLL_INTERVAL_MS, self._check_errors
         )
-        self._request_always_on_top()
         return False  # one-shot idle
 
     def _safe_data_bytes(self) -> int:
@@ -264,10 +265,23 @@ class MeetingApp(Gtk.Application):
                 _WINDOW_CALLS_IFACE,
                 None,
             )
+        except Exception as e:
+            logger.warning("always-on-top: D-Bus proxy failed (%s)", e)
+            return
+
+        try:
             result = proxy.call_sync("List", None, Gio.DBusCallFlags.NONE, 1000, None)
             windows = json.loads(result.unpack()[0])
-            for w in windows:
-                if w.get("wm_class", "").lower() == _WM_CLASS.lower():
+        except Exception as e:
+            logger.warning("always-on-top: List call failed (%s)", e)
+            return
+
+        wm_classes = [w.get("wm_class", "") for w in windows]
+        logger.debug("always-on-top: List returned %d windows: %s", len(windows), wm_classes)
+
+        for w in windows:
+            if w.get("wm_class", "").lower() == _WM_CLASS.lower():
+                try:
                     proxy.call_sync(
                         "MakeAbove",
                         GLib.Variant("(u)", (w["id"],)),
@@ -276,12 +290,15 @@ class MeetingApp(Gtk.Application):
                         None,
                     )
                     logger.info("always-on-top: set via window-calls (id=%d)", w["id"])
-                    return
-            logger.debug(
-                "always-on-top: window not found in List (wm_class=%s)", _WM_CLASS
-            )
-        except Exception as e:
-            logger.debug("always-on-top: unavailable (%s)", e)
+                except Exception as e:
+                    logger.warning("always-on-top: MakeAbove failed for id=%d (%s)", w["id"], e)
+                return
+
+        logger.warning(
+            "always-on-top: window not found (wanted wm_class=%s, got %s)",
+            _WM_CLASS,
+            wm_classes,
+        )
 
     # ── Stop / teardown ──
 
