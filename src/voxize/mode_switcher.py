@@ -93,9 +93,11 @@ def build(active: str, on_switch: Callable[[str], None]) -> Gtk.Box:
     box.add_css_class("mode-switcher")
 
     dictate_btn = Gtk.ToggleButton()
+    dictate_btn.set_focusable(False)
     dictate_btn.set_child(_content("audio-input-microphone-symbolic", "Dictate"))
 
     meeting_btn = Gtk.ToggleButton()
+    meeting_btn.set_focusable(False)
     meeting_btn.set_child(_content("system-users-symbolic", "Meeting"))
 
     meeting_btn.set_group(dictate_btn)

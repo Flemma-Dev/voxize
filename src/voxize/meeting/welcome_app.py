@@ -158,7 +158,10 @@ class WelcomeApp(Gtk.Application):
         session = row._session
         self._spawn("--process", session.path)
 
-    def _on_key(self, _ctrl, keyval, _code, _mod) -> bool:
+    def _on_key(self, _ctrl, keyval, _code, mod) -> bool:
+        if keyval == Gdk.KEY_m and mod & Gdk.ModifierType.CONTROL_MASK:
+            self._on_mode_switch("dictate")
+            return True
         if keyval == Gdk.KEY_Escape:
             self.quit()
             return True

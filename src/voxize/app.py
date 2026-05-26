@@ -1124,7 +1124,14 @@ class VoxizeApp(Gtk.Application):
 
     # ── Window events ──
 
-    def _on_key(self, _ctrl, keyval, _code, _mod, win) -> bool:
+    def _on_key(self, _ctrl, keyval, _code, mod, win) -> bool:
+        if (
+            keyval == Gdk.KEY_m
+            and mod & Gdk.ModifierType.CONTROL_MASK
+            and self._ui is not None and self._ui._on_switch_to_meeting is not None
+        ):
+            self._switch_to_meeting()
+            return True
         if keyval != Gdk.KEY_Escape:
             return False
         s = self._machine.state if self._machine else None
