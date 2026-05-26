@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 
 import gi
 
@@ -14,6 +15,7 @@ gi.require_version("Gtk", "4.0")
 # gi.require_version() above is executable code; all subsequent imports trigger E402.
 from gi.repository import Gdk, Gio, GLib, Gtk, Pango  # noqa: E402
 
+from voxize import mode_switcher  # noqa: E402
 from voxize.prompt import PromptSource  # noqa: E402
 from voxize.state import State, StateMachine  # noqa: E402
 
@@ -33,9 +35,11 @@ class OverlayWindow:
         window: Gtk.ApplicationWindow,
         machine: StateMachine,
         autoclose_seconds: int = 0,
+        on_switch_to_meeting: Callable[[], None] | None = None,
     ) -> None:
         self._window = window
         self._machine = machine
+        self._on_switch_to_meeting = on_switch_to_meeting
         self._timer_seconds = 0
         self._timer_source: int | None = None
         self._pulse_source: int | None = None
@@ -63,7 +67,7 @@ class OverlayWindow:
         # HeaderBar as titlebar — gives us drag-to-move for free
         header = Gtk.HeaderBar()
         header.set_show_title_buttons(False)
-        header.set_title_widget(Gtk.Box())  # suppress default title
+        header.set_title_widget(Gtk.Box())
 
         # Status area (start)
         status = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
@@ -114,7 +118,12 @@ class OverlayWindow:
         self._folder_btn.connect("clicked", self._on_open_folder)
         header.pack_end(self._folder_btn)
 
-        self._window.set_titlebar(header)
+        if self._on_switch_to_meeting is not None:
+            self._window.set_titlebar(
+                mode_switcher.build_titlebar("dictate", self._on_mode_switch, header)
+            )
+        else:
+            self._window.set_titlebar(header)
 
         # Dim text area when window loses focus
         self._window.connect("notify::is-active", self._on_active_changed)
@@ -589,6 +598,10 @@ class OverlayWindow:
         self._session_dir = path
 
     # ── Button handlers ──
+
+    def _on_mode_switch(self, mode: str) -> None:
+        if mode == "meeting" and self._on_switch_to_meeting is not None:
+            self._on_switch_to_meeting()
 
     def _on_open_folder(self, _btn: Gtk.Button) -> None:
         if self._session_dir:

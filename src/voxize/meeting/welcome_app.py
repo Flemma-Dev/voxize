@@ -20,6 +20,7 @@ gi.require_version("Gtk", "4.0")
 
 from gi.repository import Gdk, Gio, Gtk  # noqa: E402
 
+from voxize import mode_switcher  # noqa: E402
 from voxize.meeting.sessions import MeetingSession, list_meeting_sessions  # noqa: E402
 
 logger = logging.getLogger(__name__)
@@ -33,14 +34,16 @@ class WelcomeApp(Gtk.Application):
         )
 
     def do_activate(self) -> None:
+        display = Gdk.Display.get_default()
         css = Gtk.CssProvider()
         css_path = Path(__file__).parent.parent / "style.css"
         css.load_from_string(css_path.read_text())
         Gtk.StyleContext.add_provider_for_display(
-            Gdk.Display.get_default(),
+            display,
             css,
             Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION,
         )
+        mode_switcher.load_css(display)
 
         win = Gtk.ApplicationWindow(application=self)
         win.set_title("Voxize · Meeting")
@@ -57,7 +60,9 @@ class WelcomeApp(Gtk.Application):
         record_btn.connect("clicked", self._on_record)
         hb.pack_end(record_btn)
 
-        win.set_titlebar(hb)
+        win.set_titlebar(
+            mode_switcher.build_titlebar("meeting", self._on_mode_switch, hb)
+        )
 
         sessions = list_meeting_sessions()
 
@@ -136,6 +141,15 @@ class WelcomeApp(Gtk.Application):
         return row
 
     # ── Handlers ──
+
+    def _on_mode_switch(self, mode: str) -> None:
+        if mode == "dictate":
+            try:
+                subprocess.Popen([sys.executable, "-m", "voxize"])
+                logger.info("spawned dictation, quitting welcome")
+            except Exception:
+                logger.exception("failed to spawn dictation")
+            self.quit()
 
     def _on_record(self, _btn: Gtk.Button) -> None:
         self._spawn("--record")

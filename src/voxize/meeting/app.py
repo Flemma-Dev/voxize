@@ -331,6 +331,8 @@ class MeetingApp(Gtk.Application):
         except Exception:
             logger.exception("capture.stop failed")
 
+        self._release_lock()
+
         result = None
         if self._session_dir and wav_data_bytes > 0:
             GLib.idle_add(self._ui.mark_compressing)
@@ -353,8 +355,6 @@ class MeetingApp(Gtk.Application):
                 logger.exception("compress: unexpected crash, WAV preserved")
             finally:
                 self._compress_running = False
-
-        self._release_lock()
 
         # Abort path or "nothing to compress" (zero-byte recording) →
         # close window immediately, same as before. Everything else

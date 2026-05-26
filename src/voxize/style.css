@@ -178,6 +178,14 @@ headerbar button {
     opacity: 1;
 }
 
+/* Mode switcher — pill segmented control (button overrides loaded
+   at PRIORITY_USER in Python to beat libadwaita headerbar rules) */
+.mode-switcher {
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    border-radius: 12px;
+    padding: 3px;
+}
+
 /* Countdown — large number shown before meeting recording starts */
 .countdown-number {
     font-size: 4em;

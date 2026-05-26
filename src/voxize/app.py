@@ -18,6 +18,8 @@ from __future__ import annotations
 import logging
 import os
 import signal
+import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -31,7 +33,7 @@ gi.require_version("Gtk", "4.0")
 # gi.require_version() above is executable code; all subsequent imports trigger E402.
 from gi.repository import Gdk, Gio, GLib, Gtk  # noqa: E402
 
-from voxize import clipboard, config  # noqa: E402
+from voxize import clipboard, config, mode_switcher  # noqa: E402
 from voxize._trace import trace as _trace  # noqa: E402
 from voxize.audio import (  # noqa: E402
     CHANNELS,
@@ -150,6 +152,9 @@ class VoxizeApp(Gtk.Application):
         # Session-level file log handler
         self._log_handler = None
 
+        # Set by _switch_to_meeting — trash the session dir on close
+        self._trash_session = False
+
     def do_activate(self) -> None:
         _trace("do_activate entry")
         # Detect transcription prompt BEFORE presenting the window — once our
@@ -161,13 +166,15 @@ class VoxizeApp(Gtk.Application):
             logger.debug("do_activate: prompts=%d", len(self._prompts))
 
         # Load CSS theme
+        display = Gdk.Display.get_default()
         css = Gtk.CssProvider()
         css.load_from_string((Path(__file__).parent / "style.css").read_text())
         Gtk.StyleContext.add_provider_for_display(
-            Gdk.Display.get_default(),
+            display,
             css,
             Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION,
         )
+        mode_switcher.load_css(display)
         _trace("CSS loaded")
 
         # Window
@@ -185,7 +192,10 @@ class VoxizeApp(Gtk.Application):
         self._machine = StateMachine()
         self._machine.on_change(self._on_state_change)
         self._ui = OverlayWindow(
-            win, self._machine, autoclose_seconds=_autoclose_seconds()
+            win,
+            self._machine,
+            autoclose_seconds=_autoclose_seconds(),
+            on_switch_to_meeting=self._switch_to_meeting,
         )
         _trace("OverlayWindow constructed")
 
@@ -1075,6 +1085,37 @@ class VoxizeApp(Gtk.Application):
         if l_cost is not None or b_cost is not None or c_cost is not None:
             self._ui.show_session_costs(l_cost, b_cost, c_cost)
 
+    # ── Mode switching ──
+
+    def _switch_to_meeting(self) -> None:
+        """Switch to meeting mode — spawn welcome screen and close overlay.
+
+        If the live transcript is empty, the session directory is trashed
+        on close so it doesn't contribute to pruning.
+        """
+        has_content = self._ui is not None and self._ui._had_first_text
+        logger.info("_switch_to_meeting: has_content=%s", has_content)
+
+        try:
+            subprocess.Popen([sys.executable, "-m", "voxize.meeting"])
+        except Exception:
+            logger.exception("failed to spawn meeting welcome")
+
+        if not has_content:
+            self._trash_session = True
+
+        s = self._machine.state if self._machine else None
+        if s in (
+            State.INITIALIZING,
+            State.WARMING,
+            State.RECORDING,
+            State.TRANSCRIBING,
+            State.CLEANING,
+        ):
+            self._machine.transition(State.CANCELLED)
+        elif s in (State.READY, State.ERROR):
+            self._ui._window.close()
+
     # ── Window events ──
 
     def _on_key(self, _ctrl, keyval, _code, _mod, win) -> bool:
@@ -1157,6 +1198,15 @@ class VoxizeApp(Gtk.Application):
                 logging.getLogger(name).removeHandler(self._log_handler)
             self._log_handler.close()
             self._log_handler = None
+        # Trash the session if the user switched to meeting mode before
+        # producing any transcript — avoids accumulating empty dirs that
+        # contribute to pruning.
+        if self._trash_session and self._session_dir:
+            try:
+                Gio.File.new_for_path(self._session_dir).trash(None)
+                logger.info("trashed empty session: %s", self._session_dir)
+            except Exception:
+                logger.debug("failed to trash session", exc_info=True)
         # Redirect stdio to /dev/null so any parent process (e.g., GNOME Shell
         # extension) sees EOF immediately, while daemon threads can still write
         # to stderr without EBADF.
