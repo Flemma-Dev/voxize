@@ -12,6 +12,7 @@ let
   ];
 
   devDeps = with pkgs; [
+    python313 # match Nix package; PyGObject 3.56 + Python 3.14 breaks constructors
     pkg-config # build-time
     wl-clipboard # manual testing (wl-copy)
     dotool # key/mouse simulation

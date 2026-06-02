@@ -29,8 +29,9 @@ import gi
 
 gi.require_version("Gdk", "4.0")
 gi.require_version("Gtk", "4.0")
+gi.require_version("Adw", "1")
 
-from gi.repository import Gdk, Gio, GLib, Gtk  # noqa: E402
+from gi.repository import Adw, Gdk, Gio, GLib, Gtk  # noqa: E402
 
 from voxize.lock import MicLock, MicLockError  # noqa: E402
 from voxize.meeting.capture import CaptureError, DualStreamCapture  # noqa: E402
@@ -82,6 +83,9 @@ class MeetingApp(Gtk.Application):
     # ── Activation ──
 
     def do_activate(self) -> None:
+        Adw.init()
+        Adw.StyleManager.get_default().set_color_scheme(Adw.ColorScheme.FORCE_DARK)
+
         css = Gtk.CssProvider()
         css_path = Path(__file__).parent.parent / "style.css"
         css.load_from_string(css_path.read_text())
@@ -277,7 +281,9 @@ class MeetingApp(Gtk.Application):
             return
 
         wm_classes = [w.get("wm_class", "") for w in windows]
-        logger.debug("always-on-top: List returned %d windows: %s", len(windows), wm_classes)
+        logger.debug(
+            "always-on-top: List returned %d windows: %s", len(windows), wm_classes
+        )
 
         for w in windows:
             if w.get("wm_class", "").lower() == _WM_CLASS.lower():
@@ -291,7 +297,9 @@ class MeetingApp(Gtk.Application):
                     )
                     logger.info("always-on-top: set via window-calls (id=%d)", w["id"])
                 except Exception as e:
-                    logger.warning("always-on-top: MakeAbove failed for id=%d (%s)", w["id"], e)
+                    logger.warning(
+                        "always-on-top: MakeAbove failed for id=%d (%s)", w["id"], e
+                    )
                 return
 
         logger.warning(

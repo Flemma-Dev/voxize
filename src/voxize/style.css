@@ -1,9 +1,9 @@
-/* Voxize overlay theme — dark translucent, as specified in design doc §5 */
+/* Voxize overlay theme — dark opaque, based on design doc §5 */
 /* Sizing uses em so the UI scales with the system font.               */
 
 window {
     /* Palette — CSS custom properties, same mechanism libadwaita uses */
-    --vox-bg:         rgba(30, 30, 30, 0.85);
+    --vox-bg:         #1e1e1e;
     --vox-fg:         rgba(255, 255, 255, 0.88);
     --vox-fg-dim:     rgba(255, 255, 255, 0.5);
     --vox-border:     rgba(255, 255, 255, 0.08);
@@ -79,7 +79,7 @@ progressbar.vu-meter.vu-clip { --accent-bg-color: var(--vox-red); }
 .fade-overlay {
     background-image: linear-gradient(
         to bottom,
-        rgba(30, 30, 30, 0.85),
+        #1e1e1e,
         rgba(30, 30, 30, 0)
     );
 }

@@ -29,9 +29,10 @@ import gi
 
 gi.require_version("Gdk", "4.0")
 gi.require_version("Gtk", "4.0")
+gi.require_version("Adw", "1")
 
 # gi.require_version() above is executable code; all subsequent imports trigger E402.
-from gi.repository import Gdk, Gio, GLib, Gtk  # noqa: E402
+from gi.repository import Adw, Gdk, Gio, GLib, Gtk  # noqa: E402
 
 from voxize import clipboard, config, mode_switcher  # noqa: E402
 from voxize._trace import trace as _trace  # noqa: E402
@@ -157,6 +158,10 @@ class VoxizeApp(Gtk.Application):
 
     def do_activate(self) -> None:
         _trace("do_activate entry")
+
+        Adw.init()
+        Adw.StyleManager.get_default().set_color_scheme(Adw.ColorScheme.FORCE_DARK)
+
         # Detect transcription prompt BEFORE presenting the window — once our
         # window takes focus, the D-Bus focused-window query would return our
         # own PID instead of the window the user was working in.
@@ -1128,7 +1133,8 @@ class VoxizeApp(Gtk.Application):
         if (
             keyval == Gdk.KEY_m
             and mod & Gdk.ModifierType.CONTROL_MASK
-            and self._ui is not None and self._ui._on_switch_to_meeting is not None
+            and self._ui is not None
+            and self._ui._on_switch_to_meeting is not None
         ):
             self._switch_to_meeting()
             return True
