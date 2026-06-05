@@ -53,7 +53,7 @@ Voxize plugs into your desktop environment to work seamlessly. All of these are 
 
 ### NixOS package
 
-An example NixOS package is available at [StanAngeloff/nix-meridian](https://github.com/StanAngeloff/nix-meridian/blob/main/pkgs/voxize/package.nix). Add it to your system configuration and bind `voxize` to a global hotkey — no dev shell needed.
+An example NixOS package is available at [StanAngeloff/nix-meridian](https://github.com/StanAngeloff/nix-meridian/blob/trunk/pkgs/voxize/package.nix). Add it to your system configuration and bind `voxize` to a global hotkey — no dev shell needed.
 
 ### Development workflow
 
