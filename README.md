@@ -1,97 +1,122 @@
 # Voxize
 
-Voice-to-text overlay for Linux/Wayland/GNOME.
+Voice-to-text overlay for Linux — built for devs who talk to AI.
 
-> [!IMPORTANT]
-> **Actively Evolving.**
->
-> Voxize is under active development. Pin a commit if you need a stable target. See the [implementation journal](docs/journal.md) for progress and design decisions.
+<img src="assets/dictation-ready.png" alt="Voxize — clean text ready to paste" width="520">
 
-- **Global hotkey opens a translucent overlay** that floats above your workspace. Start speaking immediately.
-- **Real-time streaming transcription** via the OpenAI Realtime API (`gpt-4o-transcribe`). Text appears as you talk.
-- **AI text cleanup** via GPT-5.4 Mini — fixes spelling, punctuation, and filler words while preserving meaning.
-- **Clipboard output** — cleaned text is copied automatically. Raw transcript is preserved in clipboard history as a fallback.
-- **Crash-safe audio** — WAV streamed to disk from the first sample. Audio survives process crashes.
-- **Session archive with cost tracking** — last 8 sessions stored under `~/.local/state/voxize/` with audio, transcripts, and per-session API costs.
+I built Voxize because I spend most of my day talking to AI — writing prompts for Claude Code, describing bugs, explaining architecture decisions. Typing all of that was the bottleneck. With Voxize, I press a hotkey, speak naturally, and get clean text in my clipboard 2x faster than I could type it.
 
-## Screenshots
+What you're reading right now was dictated, not typed.
 
-_TBD_
+## How it works
 
-<img alt="Recording state" src="assets/screenshot_2026-03-27_23-24-20.png" width="420" height="130">
+Press your global hotkey and a translucent overlay appears on top of whatever you're working on. Start speaking — your words stream in live:
 
-<!-- TODO: capture screenshots @ 100% display scale, no blurring -->
-<!--
-Live transcription streaming in as the user speaks.
+<img src="assets/dictation-recording.png" alt="Live transcription streaming as you speak" width="520">
 
-<img alt="Cleaning state" src="docs/screenshots/cleaning.png" width="420">
+When you're done, hit **Stop**. Voxize runs the full audio through OpenAI's batch transcription for maximum accuracy, then cleans up filler words and punctuation with a lightweight AI pass. The result goes straight to your clipboard — paste and move on.
 
-Transcript pulsing while GPT-5.4 Mini cleans up the text.
+Three phases, one hotkey:
 
-<img alt="Ready state" src="docs/screenshots/ready.png" width="420">
+1. **Live preview** — real-time streaming gives you visual feedback as you speak (via `gpt-4o-mini-transcribe`)
+2. **Batch transcription** — full audio processed in one pass, dramatically more accurate than real-time segmentation (via `gpt-4o-transcribe`)
+3. **AI cleanup** — fixes filler words, punctuation, and formatting (via `gpt-5.4-nano`)
 
-Cleaned text with session cost breakdown.
--->
+The live preview is throwaway — just visual feedback. The real transcription happens after you stop, and it's [dramatically more accurate](https://blog.angeloff.name/post/2026/05/15/speeding-up-voxize-a-cautionary-tale-about-speech-benchmarks/).
 
-## Requirements
+## Why it nails technical terms
 
-| Requirement                                                                          | Notes                                                                                                                                       |
-| ------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------- |
-| NixOS (tested on 25.11)                                                              | NixOS-first — `flake.nix` + `shell.nix` handle all system deps                                                                              |
-| GNOME / Wayland                                                                      | Mutter compositor; D-Bus used for focused-window detection                                                                                  |
-| Python >= 3.11                                                                       | Managed by `uv`                                                                                                                             |
-| OpenAI API key                                                                       | Stored in GNOME Keyring via `secret-tool`                                                                                                   |
-| `wl-clipboard`                                                                       | `wl-copy` for clipboard output                                                                                                              |
-| PortAudio                                                                            | Audio capture backend                                                                                                                       |
-| [Window Calls](https://extensions.gnome.org/extension/4724/window-calls/) (optional) | GNOME Shell extension for focused-window detection. Required for WHISPER.txt prompt hints; without it, prompt detection is skipped silently |
+OpenAI's transcription models are surprisingly well-aligned with programming vocabulary. Terms like `subprocess`, `WebSocket`, `asyncio`, and `JWT` come through accurately without any hints.
 
-## Installation
+For project-specific jargon, drop a `WHISPER.txt` file in your working directory:
 
-> [!WARNING]
-> There is no packaged install yet. The steps below are the development workflow — expect rough edges. Proper packaging will be considered once the project stabilizes.
-
-Enter the dev shell (pulls all system dependencies):
-
-```sh
-nix develop
+```
+Glossary: worktree, subagent, GLib.idle_add, libadwaita, PyGObject
 ```
 
-Store your OpenAI API key in the GNOME Keyring:
+Voxize detects the focused window's working directory (via the [Window Calls](https://extensions.gnome.org/extension/4724/window-calls/) GNOME Shell extension) and loads the file as vocabulary guidance. Domain-specific terms that would normally get mangled come through clean. The content is passed directly to the cleanup model, so it can be any free-form instructions — not just a glossary.
 
-```sh
-secret-tool store --label='OpenAI API Key' service openai key api
-```
+## Integrations
 
-Run:
+Voxize plugs into your desktop environment to work seamlessly. All of these are optional — Voxize degrades gracefully without them — but the experience is much better with them.
 
-```sh
-uv run python -m voxize
-```
+- **[Window Calls](https://extensions.gnome.org/extension/4724/window-calls/)** (GNOME Shell extension) — this is how Voxize knows *where* you're working. It detects the focused window's PID, resolves its working directory (even through Ghostty → tmux → nvim chains), and loads your `WHISPER.txt`. Also used for always-on-top in the meeting recorder. Without it, vocabulary guidance is silently skipped.
+- **[PipeWire](https://pipewire.org/)** — the audio backbone. Dictation captures via [PortAudio](https://www.portaudio.com/)/sounddevice, meeting recording via `pw-cat --record` (two streams: mic + system audio). Volume ducking uses `pw-dump` and `wpctl` to silence your browser while recording. Ships with modern GNOME.
+- **[FFmpeg](https://ffmpeg.org/)** — the meeting recorder uses `ffmpeg` to compress WAV → Opus after recording and to downmix stereo to mono before transcription. `ffprobe` reads recording duration. Not needed for dictation.
+- **[ElevenLabs Scribe](https://elevenlabs.io/docs/api-reference/speech-to-text/speech-to-text)** — powers the meeting recorder's post-recording transcription with speaker diarization. Not needed for dictation or for recording meetings — only for transcribing them.
+- **[GNOME Keyring](https://wiki.gnome.org/Projects/GnomeKeyring)** — API keys are stored securely via `secret-tool`, not environment variables or config files.
 
-To bind Voxize to a global hotkey (e.g., GNOME Settings > Keyboard > Custom Shortcuts), use the full command which can be invoked from any directory:
+## Getting started
+
+> [!NOTE]
+> Voxize is Linux/Wayland/GNOME only. Pin a commit if you need a stable target.
+
+### NixOS package
+
+An example NixOS package is available at [StanAngeloff/nix-meridian](https://github.com/StanAngeloff/nix-meridian/blob/main/pkgs/voxize/package.nix). Add it to your system configuration and bind `voxize` to a global hotkey — no dev shell needed.
+
+### Development workflow
+
+1. Clone and enter the dev shell (all system deps handled by Nix):
+
+   ```sh
+   git clone https://github.com/Flemma-Dev/voxize.git
+   cd voxize
+   nix develop
+   ```
+
+2. Store your OpenAI API key in the GNOME Keyring:
+
+   ```sh
+   secret-tool store --label='OpenAI API Key' service openai key api
+   ```
+
+3. Run:
+
+   ```sh
+   uv run python -m voxize
+   ```
+
+To bind Voxize to a global hotkey (GNOME Settings → Keyboard → Custom Shortcuts):
 
 ```sh
 nix develop /path/to/voxize --command bash -c "cd /path/to/voxize && uv run python -m voxize"
 ```
 
 > [!TIP]
-> The first `nix develop` invocation evaluates the full shell derivation, which can take several seconds. To avoid this on every hotkey press, use [nix-direnv](https://github.com/nix-community/nix-direnv) — it caches the evaluated dev shell so subsequent entries are near-instant. If you manage your environment with Home Manager, enable it with `programs.direnv.nix-direnv.enable = true`. A proper packaging strategy (e.g., a `writeShellScript` wrapper with pinned dependencies) would eliminate the cold-start cost entirely and is left as an exercise for the reader.
+> Use [nix-direnv](https://github.com/nix-community/nix-direnv) to cache the dev shell — avoids the cold-start cost on every hotkey press.
 
-## How it works
+## Meeting recorder
 
-Voxize runs as a single Python process per invocation. A state machine drives the session through INITIALIZING, RECORDING, CLEANING, and READY. During recording, microphone audio streams over a WebSocket to the OpenAI Realtime API with semantic VAD (high eagerness, for shorter segments). Transcription deltas appear live in the overlay. On stop, the accumulated transcript is sent to GPT-5.4 Mini for cleanup (via the Responses API), which streams corrected text back into the same overlay. The final text is copied to the clipboard. See [docs/design.md](docs/design.md) for the original specification and [docs/journal.md](docs/journal.md) for implementation deviations and decisions made during development.
+Voxize also includes a meeting recorder that captures both your microphone and system audio into a stereo Opus file — left channel mic, right channel system.
 
-## Architecture
+```sh
+uv run python -m voxize.meeting
+```
 
-Backend modules (`state.py`, `audio.py`, `transcribe.py`, `cleanup.py`, `storage.py`, `lock.py`, `clipboard.py`, `prompt.py`) do not import GTK. They use `GLib`/`Gio` for thread-safe callbacks and I/O, but no widget code. Only `app.py` and `ui.py` touch GTK4. This separation exists as a seam for a future GNOME Shell extension frontend that would spawn the backend as a subprocess and communicate via stdin/stdout JSON Lines. See the [architecture decision record](docs/architecture-decision-layer-shell-and-dual-frontend.md) for context.
+<img src="assets/meeting-welcome.png" alt="Meeting session list" width="400">
+
+After recording, a built-in workbench lets you transcribe with speaker diarization, rename speakers, and generate meeting titles — all without leaving the app. You can supply key terms before transcribing to improve accuracy on domain-specific vocabulary.
+
+**Why ElevenLabs for meetings, not OpenAI?** Dictation prompts are short, technical, and latency-sensitive — OpenAI's `gpt-4o-transcribe` excels there, especially with `WHISPER.txt` vocabulary guidance. Meetings are longer, more conversational, and need speaker diarization — ElevenLabs' Scribe v2 ranks [#1 across 49 models](https://artificialanalysis.ai/articles/aa-wer-v2) with a 2.3% word error rate, nearly twice as accurate as OpenAI's batch model. Voxize uses the best tool for each job.
+
+Recording needs no API key. To enable transcription, store your ElevenLabs key in the GNOME Keyring:
+
+```sh
+secret-tool store --label='ElevenLabs API Key' service elevenlabs key api
+```
 
 ## Configuration
 
-**WHISPER.txt** — Place a `WHISPER.txt` file in your working directory. On launch, Voxize resolves the focused window's CWD (via the [Window Calls](https://extensions.gnome.org/extension/4724/window-calls/) extension and `/proc`) and loads the file as transcription context, improving accuracy for domain-specific vocabulary. There is no upward search — the file must be in the exact directory the focused process is running from.
+Voxize reads `$XDG_CONFIG_HOME/voxize/voxize.toml` on startup. A commented template with all defaults is created on first run — uncomment any line to override.
 
-**`VOXIZE_AUTOCLOSE`** — Seconds of focused READY state before the overlay auto-closes. Default `30`. The countdown is shown in the title bar and pauses when the window loses focus — regaining focus restarts it from the full duration. Set to `0` to disable.
+Key settings:
 
-**Session data** — `~/.local/state/voxize/`. Each session directory contains `audio.wav`, `transcription.txt`, `cleaned.txt`, `ws_events.jsonl`, and `debug.log`.
+- **Volume ducking** — automatically quiets Chrome, Firefox, and Brave while recording
+- **Auto-close** — overlay closes after 30s of inactivity in the ready state. Override with `VOXIZE_AUTOCLOSE=0` to disable
+- **Session retention** — 500 sessions / 14 days by default, configurable per-app (dictation and meetings prune independently)
+
+Session data lives in `~/.local/state/voxize/` — audio, transcripts, costs, and debug logs for each session.
 
 ## License
 
