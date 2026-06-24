@@ -30,8 +30,11 @@ window {
 headerbar {
     background: transparent;
     box-shadow: none;
-    border-bottom: 1px solid var(--vox-border-dim);
     padding: 0.3em 0.6em;
+}
+
+headerbar:last-child {
+    border-bottom: 1px solid var(--vox-border-dim);
 }
 
 /* Status indicator dot */
