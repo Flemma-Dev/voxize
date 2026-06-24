@@ -71,7 +71,7 @@ _WARMUP_INTERVAL_SECONDS = 45  # safely under typical LB idle timeouts (~60-120s
 # never cross the threshold, and we still want to show RECORDING.
 _WARMING_RMS_THRESHOLD_DBFS = -70.0
 _WARMING_REQUIRED_LOUD_CHUNKS = 2
-_WARMING_TIMEOUT_MS = 2000
+_WARMING_TIMEOUT_MS = 5000
 _WARMING_POLL_MS = 40  # same cadence as the level-meter UI tick
 
 
@@ -1200,6 +1200,7 @@ class VoxizeApp(Gtk.Application):
 
     def _on_close_request(self, _win) -> bool:
         logger.debug("_on_close_request: entry")
+        clipboard.salvage()
         # Tell any in-flight bootstrap to stop — we're closing, no point
         # completing openai import / WS connect.
         self._bootstrap_cancelled = True

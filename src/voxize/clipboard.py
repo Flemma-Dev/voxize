@@ -3,11 +3,16 @@
 On Wayland, only the focused window can write to the clipboard. When a copy
 is attempted while the window is unfocused, the text is stashed and retried
 the next time the window regains focus (via ``flush``).
+
+On window close, ``salvage()`` spawns ``wl-copy`` so the clipboard content
+survives after the owning Gdk window is destroyed.
 """
 
 from __future__ import annotations
 
 import logging
+import shutil
+import subprocess
 
 import gi
 
@@ -87,3 +92,29 @@ def flush() -> None:
         return False
 
     GLib.idle_add(_set_clipboard)
+
+
+def salvage() -> None:
+    """Hand clipboard ownership to ``wl-copy`` so content survives window close.
+
+    Only acts when there is *pending* text that was never successfully set via
+    Gdk (window was unfocused at copy time and never refocused). Already-set
+    clipboard content is left to the clipboard manager.
+    """
+    text = _pending
+    if not text:
+        return
+    wl_copy = shutil.which("wl-copy")
+    if not wl_copy:
+        logger.debug("persist: wl-copy not found")
+        return
+    try:
+        subprocess.Popen(
+            [wl_copy],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        ).communicate(input=text.encode(), timeout=2)
+        logger.debug("persist: wl-copy success, text_len=%d", len(text))
+    except Exception:
+        logger.exception("persist: wl-copy failed")

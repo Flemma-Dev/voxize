@@ -387,8 +387,6 @@ class OverlayWindow:
         self._stop_timer()
         self._degraded = True
         self._cancel_btn.set_visible(False)
-        self._action_btn_label.set_label("Close")
-        self._action_btn.add_css_class("flat")
         self._action_btn.set_visible(True)
         self._window.set_default_widget(self._action_btn)
 
@@ -640,10 +638,7 @@ class OverlayWindow:
         s = self._machine.state
         logger.debug("_on_action: state=%s degraded=%s", s.name, self._degraded)
         if s in (State.WARMING, State.RECORDING):
-            if self._degraded:
-                self._machine.transition(State.CANCELLED)
-            else:
-                self._machine.transition(State.TRANSCRIBING)
+            self._machine.transition(State.TRANSCRIBING)
         elif s in (State.READY, State.ERROR):
             self._window.close()
 
