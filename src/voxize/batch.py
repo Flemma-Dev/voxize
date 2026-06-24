@@ -20,7 +20,7 @@ import time
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
-from voxize.audio import CHANNELS, SAMPLE_RATE, WAV_HEADER_SIZE
+from voxize._audio_const import CHANNELS, SAMPLE_RATE, WAV_HEADER_SIZE
 
 if TYPE_CHECKING:
     from openai import OpenAI

@@ -24,13 +24,9 @@ from collections.abc import Callable
 
 import sounddevice as sd
 
-logger = logging.getLogger(__name__)
+from voxize._audio_const import BLOCK_SIZE, CHANNELS, DTYPE, SAMPLE_RATE
 
-SAMPLE_RATE = 24_000
-CHANNELS = 1
-DTYPE = "int16"
-BLOCK_SIZE = 960  # 40ms at 24kHz — 1920 bytes per block
-WAV_HEADER_SIZE = 44
+logger = logging.getLogger(__name__)
 
 
 def rms_dbfs(samples: array.array) -> float:

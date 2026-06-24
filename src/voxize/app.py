@@ -36,12 +36,6 @@ from gi.repository import Adw, Gdk, Gio, GLib, Gtk  # noqa: E402
 
 from voxize import clipboard, config, mode_switcher  # noqa: E402
 from voxize._trace import trace as _trace  # noqa: E402
-from voxize.audio import (  # noqa: E402
-    CHANNELS,
-    SAMPLE_RATE,
-    WAV_HEADER_SIZE,
-    AudioCapture,
-)
 from voxize.batch import BatchTranscription  # noqa: E402
 from voxize.checks import get_api_key  # noqa: E402
 from voxize.cleanup import Cleanup  # noqa: E402
@@ -225,12 +219,13 @@ class VoxizeApp(Gtk.Application):
     # ── Real initialization (fast startup) ──
 
     def _initialize(self) -> bool:
-        """Acquire mic lock, start audio, enter RECORDING, then bootstrap WS.
+        """Acquire mic lock, set up session, then bootstrap audio + WS.
 
-        Fast path: only the work needed to get PCM flowing into the WAV
-        runs synchronously on the GTK thread. The OpenAI client and the
-        live-preview WS are built in a background "voxize-bootstrap"
-        thread so the ~300ms openai SDK import does not block mic-open.
+        Only fast, non-blocking work runs on the GTK thread: mic lock,
+        session dir, file logging. The heavy ``sounddevice`` import
+        (~2s on cold cache via numpy) and the openai SDK import (~300ms)
+        are both deferred to the background "voxize-bootstrap" thread so
+        the window is visible within ~350ms of process start.
 
         Batch transcription on stop waits on ``self._bootstrap_done``,
         so the authoritative transcript path is never starved.
@@ -283,10 +278,6 @@ class VoxizeApp(Gtk.Application):
         )
         logging.getLogger("voxize").addHandler(fh)
         logging.getLogger("voxize").setLevel(logging.DEBUG)
-        # Merge httpx/httpcore/openai logs into the session debug.log so we
-        # can see TLS handshakes, connection opens/closes, and connection
-        # reuse events alongside our own phase_timing lines. httpcore.http11
-        # and httpcore.http2 are per-frame noisy — keep them at INFO.
         for name in ("openai", "httpx", "httpcore"):
             lg = logging.getLogger(name)
             lg.addHandler(fh)
@@ -297,29 +288,9 @@ class VoxizeApp(Gtk.Application):
         logger.debug("_initialize: file logging active")
         logger.debug("_initialize: prompts=%d", len(self._prompts))
 
-        # Open the mic stream with a no-op chunk sink — the bootstrap
-        # thread swaps in ``RealtimeTranscription.send_audio`` once the
-        # WS is ready. Chunks that arrive before the swap are still
-        # written to the WAV, so batch transcription is never starved.
-        self._audio = AudioCapture(self._session_dir)
-        logger.debug("_initialize: starting audio capture")
-        try:
-            self._audio.start()
-        except Exception as e:
-            self._release_lock()
-            self._machine.transition(State.ERROR, error=f"Microphone: {e}")
-            return False
-        _trace("audio.start() returned (mic capturing)")
-
-        self._ui.set_level_meter(self._audio.meter)
-
-        logger.debug("_initialize: transitioning to WARMING")
-        self._machine.transition(State.WARMING)
-        _trace("WARMING state entered")
-
-        # Kick off the heavy setup in a background thread: openai SDK
-        # import, client construction, RealtimeTranscription + WS, and
-        # warmup scheduling. Audio capture continues uninterrupted.
+        # Audio import + capture + openai all happen in the bootstrap
+        # thread. The sounddevice import (~2s via numpy) must never
+        # block the GTK main loop.
         self._bootstrap_done.clear()
         self._bootstrap_cancelled = False
         threading.Thread(
@@ -390,15 +361,65 @@ class VoxizeApp(Gtk.Application):
         return True
 
     def _bootstrap_providers(self) -> None:
-        """Background thread: import openai, build client, start WS.
+        """Background thread: import audio + openai, start mic, build client, start WS.
 
-        Runs after ``_initialize`` has entered RECORDING so the user's
-        audio is already being captured while the openai SDK loads
-        (~300ms warm, more on cold cache). Respects
-        ``self._bootstrap_cancelled`` at checkpoints so Escape-during-
-        startup doesn't leave a half-wired client behind.
+        The sounddevice import (~2s via numpy on cold cache) and the
+        openai SDK import (~300ms) both run here so neither blocks the
+        GTK main loop. Audio capture starts first; the window is
+        already visible in INITIALIZING state by this point.
+
+        Respects ``self._bootstrap_cancelled`` at checkpoints so
+        Escape-during-startup doesn't leave a half-wired client behind.
         """
         _trace("bootstrap: entry")
+        if self._bootstrap_cancelled:
+            _trace("bootstrap: cancelled before audio import")
+            self._bootstrap_done.set()
+            return
+
+        # ── Phase 0: audio (sounddevice + numpy, ~2s cold) ──
+
+        from voxize.audio import AudioCapture
+
+        _trace("bootstrap: sounddevice + numpy imported")
+
+        if self._bootstrap_cancelled:
+            _trace("bootstrap: cancelled after audio import")
+            self._bootstrap_done.set()
+            return
+
+        audio = AudioCapture(self._session_dir)
+        try:
+            audio.start()
+        except Exception as e:
+            logger.exception("bootstrap: failed to start audio")
+
+            def _audio_error(err=str(e)):
+                self._release_lock()
+                if self._machine and self._machine.state == State.INITIALIZING:
+                    self._machine.transition(State.ERROR, error=f"Microphone: {err}")
+                return False
+
+            GLib.idle_add(_audio_error)
+            self._bootstrap_done.set()
+            return
+        self._audio = audio
+        _trace("bootstrap: audio.start() returned (mic capturing)")
+
+        def _enter_warming():
+            if self._bootstrap_cancelled:
+                return False
+            if not self._machine or self._machine.state != State.INITIALIZING:
+                return False
+            self._ui.set_level_meter(audio.meter)
+            self._machine.transition(State.WARMING)
+            _trace("WARMING state entered")
+            return False
+
+        GLib.idle_add(_enter_warming)
+
+        # ── Phase 1: openai client ──
+
         if self._bootstrap_cancelled:
             _trace("bootstrap: cancelled before client build")
             self._bootstrap_done.set()
@@ -441,18 +462,14 @@ class VoxizeApp(Gtk.Application):
         # Publish the client so the batch/cleanup/stop paths can see it.
         self._client = client
 
-        # Create RealtimeTranscription, wire it to the audio callback,
-        # and start the WS. Audio chunks already in flight are routed
-        # once ``set_on_chunk`` swaps the forwarder; earlier chunks go
-        # to the WAV only, which is what the live preview lost anyway
-        # during the current BT/VAD startup burst.
+        # ── Phase 2: live-preview WS ──
+
         transcription: RealtimeTranscription | None = None
         try:
             transcription = RealtimeTranscription(
                 self._api_key,
                 self._session_dir,
             )
-            audio = self._audio
             if audio is not None and not self._bootstrap_cancelled:
                 audio.set_on_chunk(transcription.send_audio)
                 logger.debug("bootstrap: audio callback swapped to WS")
@@ -786,6 +803,8 @@ class VoxizeApp(Gtk.Application):
         # Log WAV file info (cheap; do before the handoff).
         wav_path = os.path.join(session_dir, "audio.wav") if session_dir else None
         if wav_path and os.path.exists(wav_path):
+            from voxize._audio_const import CHANNELS, SAMPLE_RATE, WAV_HEADER_SIZE
+
             wav_size = os.path.getsize(wav_path)
             logger.debug(
                 "_stop_and_batch: wav_size=%d (%.1fs audio)",

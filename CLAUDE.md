@@ -48,6 +48,7 @@ Thread bridge: `GLib.idle_add` (worker -> GTK), `call_soon_threadsafe` (GTK -> a
 | `app.py` | GTK Application, orchestrates lifecycle, wires providers |
 | `ui.py` | Widgets, CSS loading, text area, header bar |
 | `state.py` | State machine (pure logic, no GTK) |
+| `_audio_const.py` | Audio format constants (sample rate, channels, WAV header) — no heavy deps |
 | `audio.py` | `AudioCapture` (sounddevice) + `WavWriter` (crash-safe WAV) + `LevelMeter` (passive RMS) |
 | `transcribe.py` | Live preview: realtime WS client (`gpt-4o-mini-transcribe`, `server_vad`, throwaway) |
 | `batch.py` | Batch transcription: `POST /audio/transcriptions` (`gpt-4o-transcribe`, streaming) |
@@ -71,7 +72,7 @@ Thread bridge: `GLib.idle_add` (worker -> GTK), `call_soon_threadsafe` (GTK -> a
 - **`gpt-4o-transcribe` for batch** — full model processes entire audio in one pass. No `prompt` parameter — `gpt-4o-transcribe` hallucinates the prompt text instead of transcribing. Vocabulary guidance is handled by the cleanup model's `<vocabulary-guidance>` block.
 - **GPT-5.4 Nano for cleanup** — batch transcript is already clean, cleanup is light touchup. Nano handles the explicit rules-based prompt well.
 - **WS failure is non-fatal** — during RECORDING, WS errors show a banner but audio continues. User can still stop and get batch transcription. Only mic failure is fatal.
-- **Fast startup** — audio capture starts before WS connects. Chunks queue, burst-drain when WS ready. If burst corrupts server_vad, live preview is garbled but batch fixes everything.
+- **Fast startup** — sounddevice (~2s via numpy) and the openai SDK (~300ms) are both deferred to the bootstrap background thread. The window is visible within ~300ms; audio capture starts once sounddevice loads. Audio format constants live in `_audio_const.py` so that `batch.py` can reference them without pulling in sounddevice. Chunks queue, burst-drain when WS ready. If burst corrupts server_vad, live preview is garbled but batch fixes everything.
 - **Thread bridge over gbulb** — asyncio in daemon thread + `GLib.idle_add`. Simpler, no extra dependency.
 - **WAV placeholder header** — crash-safe; most tools read to EOF when size field is wrong.
 - **Pruning at termination, not startup** — avoids progressive session loss during crash loops.

@@ -12,12 +12,29 @@ Example:
 
 import logging
 import os
+import threading
 
 from voxize._trace import trace as _trace
 
 logger = logging.getLogger(__name__)
 
 _trace("__main__ start (after interpreter + site)")
+
+# Kick off the ~1.9s PortAudio Pa_Initialize() immediately — it runs
+# in a background thread while checks, config, and GTK imports proceed
+# on the main thread. By the time the bootstrap thread needs
+# sounddevice, the import (and device enumeration) is already done.
+if not os.environ.get("VOXIZE_MOCK"):
+
+    def _preload_sounddevice():
+        import sounddevice  # noqa: F401 — triggers Pa_Initialize()
+
+        _trace("preload: sounddevice ready (Pa_Initialize done)")
+
+    threading.Thread(
+        target=_preload_sounddevice, daemon=True, name="voxize-preload"
+    ).start()
+    _trace("preload: sounddevice import started in background")
 
 if not os.environ.get("VOXIZE_MOCK"):
     from voxize.checks import exit_on_failure
@@ -32,16 +49,16 @@ _trace("imported voxize.config")
 
 from voxize.app import VoxizeApp  # noqa: E402 — must follow exit_on_failure()
 
-_trace("imported voxize.app (gi, sounddevice — no openai yet)")
+_trace("imported voxize.app (gi — no sounddevice/openai yet)")
 
 # Load user config exactly once, before any module reads it. First launch
 # creates ~/.config/voxize/voxize.toml populated with commented defaults.
 config.load()
 _trace("config.load() complete")
 
-# openai_patches.install() is deferred into the bootstrap thread so the
-# openai SDK import (~300ms on warm cache, much more on cold) does not
-# block window presentation or mic-open.
+# Pa_Initialize() (~1.9s for PortAudio device enumeration) started in
+# a background thread above, overlapping with checks + GTK imports.
+# The openai SDK (~300ms) is deferred to the bootstrap thread.
 
 
 def main() -> None:
