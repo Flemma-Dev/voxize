@@ -61,6 +61,7 @@ Each recording session creates a directory under `$XDG_STATE_HOME/voxize/` (typi
 ├── live_transcript.txt    # Live preview text (throwaway — for debugging only)
 ├── transcription.txt      # Batch transcript (authoritative result)
 ├── cleaned.txt            # Post-cleanup text from GPT-5.6 Luna
+├── prompt.txt             # Vocabulary guidance as sent (absent if none)
 ├── ws_events.jsonl        # Every WS event from live preview (OpenAI Realtime API)
 ├── batch_events.jsonl     # Every event from batch transcription API
 ├── cleanup_events.jsonl   # Every event from cleanup API (Responses API)

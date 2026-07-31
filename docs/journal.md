@@ -999,3 +999,45 @@ Note April's attempt used `instructions=` while cleanup used a developer-role me
 **What to measure while driving this.** `debug.log` now carries `warmup: ... prime=<bool> cached_tokens=N` and cleanup's existing `phase_timing: ... cached_tokens=N`. The questions worth answering from real sessions: (a) what fraction of cleanup calls report `cached>0`, and how much of that is the ping versus a prefix left over from the previous session; (b) whether summed ping cost exceeds the cleanup saving on long recordings; (c) whether TTFT moves at all once there are hundreds of samples rather than three. If (a) shows most hits are cross-session leftovers, the priming payload should be dropped and the ping reverted to socket-only — the cheap-ping path already exists, so that reversal is a one-line change.
 
 **Files changed:** `src/voxize/cleanup.py` (new `build_cache_prefix_input`, `_run` uses it), `src/voxize/app.py` (`_warmup_ping` primes once then goes cheap, `_accumulate_warmup_usage`, `_warmup_usage`/`_warmup_primed` state and reset), `src/voxize/ui.py` (`Pings` cost line, optional arg so mock flows are unaffected), `CLAUDE.md`.
+
+---
+
+### 2026-07-31 — Archive the guidance prompt per session; first production numbers
+
+**Why.** Vocabulary guidance lives outside the session — a project's `WHISPER.txt`, an app glossary under XDG config, a per-Slack-channel file — and all of them get edited. When a transcript gets a term wrong, the question is always "was the term in the glossary at the time?", and until now that was unanswerable.
+
+The first production session after the gpt-transcribe switch demonstrated the gap immediately. `2026-07-31T11-14-16` sent:
+
+```
+Glossary: voxize This is a software developer dictating notes about the Luup mobile app.
+```
+
+The repository's `WHISPER.txt` now reads `Glossary: voxize` and nothing more. The prose line — added to test the finding that prose beats a bare `Glossary:` line on hard cases — was gone within the hour. That evidence survived only because the previous commit happened to log `prompt` in the batch `request` event. A session directory alone could not have answered what the glossary was.
+
+**Shape.** `prompt.txt` in the session directory, verbatim, absent when the session had no guidance (an absent file is itself the signal, matching how `live_transcript.txt` behaves). Source paths go to `debug.log` rather than a header inside the file, so the file stays byte-equal to what was sent and directly comparable against what `recover.sh` embeds.
+
+**The drift hazard, handled the same way as the cache prefix.** Three call sites now need this string: `batch.py` sends it, `recover.py` bakes it into recover.sh, and the snapshot archives it. Built independently they would drift — and the failure would be silent, an archive quietly describing something other than what was sent. All three route through **`prompt.build_transcription_prompt()`**, which also owns `_MAX_PROMPT_CHARS` (moved out of `batch.py`). Verified: batch's payload, the snapshot, and recover.sh's embedded prompt are identical for single and multi-source configurations; empty input writes no file; a 5000-char input truncates to 4000 in all three.
+
+That is the third time in one day a silent-divergence bug has been designed out by collapsing two or three builders into one. Worth stating as a pattern: **anything sent to an API and also recorded, reproduced, or cached elsewhere needs exactly one constructor.**
+
+#### First production numbers, and a correction
+
+`2026-07-31T11-14-16`, 12.8s of audio, all three changes live:
+
+```
+warmup: complete duration_ms=2286 status=completed prime=True cached_tokens=0
+_run: calling API model=gpt-transcribe wav_size=616364 (12.8s audio) prompt_len=88
+_run: usage seconds=13 reported=True
+phase_timing: ttft_ms=1164 ... in_tokens=1468 cached_tokens=1399 out_tokens=39
+_show_session_costs: live=0.0001 batch=0.0010 cleanup=0.0001 pings=0.0003
+```
+
+Everything works as designed: duration billing (`seconds=13` for 12.8s), the prompt reaching batch, and **the ping priming a real cache hit — the ping wrote at `cached=0`, cleanup read at `cached=1399` of 1468.**
+
+**Correction 1: the first ping fires immediately on entering RECORDING, not at 45s.** Yesterday's entry claimed recordings under 45s never ping — false. Every session primes. A 12.8s recording primed.
+
+**Correction 2: priming cannot reduce total cost, and this entry supersedes the "roughly cost-neutral" verdict.** You pay for the prefix twice: the ping writes it at full price, then cleanup reads it cached. Arithmetic from the session above — with priming, pings $0.0003 + cleanup $0.0001 = $0.0004; without, an unprimed cleanup pays 1468 × $0.20/M + 39 × $1.20/M ≈ $0.00034. Priming is **+$0.00006/session, about $0.02/month**. There is no cache-state under which it comes out ahead on tokens, because the write always precedes the read.
+
+So the warmup is a **latency optimisation costing ~$0.02/month**, and its latency benefit remains unproven — 252 ms and 863 ms observed against noise of the same size. It moves prefill off the post-stop critical path, which is where the user is actually waiting, and that is the only argument for it. If the accumulating `cached_tokens` data shows cleanup hitting the cache from cross-session leftovers anyway, drop the payload: `_warmup_primed` already gates it and the cheap-ping path exists, so it is a one-line reversal.
+
+**Files changed:** `src/voxize/prompt.py` (`build_transcription_prompt`, `write_prompt_snapshot`, `_MAX_PROMPT_CHARS`), `src/voxize/batch.py` (delegates), `src/voxize/recover.py` (delegates), `src/voxize/app.py` (writes the snapshot next to recover.sh), `CLAUDE.md`, `docs/debugging-guide.md`.

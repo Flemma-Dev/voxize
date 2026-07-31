@@ -7,6 +7,8 @@ import os
 import shlex
 from typing import TYPE_CHECKING
 
+from voxize.prompt import build_transcription_prompt
+
 if TYPE_CHECKING:
     from voxize.prompt import PromptSource
 
@@ -24,7 +26,7 @@ def write_recover_script(
     would have sent — without it, vocabulary guidance is silently absent
     and the recovered transcript can differ from the real one.
     """
-    prompt = "\n".join(s.content for s in (prompts or [])).strip()
+    prompt = build_transcription_prompt(prompts) or ""
     prompt_flag = f"  -F prompt={shlex.quote(prompt)} \\\n" if prompt else ""
     script = f"""\
 #!/usr/bin/env bash

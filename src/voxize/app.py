@@ -42,7 +42,11 @@ from voxize.cleanup import Cleanup  # noqa: E402
 from voxize.ducking import VolumeDucker  # noqa: E402
 from voxize.lock import MicLock, MicLockError  # noqa: E402
 from voxize.mock import MockCleanup, MockTranscription  # noqa: E402
-from voxize.prompt import PromptSource, detect_prompt  # noqa: E402
+from voxize.prompt import (  # noqa: E402
+    PromptSource,
+    detect_prompt,
+    write_prompt_snapshot,
+)
 from voxize.recover import write_recover_script  # noqa: E402
 from voxize.state import State, StateMachine  # noqa: E402
 from voxize.storage import create_session_dir, prune_sessions  # noqa: E402
@@ -270,6 +274,7 @@ class VoxizeApp(Gtk.Application):
         # Session folder button + recovery script
         self._ui.set_session_dir(self._session_dir)
         write_recover_script(self._session_dir, self._prompts)
+        write_prompt_snapshot(self._session_dir, self._prompts)
 
         # Set up session-level file logging
         fh = logging.FileHandler(os.path.join(self._session_dir, "debug.log"))

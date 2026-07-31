@@ -27,6 +27,14 @@ logger = logging.getLogger(__name__)
 
 _WHISPER_FILE = "WHISPER.txt"
 
+# The transcription API rejects the whole request when `prompt` exceeds the
+# model's (undocumented) length limit. Guidance files are one-liners in
+# practice, so this only makes a pathological one degrade into a truncated
+# prompt rather than into no transcript at all.
+_MAX_PROMPT_CHARS = 4000
+
+_SNAPSHOT_FILE = "prompt.txt"
+
 
 @dataclass
 class PromptSource:
@@ -34,6 +42,65 @@ class PromptSource:
 
     path: str  # absolute file path
     content: str  # stripped, non-empty content
+
+
+def build_transcription_prompt(prompts: list[PromptSource] | None) -> str | None:
+    """Return the exact string sent as the transcription API's ``prompt``.
+
+    Single source of truth. ``batch.py`` sends it, ``recover.py`` bakes it
+    into recover.sh, and ``write_prompt_snapshot`` archives it — if those
+    built it independently they would drift, and the snapshot would quietly
+    stop describing what was actually sent.
+
+    Content is joined verbatim, unparsed. Guidance files are *prompts*, not
+    keyword lists: usually a ``Glossary: X, Y, Z`` line, sometimes prose,
+    and prose measurably helps the hard cases.
+    """
+    if not prompts:
+        return None
+    combined = "\n".join(s.content for s in prompts).strip()
+    if not combined:
+        return None
+    if len(combined) > _MAX_PROMPT_CHARS:
+        logger.warning(
+            "build_transcription_prompt: truncating %d chars to %d",
+            len(combined),
+            _MAX_PROMPT_CHARS,
+        )
+        combined = combined[:_MAX_PROMPT_CHARS]
+    return combined
+
+
+def write_prompt_snapshot(session_dir: str, prompts: list[PromptSource] | None) -> None:
+    """Archive the prompt this session used, into ``prompt.txt``.
+
+    Guidance files live outside the session and change over time — a project's
+    WHISPER.txt gets edited, a Slack-channel glossary is per-window. Without a
+    snapshot there is no way to tell after the fact whether a transcription
+    error happened because a term was missing from the glossary or in spite of
+    it being there.
+
+    The file is the verbatim payload, so it is directly comparable against
+    what `recover.sh` embeds. Source paths go to the log rather than a header,
+    which would make the file no longer byte-equal to what was sent.
+
+    Best-effort, like the rest of this module: never raise into startup.
+    """
+    prompt = build_transcription_prompt(prompts)
+    if not prompt:
+        logger.debug("write_prompt_snapshot: no prompts, nothing to archive")
+        return
+    try:
+        path = os.path.join(session_dir, _SNAPSHOT_FILE)
+        with open(path, "w") as f:
+            f.write(prompt)
+        logger.debug(
+            "write_prompt_snapshot: chars=%d sources=%s",
+            len(prompt),
+            [s.path for s in (prompts or [])],
+        )
+    except Exception:
+        logger.debug("write_prompt_snapshot: failed", exc_info=True)
 
 
 # ── Per-app title extractors ──

@@ -21,6 +21,7 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 from voxize._audio_const import CHANNELS, SAMPLE_RATE, WAV_HEADER_SIZE
+from voxize.prompt import build_transcription_prompt
 
 if TYPE_CHECKING:
     from openai import OpenAI
@@ -31,12 +32,6 @@ logger = logging.getLogger(__name__)
 
 _MODEL = "gpt-transcribe"
 _WAV_BYTE_RATE = SAMPLE_RATE * CHANNELS * 2
-
-# The API rejects the whole request when `prompt` exceeds the model's length
-# limit, which is undocumented. WHISPER.txt files are one-liners in practice,
-# so this only exists to make a pathological file degrade into a truncated
-# prompt rather than into no transcript at all.
-_MAX_PROMPT_CHARS = 4000
 
 
 class BatchTranscription:
@@ -56,32 +51,20 @@ class BatchTranscription:
         self._usage: dict[str, int] | None = None
 
     def _build_prompt(self) -> str | None:
-        """Return the WHISPER.txt content verbatim, or None if there is none.
+        """Return the guidance content sent as the API's ``prompt``.
 
-        WHISPER.txt files are prompts, not keyword lists — mostly a single
-        ``Glossary: X, Y, Z`` line, occasionally with a prose sentence. They
-        go to the API's ``prompt`` field unparsed. The separate ``keywords``
-        field was measured to add nothing over this on real session audio
-        (see the 2026-07-31 journal entry), and it carries a formatting
-        contract that rejects the entire request on violation, so we don't
-        use it.
+        Delegates to ``prompt.build_transcription_prompt`` so this, the
+        archived ``prompt.txt``, and recover.sh cannot drift apart.
+
+        The separate ``keywords`` field was measured to add nothing over
+        this on real session audio (see the 2026-07-31 journal entry), and
+        it rejects the entire request on a formatting violation, so it is
+        deliberately unused.
 
         gpt-4o-transcribe could not be given a prompt at all — it transcribed
         the prompt text instead of the audio. gpt-transcribe does not.
         """
-        if not self._prompts:
-            return None
-        combined = "\n".join(s.content for s in self._prompts).strip()
-        if not combined:
-            return None
-        if len(combined) > _MAX_PROMPT_CHARS:
-            logger.warning(
-                "_build_prompt: truncating prompt from %d to %d chars",
-                len(combined),
-                _MAX_PROMPT_CHARS,
-            )
-            combined = combined[:_MAX_PROMPT_CHARS]
-        return combined
+        return build_transcription_prompt(self._prompts)
 
     def start(
         self,
