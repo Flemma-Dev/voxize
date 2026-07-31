@@ -147,6 +147,28 @@ _SYSTEM_PROMPT = (
 )
 
 
+def build_cache_prefix_input(
+    prompts: list[PromptSource] | None = None,
+) -> dict[str, str]:
+    """Return the developer message that opens every cleanup-model request.
+
+    This is the cached prefix. Both ``Cleanup._run`` and the warmup ping in
+    ``app.py`` send it as ``input[0]``; the warmup exists precisely so that
+    OpenAI has it cached before cleanup asks for it.
+
+    The cache matches on token prefix, so if those two call sites ever
+    diverge by a single byte the warmup silently stops priming anything and
+    the only symptom is ``cached_tokens=0`` — no error, no crash, just a
+    slower and dearer cleanup call. Routing both through one constructor
+    makes that divergence impossible without editing this function.
+
+    Keep the result free of per-request entropy. The anti-injection nonce
+    deliberately lives in the *user* message for this reason; putting it
+    here would change the prefix hash on every call and guarantee a miss.
+    """
+    return {"role": "developer", "content": build_system_prompt(prompts)}
+
+
 def build_system_prompt(prompts: list[PromptSource] | None = None) -> str:
     """Return the full cleanup system prompt with optional vocabulary guidance.
 
@@ -258,7 +280,9 @@ class Cleanup:
         # The system prompt is nonce-free so the prefix hash stays stable
         # across calls and OpenAI's automatic prompt cache engages. The
         # anti-injection nonce lives only in the user message wrapper.
-        system = build_system_prompt(self._prompts)
+        # Shared with app.py's warmup ping so the cached prefix matches —
+        # see build_cache_prefix_input.
+        developer_message = build_cache_prefix_input(self._prompts)
         nonce = secrets.token_hex(8)
         user_message = (
             f"<transcription-{nonce}>\n{transcript}\n</transcription-{nonce}>"
@@ -282,7 +306,7 @@ class Cleanup:
                 model=MODEL,
                 reasoning={"effort": "low"},
                 input=[
-                    {"role": "developer", "content": system},
+                    developer_message,
                     {"role": "user", "content": user_message},
                 ],
                 stream=True,

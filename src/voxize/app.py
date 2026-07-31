@@ -132,10 +132,14 @@ class VoxizeApp(Gtk.Application):
         # Batch transcript (passed from TRANSCRIBING to CLEANING)
         self._batch_transcript: str = ""
 
-        # Session cost tracking (three phases)
+        # Session cost tracking (three phases + the warmup pings, which are
+        # real billable cleanup-model calls now that they prime the cache)
         self._live_usage: dict[str, int] | None = None
         self._batch_usage: dict[str, int] | None = None
         self._cleanup_usage: dict[str, int] | None = None
+        self._warmup_usage: dict[str, int] | None = None
+        # Only the first ping carries the cleanup prompt; see _warmup_ping.
+        self._warmup_primed = False
 
         # Prompt detection (set in do_activate before window present)
 
@@ -585,6 +589,8 @@ class VoxizeApp(Gtk.Application):
             self._live_usage = None
             self._batch_usage = None
             self._cleanup_usage = None
+            self._warmup_usage = None
+            self._warmup_primed = False
             self._batch_transcript = ""
             if _MOCK:
                 # Mock flow doesn't need real audio — transition straight
@@ -695,24 +701,52 @@ class VoxizeApp(Gtk.Application):
         ).start()
 
     def _warmup_ping(self) -> None:
-        """Warm the pooled TLS socket.
+        """Keep the pooled TLS socket warm; prime the cleanup cache once.
 
-        We call ``client.models.retrieve(MODEL)`` — a cheap single-item
-        lookup. It dates from gpt-5.4-nano, which never returned a prompt
-        cache hit (0/15 probes, see the 2026-04-21 journal entry), making a
-        cache-priming warmup pointless.
+        The socket half is why this exists at all — without it the first
+        post-stop call pays a TCP+TLS handshake.
 
-        That premise no longer holds: gpt-5.6-luna *does* cache (2/3 hits,
-        1292 cached tokens, see the 2026-07-31 entry). Priming the cache
-        from here would make the real cleanup call a hit — worth roughly
-        2.5 s of TTFT and ~65% of the cleanup token cost. Restoring the
-        ``responses.create``-shaped warmup is the open follow-up: the shape
-        is in git history, and it needs ``_accumulate_warmup_usage`` and the
-        Pings cost line brought back with it.
+        The first ping of a session does a second job: it carries the exact
+        developer message the real cleanup call will send, so OpenAI has the
+        ~1400-token prefix cached before the user stops talking. Measured on
+        the production ``Cleanup`` class: a cleanup call with no preceding
+        ping reports ``cached=0``; after a ping it reports ``cached=1385`` of
+        1459 input tokens, billed at $0.02/M instead of $0.20/M.
 
-        Note this lookup 403s on API keys lacking the ``api.model.read``
-        scope. Harmless — the failed request still completes the TCP+TLS
-        handshake this method exists for.
+        Be skeptical of the latency story. Observed TTFT deltas were 250 ms
+        and 863 ms in favour of priming, but a later run with every arm warm
+        produced 1117/1324/734 ms — i.e. run-to-run noise is the same size as
+        the effect. The token accounting is deterministic; the speedup is not.
+
+        Also note the cache survives across sessions (a cleanup call was
+        observed hitting a prefix written minutes earlier by an unrelated
+        run). Back-to-back dictations therefore hit without any help from
+        here, and for those the priming ping is pure added cost. Its value is
+        confined to the first dictation after a quiet spell — and recordings
+        under 45 s never fire a ping at all, which is 46.7% of sessions.
+
+        Only the *first* ping needs the payload. Later ones would rewrite a
+        prefix that is already cached, and at ~$0.00007 each that is roughly
+        the price of the cleanup call they exist to make cheaper — a 300 s
+        recording fires six. So subsequent pings send a minimal request:
+        enough to keep the socket alive, too small (<1024 tokens) to touch
+        the cache either way. A recording long enough to outlive the cache
+        TTL loses the priming, which is the 1.2% of sessions over 300 s.
+
+        This was tried in April with gpt-5.4-nano and reverted: nano returned
+        0 cached tokens on every probe (0/376 across a month of real
+        sessions, see the 2026-04-21 and 2026-07-31 journal entries).
+
+        The prefix must match to hit, which is why the priming ping mirrors
+        ``Cleanup._run``'s request shape exactly — same model, same reasoning
+        effort, system prompt as ``input[0]`` with ``role: developer`` rather
+        than via ``instructions=``. The April attempt used ``instructions=``
+        against a developer-role cleanup call; those render differently, so it
+        may have been unable to hit even on a model that caches.
+
+        ``max_output_tokens`` must clear the reasoning tokens or the response
+        comes back ``status=incomplete`` (16 was too low — low-effort
+        reasoning alone spends ~11).
         """
         client = self._client
         if not client:
@@ -720,20 +754,77 @@ class VoxizeApp(Gtk.Application):
         # Lazy-import so the warmup path isn't what pulls voxize.cleanup
         # into memory; it is already resident via the bootstrap thread
         # by the time we get here.
-        from voxize.cleanup import MODEL as _CLEANUP_MODEL
+        from voxize import cleanup as cleanup_mod
+
+        prime = not self._warmup_primed
+        if prime:
+            # Same constructor Cleanup._run uses, so the prefix we write is
+            # byte-for-byte the prefix it will look up.
+            payload = [
+                cleanup_mod.build_cache_prefix_input(self._prompts),
+                {"role": "user", "content": "."},
+            ]
+        else:
+            payload = [{"role": "user", "content": "."}]
 
         t0 = time.monotonic()
-        logger.debug("warmup: start")
+        logger.debug("warmup: start prime=%s", prime)
         try:
-            client.models.retrieve(_CLEANUP_MODEL)
+            response = client.responses.create(
+                model=cleanup_mod.MODEL,
+                reasoning={"effort": "low"},
+                input=payload,
+                max_output_tokens=64,
+                stream=False,
+                store=False,
+            )
             duration_ms = int((time.monotonic() - t0) * 1000)
+            cached = self._accumulate_warmup_usage(response)
+            if prime:
+                self._warmup_primed = True
             logger.debug(
-                "warmup: complete duration_ms=%d status=ok kind=models.retrieve",
+                "warmup: complete duration_ms=%d status=%s prime=%s cached_tokens=%d",
                 duration_ms,
+                getattr(response, "status", "unknown"),
+                prime,
+                cached,
             )
         except Exception as e:
             duration_ms = int((time.monotonic() - t0) * 1000)
-            logger.warning("warmup: failed duration_ms=%d error=%s", duration_ms, e)
+            # Non-fatal by design: a failed ping still completed the TCP+TLS
+            # handshake, so the socket is warm even when the call errors. Do
+            # not set _warmup_primed — let the next ping retry the priming.
+            logger.warning(
+                "warmup: failed duration_ms=%d prime=%s error=%s",
+                duration_ms,
+                prime,
+                e,
+            )
+
+    def _accumulate_warmup_usage(self, response) -> int:
+        """Add one warmup response's tokens to the session total.
+
+        Pings accumulate — a long recording fires one every 45 s — so this
+        sums rather than replaces. Returns that ping's cached-token count for
+        the log line, which is how we tell whether priming is working.
+        """
+        usage = getattr(response, "usage", None)
+        if not usage:
+            return 0
+        details = getattr(usage, "input_tokens_details", None)
+        cached = (getattr(details, "cached_tokens", 0) or 0) if details else 0
+        totals = self._warmup_usage or {
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cached_tokens": 0,
+            "pings": 0,
+        }
+        totals["input_tokens"] += getattr(usage, "input_tokens", 0) or 0
+        totals["output_tokens"] += getattr(usage, "output_tokens", 0) or 0
+        totals["cached_tokens"] += cached
+        totals["pings"] += 1
+        self._warmup_usage = totals
+        return cached
 
     # ── Phase 1 → Phase 2 transition ──
 
@@ -1107,10 +1198,12 @@ class VoxizeApp(Gtk.Application):
     def _show_session_costs(self) -> None:
         """Compute dollar costs from provider usage and display in UI."""
         logger.debug(
-            "_show_session_costs: live_usage=%s batch_usage=%s cleanup_usage=%s",
+            "_show_session_costs: live_usage=%s batch_usage=%s cleanup_usage=%s "
+            "warmup_usage=%s",
             self._live_usage,
             self._batch_usage,
             self._cleanup_usage,
+            self._warmup_usage,
         )
 
         def _cost(usage, in_price, out_price):
@@ -1125,15 +1218,19 @@ class VoxizeApp(Gtk.Application):
         )
         b_cost = self._batch_cost(self._batch_usage)
         c_cost = self._cleanup_cost(self._cleanup_usage)
+        # Pings hit the cleanup model, so they price identically — including
+        # the cached-input split, which is the point of firing them.
+        w_cost = self._cleanup_cost(self._warmup_usage)
         logger.debug(
-            "_show_session_costs: live=%s batch=%s cleanup=%s",
+            "_show_session_costs: live=%s batch=%s cleanup=%s pings=%s",
             f"{l_cost:.4f}" if l_cost is not None else "n/a",
             f"{b_cost:.4f}" if b_cost is not None else "n/a",
             f"{c_cost:.4f}" if c_cost is not None else "n/a",
+            f"{w_cost:.4f}" if w_cost is not None else "n/a",
         )
 
-        if l_cost is not None or b_cost is not None or c_cost is not None:
-            self._ui.show_session_costs(l_cost, b_cost, c_cost)
+        if any(c is not None for c in (l_cost, b_cost, c_cost, w_cost)):
+            self._ui.show_session_costs(l_cost, b_cost, c_cost, w_cost)
 
     # ── Mode switching ──
 

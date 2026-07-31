@@ -967,3 +967,35 @@ A single `gpt-transcribe` realtime session could serve live preview *and* batch 
 **Files changed:** `src/voxize/batch.py`, `src/voxize/app.py`, `src/voxize/recover.py`, `CLAUDE.md`, `README.md`, `docs/debugging-guide.md`.
 
 **On the probe scripts:** every measurement above came from throwaway scripts under `spike/` (gitignored, never committed). They are not reproducible from the repo — the numbers here are the record. If a future session needs to re-measure, the shapes are: mine `~/.local/state/voxize/*/{batch,cleanup,ws}_events.jsonl` for usage and `audio.wav` size for duration; drive the real `BatchTranscription`/`Cleanup` classes under a `GLib.MainLoop` against saved session WAVs; and always repeat an accuracy arm at least 3× before believing it, which is exactly the step whose absence produced the wrong `keywords` conclusion the first time.
+
+---
+
+### 2026-07-31 — Warmup ping primes the cleanup prompt cache (D1 from April, finally viable)
+
+Third entry today, and the one with the weakest justification — recorded in full because the numbers shrank twice under measurement and a future session should not re-inflate them.
+
+**Background.** The 45s keep-alive ping during RECORDING existed only to hold the TLS socket open. April's D2 idea was to make it a real `responses.create` carrying the cleanup system prompt, so the prompt cache would be primed before the user stopped talking. That was tried and reverted: gpt-5.4-nano returned 0 cached tokens on every probe, later confirmed at **0/376 across a month of real sessions**. With Luna caching, the premise finally holds.
+
+**The mechanism works.** Driving the production `Cleanup` class after a ping:
+
+| arm | cleanup `cached` | cleanup TTFT |
+|---|---|---|
+| no preceding ping (clean control) | **0** | 1580 ms |
+| after one priming ping | **1385** / 1459 in | 1328 ms |
+| after ping + 3s | **1385** | 717 ms |
+
+1385 tokens move from $0.20/M to $0.02/M.
+
+**Correction 1 — the latency claim was inflated.** "~2.5s TTFT" came from comparing a cold *first-ever* call (which also paid TCP+TLS and spent more reasoning tokens) against warm ones. Isolated, the deltas were 252 ms and 863 ms; a later run with every arm already warm gave 1117/1324/734 ms. **Run-to-run noise is the same size as the effect.** The token accounting is deterministic; the speedup is not. Do not quote a latency figure for this without a fresh controlled measurement.
+
+**Correction 2 — pinging the payload every 45s can cost more than it saves.** A prompt-bearing ping is ~$0.00006, about what a *primed cleanup call* costs. Only the first primes; the rest rewrite an already-cached prefix. A 300s recording fires six, which would exceed the saving outright. So only the first ping carries the payload (`_warmup_primed`); the rest send a 7-token request — measured $0.0000134, `cached=0` because it is under the 1024-token threshold, and confirmed *not* to disturb the primed prefix (cleanup still reported `cached=1385` after two cheap pings).
+
+**The caveat that shrinks it further:** the cache survives across sessions. A cleanup call was observed hitting a prefix written minutes earlier by an unrelated run. Back-to-back dictations therefore hit *without* any help from the ping, and for those the priming ping is pure added cost. Its value is confined to the first dictation after a quiet spell. Combined with 46.7% of sessions being under 45s and never firing a ping at all, the realistic verdict is **roughly cost-neutral with a small cold-start win** — not the 41.5% cleanup saving originally projected.
+
+**The prefix-identity problem, and why it is now structural.** The cache matches on token prefix. If the ping's developer message and `Cleanup._run`'s ever differ by one byte, the warmup silently primes nothing: no error, no crash, just `cached_tokens=0` and a dearer call. Previously the guarantee rested on two call sites independently calling `build_system_prompt` with the same list — true, but only by convention. Both now go through **`cleanup.build_cache_prefix_input(prompts)`**, so divergence requires editing one shared function. Verified: byte-identical across three prompt configurations, stable over 50 builds, no nonce in the prefix (it lives in the user message precisely for this), and `app._prompts` assigned once at activate and never mutated.
+
+Note April's attempt used `instructions=` while cleanup used a developer-role message in `input=`. Those render differently, so that attempt may have been structurally unable to hit even on a model that caches — the nano bug may not have been the only thing wrong with it.
+
+**What to measure while driving this.** `debug.log` now carries `warmup: ... prime=<bool> cached_tokens=N` and cleanup's existing `phase_timing: ... cached_tokens=N`. The questions worth answering from real sessions: (a) what fraction of cleanup calls report `cached>0`, and how much of that is the ping versus a prefix left over from the previous session; (b) whether summed ping cost exceeds the cleanup saving on long recordings; (c) whether TTFT moves at all once there are hundreds of samples rather than three. If (a) shows most hits are cross-session leftovers, the priming payload should be dropped and the ping reverted to socket-only — the cheap-ping path already exists, so that reversal is a one-line change.
+
+**Files changed:** `src/voxize/cleanup.py` (new `build_cache_prefix_input`, `_run` uses it), `src/voxize/app.py` (`_warmup_ping` primes once then goes cheap, `_accumulate_warmup_usage`, `_warmup_usage`/`_warmup_primed` state and reset), `src/voxize/ui.py` (`Pings` cost line, optional arg so mock flows are unaffected), `CLAUDE.md`.
