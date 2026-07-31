@@ -2,7 +2,7 @@
 
 Three-phase transcription:
   1. Live preview  — gpt-4o-mini-transcribe via realtime WS (throwaway)
-  2. Batch         — gpt-4o-transcribe via POST /audio/transcriptions
+  2. Batch         — gpt-transcribe via POST /audio/transcriptions
   3. Cleanup       — gpt-5.6-luna text reformatting
 
 Environment variables:
@@ -265,7 +265,7 @@ class VoxizeApp(Gtk.Application):
 
         # Session folder button + recovery script
         self._ui.set_session_dir(self._session_dir)
-        write_recover_script(self._session_dir)
+        write_recover_script(self._session_dir, self._prompts)
 
         # Set up session-level file logging
         fh = logging.FileHandler(os.path.join(self._session_dir, "debug.log"))
@@ -875,7 +875,9 @@ class VoxizeApp(Gtk.Application):
             self._show_session_costs()
             return False
 
-        self._batch = BatchTranscription(self._client, session_dir=session_dir)
+        self._batch = BatchTranscription(
+            self._client, prompts=self._prompts, session_dir=session_dir
+        )
         self._batch.start(
             wav_path=wav_path,
             on_delta=self._ui.append_text,
@@ -1065,8 +1067,6 @@ class VoxizeApp(Gtk.Application):
     # Pricing per million tokens
     _LIVE_INPUT_PRICE = 1.25  # gpt-4o-mini-transcribe
     _LIVE_OUTPUT_PRICE = 5.00
-    _BATCH_INPUT_PRICE = 2.50  # gpt-4o-transcribe
-    _BATCH_OUTPUT_PRICE = 10.00
     _CLEANUP_INPUT_PRICE = 0.20  # gpt-5.6-luna
     _CLEANUP_CACHED_INPUT_PRICE = 0.02  # 10% of standard (OpenAI pricing page)
     _CLEANUP_OUTPUT_PRICE = 1.20
@@ -1074,6 +1074,21 @@ class VoxizeApp(Gtk.Application):
     # gpt-5.4-nano did not. `usage` cannot tell a cache-writing miss from a
     # plain miss, so we bill all uncached input at the standard rate and
     # under-report by at most 25% of the input line on cold calls.
+
+    # Batch is priced per minute of audio, not per token — gpt-transcribe
+    # reports {"seconds": N} instead of token counts. Metering is per second
+    # with no whole-minute rounding and no minimum (measured: a 127.4s WAV
+    # billed 128s).
+    _BATCH_PRICE_PER_MIN = 0.0045  # gpt-transcribe
+
+    def _batch_cost(self, usage: dict[str, int] | None) -> float | None:
+        """Cost for a batch transcription call, from billed audio duration."""
+        if not usage:
+            return None
+        seconds = usage.get("seconds")
+        if seconds is None:
+            return None
+        return seconds / 60 * self._BATCH_PRICE_PER_MIN
 
     def _cleanup_cost(self, usage: dict[str, int] | None) -> float | None:
         """Cost for a cleanup call, splitting cached vs non-cached input tokens."""
@@ -1108,9 +1123,7 @@ class VoxizeApp(Gtk.Application):
         l_cost = _cost(
             self._live_usage, self._LIVE_INPUT_PRICE, self._LIVE_OUTPUT_PRICE
         )
-        b_cost = _cost(
-            self._batch_usage, self._BATCH_INPUT_PRICE, self._BATCH_OUTPUT_PRICE
-        )
+        b_cost = self._batch_cost(self._batch_usage)
         c_cost = self._cleanup_cost(self._cleanup_usage)
         logger.debug(
             "_show_session_costs: live=%s batch=%s cleanup=%s",

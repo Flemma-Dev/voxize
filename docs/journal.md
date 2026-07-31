@@ -902,3 +902,68 @@ A repeat probe minutes later, with the prefix already established, hit **3/3** �
 **Also noted, not fixed:** `shell.nix` has no `ninja`, so `nix develop` + `uv run` cannot build `pygobject`/`pycairo` from source on a clean checkout (neither ships a manylinux wheel). Anyone reproducing the README quickstart from scratch hits it.
 
 **Files changed:** `src/voxize/cleanup.py` (`MODEL`, two docstrings), `src/voxize/app.py` (`_CLEANUP_OUTPUT_PRICE`, `_nano_cost` → `_cleanup_cost`, cache-write comment, `_warmup_ping` docstring, module docstring), `src/voxize/mock.py`, `CLAUDE.md`, `README.md`, `docs/debugging-guide.md` (model references).
+
+---
+
+### 2026-07-31 — Batch model: gpt-4o-transcribe → gpt-transcribe, and `prompt` returns
+
+**This entry documents a reversal.** The switch was first proposed on cost and first justified on `keywords`. Both were wrong, and the measurements that killed them are worth keeping.
+
+#### The cost argument was backwards
+
+OpenAI publishes `gpt-4o-transcribe` at "$0.006/minute" — an *estimate* derived from assumed token density. Mining 405 real sessions (540.8 min of audio, `spike/mine_sessions.py`):
+
+| | |
+|---|---|
+| Actual rate paid | **$0.003114/min** |
+| Published estimate | $0.006/min |
+| Audio tokens | 12.6/sec (in+out) |
+
+Dictation is token-sparse — one voice, pauses, no crosstalk — so we were paying **52%** of the headline rate. `gpt-transcribe`'s flat $0.0045/min is therefore a **44.5% price increase**, not the 25% saving the pricing page implies. Whole-month spend for context: live preview $0.9417 (32.9%), batch $1.6841 (58.9%), cleanup $0.2344 (8.2%) — **$2.86 total, $0.007/session**. The increase is +$0.75/month, which is why cost was dropped as a decision axis entirely.
+
+Billing granularity was the other open worry — 46.7% of sessions are under 60 s, so per-minute rounding would have doubled the bill. Settled empirically: `usage` returns `{"type": "duration", "seconds": 200}`, and a 127.4 s WAV billed 128 s. Per-second, no minimum, no rounding cliff.
+
+#### `keywords` does nothing for us
+
+First A/B (`spike/transcribe_ab.py`, single run per arm) looked decisive — 4o-transcribe 0/2, gpt-transcribe without keywords 0/2, gpt-transcribe **with** keywords 2/2 — and the conclusion drawn was that `keywords` was the whole point of switching. Repeating each arm 3× (`spike/prompt_reliability.py`) dissolved it:
+
+| arm | Luup (homophone) | Supabase (distinct) |
+|---|---|---|
+| `prompt` = glossary line only | **0/3** | 3/3 |
+| `prompt` = prose + glossary line | **2/3** | 3/3 |
+| glossary line + `keywords` | **0/3** | 3/3 |
+
+`keywords` matched the glossary-only baseline in both columns. The original 2/2 was two lucky single runs. **`keywords` is not used in the shipped code**, which also avoids its formatting contract — one `<`, `>`, CR or LF in a term and the API rejects the *entire request*, taking the transcript with it.
+
+#### What actually changed the outcome: `prompt` works again
+
+`CLAUDE.md` had carried a flat prohibition since April: no `prompt` on batch, because `gpt-4o-transcribe` echoed the prompt text instead of transcribing (a 29.5 s clip returning just "Voxize" — see the 2026-04 entries). That bug is model-specific. `gpt-transcribe` was tested with a prompt containing five distinctive prose markers across 12 calls (`spike/prompt_leak.py`): **0 leaks**. So `WHISPER.txt` now goes to `prompt` verbatim.
+
+Verbatim is the point. These files are *prompts*, not keyword lists — mostly a single `Glossary: X, Y, Z` line, ~5% with a prose sentence. An earlier design had a strict per-line `Glossary:` parser to extract keywords; with `keywords` dropped, no parser is needed at all, prose included. `prompt.py` already returns exactly what we want.
+
+The prose finding is the actionable one: prose + glossary beat glossary-alone on the hard case (2/3 vs 0/3). Establishing "a software developer is dictating" shifts the prior away from the common word "loop" toward a product name. Worth telling users their `WHISPER.txt` can be more than a term list.
+
+#### Two layers, not one
+
+The tempting next step — retire the cleanup model's `<vocabulary-guidance>` block now that batch sees the glossary — is **wrong**, and the table above shows why. `prompt` reliably fixes phonetically *distinct* errors (Superbase → Supabase, 3/3 in every arm). It does not reliably fix *homophones*: "Loop" → "Luup" peaked at 2/3 and was 0/3 without prose. Only the text-level layer, reasoning over context rather than acoustics, catches that consistently — it is how the ground truth for these tests was established in the first place. Both layers stay. Batch reduces how often cleanup has to guess; it does not remove the need.
+
+Measured error rate for scale: across sessions, 31 of 52 session-term pairs had the batch transcript wrong and cleanup repairing it. That is a floor, not the rate — a term spoken, mis-transcribed, *and* missed by cleanup is invisible without listening to the audio.
+
+#### Implementation
+
+- `batch.py` — `_MODEL = "gpt-transcribe"`; new `prompts` constructor arg and `_build_prompt()` (verbatim join, `_MAX_PROMPT_CHARS = 4000` defensive truncation because the API rejects the whole request when `prompt` exceeds an undocumented limit); `usage` is now `{"seconds": N}`, falling back to the WAV's own duration if the field is absent so the cost line degrades rather than vanishes; `phase_timing` logs `billed_seconds` instead of `out_tokens`.
+- `app.py` — `_BATCH_INPUT_PRICE`/`_BATCH_OUTPUT_PRICE` deleted, replaced by `_BATCH_PRICE_PER_MIN = 0.0045` and `_batch_cost()`. Batch is the only phase not billed per token now, so it no longer shares the `_cost()` helper.
+- `recover.py` — new model, and the prompt is baked in via `shlex.quote`. Without it a recovery run silently drops vocabulary guidance and produces a different transcript than production would have.
+- Live preview is untouched — still `gpt-4o-mini-transcribe` at a measured $0.001742/min. `gpt-transcribe` supports realtime sessions but at $0.0045/min flat, 2.6× more for a stream we throw away.
+
+#### Considered and rejected
+
+A single `gpt-transcribe` realtime session could serve live preview *and* batch for $0.0045/min against the $0.00486/min the two phases cost combined — cheaper, and one model instead of two. It would also make a realtime stream the source of truth, which is the exact thing the three-phase design exists to avoid (`server_vad` over-segments, `semantic_vad` under-segments). Not worth reopening for 8%.
+
+#### Sample sizes, stated plainly
+
+2 known-error sessions × 3 reps for the accuracy arms; 6 sessions × 6 terms for keyword false positives (0/36); 12 calls for prompt leakage (0). The direction is consistent and mechanism-plausible, but "prompt fixes distinct errors, not homophones" is a working hypothesis on thin data. `spike/mine_sessions.py` measures the thing that would falsify it — how often `cleaned.txt` still has to repair a term — so daily use will answer it without further probing.
+
+**Files changed:** `src/voxize/batch.py`, `src/voxize/app.py`, `src/voxize/recover.py`, `CLAUDE.md`, `README.md`, `docs/debugging-guide.md`.
+
+**On the probe scripts:** every measurement above came from throwaway scripts under `spike/` (gitignored, never committed). They are not reproducible from the repo — the numbers here are the record. If a future session needs to re-measure, the shapes are: mine `~/.local/state/voxize/*/{batch,cleanup,ws}_events.jsonl` for usage and `audio.wav` size for duration; drive the real `BatchTranscription`/`Cleanup` classes under a `GLib.MainLoop` against saved session WAVs; and always repeat an accuracy arm at least 3× before believing it, which is exactly the step whose absence produced the wrong `keywords` conclusion the first time.

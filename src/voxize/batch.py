@@ -5,7 +5,7 @@ synchronous OpenAI SDK call in a daemon thread. Delta text is posted to
 the GTK main thread via GLib.idle_add.
 
 Lifecycle:
-    b = BatchTranscription(client, session_dir=...)
+    b = BatchTranscription(client, prompts=..., session_dir=...)
     b.start(wav_path=..., on_delta=..., on_complete=..., on_error=...)
     b.cancel()
 """
@@ -25,10 +25,18 @@ from voxize._audio_const import CHANNELS, SAMPLE_RATE, WAV_HEADER_SIZE
 if TYPE_CHECKING:
     from openai import OpenAI
 
+    from voxize.prompt import PromptSource
+
 logger = logging.getLogger(__name__)
 
-_MODEL = "gpt-4o-transcribe"
+_MODEL = "gpt-transcribe"
 _WAV_BYTE_RATE = SAMPLE_RATE * CHANNELS * 2
+
+# The API rejects the whole request when `prompt` exceeds the model's length
+# limit, which is undocumented. WHISPER.txt files are one-liners in practice,
+# so this only exists to make a pathological file degrade into a truncated
+# prompt rather than into no transcript at all.
+_MAX_PROMPT_CHARS = 4000
 
 
 class BatchTranscription:
@@ -37,13 +45,43 @@ class BatchTranscription:
     def __init__(
         self,
         client: OpenAI,
+        prompts: list[PromptSource] | None = None,
         session_dir: str | None = None,
     ) -> None:
         self._client = client
+        self._prompts = prompts or []
         self._session_dir = session_dir
         self._thread: threading.Thread | None = None
         self._cancelled = False
         self._usage: dict[str, int] | None = None
+
+    def _build_prompt(self) -> str | None:
+        """Return the WHISPER.txt content verbatim, or None if there is none.
+
+        WHISPER.txt files are prompts, not keyword lists — mostly a single
+        ``Glossary: X, Y, Z`` line, occasionally with a prose sentence. They
+        go to the API's ``prompt`` field unparsed. The separate ``keywords``
+        field was measured to add nothing over this on real session audio
+        (see the 2026-07-31 journal entry), and it carries a formatting
+        contract that rejects the entire request on violation, so we don't
+        use it.
+
+        gpt-4o-transcribe could not be given a prompt at all — it transcribed
+        the prompt text instead of the audio. gpt-transcribe does not.
+        """
+        if not self._prompts:
+            return None
+        combined = "\n".join(s.content for s in self._prompts).strip()
+        if not combined:
+            return None
+        if len(combined) > _MAX_PROMPT_CHARS:
+            logger.warning(
+                "_build_prompt: truncating prompt from %d to %d chars",
+                len(combined),
+                _MAX_PROMPT_CHARS,
+            )
+            combined = combined[:_MAX_PROMPT_CHARS]
+        return combined
 
     def start(
         self,
@@ -72,7 +110,12 @@ class BatchTranscription:
 
     @property
     def usage(self) -> dict[str, int] | None:
-        """Return batch usage (input/output tokens), or None if unavailable."""
+        """Return batch usage, or None if unavailable.
+
+        gpt-transcribe is billed by audio duration, so this is
+        ``{"seconds": N}`` rather than the token counts the gpt-4o-transcribe
+        era reported.
+        """
         return self._usage
 
     def cancel(self) -> None:
@@ -119,11 +162,13 @@ class BatchTranscription:
         try:
             wav_size = os.path.getsize(wav_path)
             audio_duration = (wav_size - WAV_HEADER_SIZE) / _WAV_BYTE_RATE
+            prompt = self._build_prompt()
             logger.debug(
-                "_run: calling API model=%s wav_size=%d (%.1fs audio)",
+                "_run: calling API model=%s wav_size=%d (%.1fs audio) prompt_len=%s",
                 _MODEL,
                 wav_size,
                 audio_duration,
+                len(prompt) if prompt else 0,
             )
             _log_event(
                 {
@@ -131,11 +176,13 @@ class BatchTranscription:
                     "model": _MODEL,
                     "wav_path": wav_path,
                     "wav_size": wav_size,
+                    "prompt": prompt,
                 }
             )
 
             wav_file = open(wav_path, "rb")  # noqa: SIM115 — closed in finally
             t_call = time.monotonic()
+            extra = {"prompt": prompt} if prompt else {}
             # `with` ensures stream.close() fires before we hand off to the
             # cleanup phase, so the pooled TLS socket is returned to httpx
             # before Cleanup's thread asks for one.
@@ -144,6 +191,7 @@ class BatchTranscription:
                 file=wav_file,
                 response_format="text",
                 stream=True,
+                **extra,
             ) as stream:
                 first_delta = True
                 events_received = 0
@@ -169,14 +217,22 @@ class BatchTranscription:
                     elif event.type == "transcript.text.done":
                         usage = getattr(event, "usage", None)
                         if usage:
+                            # gpt-transcribe reports
+                            # {"type": "duration", "seconds": N}. Fall back to
+                            # the WAV's own duration if the field is missing so
+                            # the cost line degrades rather than disappears.
+                            seconds = getattr(usage, "seconds", None)
                             self._usage = {
-                                "input_tokens": getattr(usage, "input_tokens", 0),
-                                "output_tokens": getattr(usage, "output_tokens", 0),
+                                "seconds": int(
+                                    seconds
+                                    if seconds is not None
+                                    else round(audio_duration)
+                                )
                             }
                             logger.debug(
-                                "_run: usage input_tokens=%d output_tokens=%d",
-                                self._usage["input_tokens"],
-                                self._usage["output_tokens"],
+                                "_run: usage seconds=%d reported=%s",
+                                self._usage["seconds"],
+                                seconds is not None,
                             )
 
             if not self._cancelled:
@@ -187,14 +243,14 @@ class BatchTranscription:
                     int((t_end - t_first_delta) * 1000) if t_first_delta else 0
                 )
                 total_ms = int((t_end - t_call) * 1000)
-                out_tokens = self._usage["output_tokens"] if self._usage else 0
+                billed_secs = self._usage["seconds"] if self._usage else 0
                 logger.debug(
                     "phase_timing: ttft_ms=%d streaming_ms=%d total_ms=%d "
-                    "out_tokens=%d chars=%d",
+                    "billed_seconds=%d chars=%d",
                     ttft_ms,
                     streaming_ms,
                     total_ms,
-                    out_tokens,
+                    billed_secs,
                     len(transcript),
                 )
                 logger.debug(

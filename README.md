@@ -19,7 +19,7 @@ When you're done, hit **Stop**. Voxize runs the full audio through OpenAI's batc
 Three phases, one hotkey:
 
 1. **Live preview** — real-time streaming gives you visual feedback as you speak (via `gpt-4o-mini-transcribe`)
-2. **Batch transcription** — full audio processed in one pass, dramatically more accurate than real-time segmentation (via `gpt-4o-transcribe`)
+2. **Batch transcription** — full audio processed in one pass, dramatically more accurate than real-time segmentation (via `gpt-transcribe`)
 3. **AI cleanup** — fixes filler words, punctuation, and formatting (via `gpt-5.6-luna`)
 
 The live preview is throwaway — just visual feedback. The real transcription happens after you stop, and it's [dramatically more accurate](https://blog.angeloff.name/post/2026/05/15/speeding-up-voxize-a-cautionary-tale-about-speech-benchmarks/).
@@ -98,7 +98,7 @@ uv run python -m voxize.meeting
 
 After recording, a built-in workbench lets you transcribe with speaker diarization, rename speakers, and generate meeting titles — all without leaving the app. You can supply key terms before transcribing to improve accuracy on domain-specific vocabulary.
 
-**Why ElevenLabs for meetings, not OpenAI?** Dictation prompts are short, technical, and latency-sensitive — OpenAI's `gpt-4o-transcribe` excels there, especially with `WHISPER.txt` vocabulary guidance. Meetings are longer, more conversational, and need speaker diarization — ElevenLabs' Scribe v2 ranks [#1 across 49 models](https://artificialanalysis.ai/articles/aa-wer-v2) with a 2.3% word error rate, nearly twice as accurate as OpenAI's batch model. Voxize uses the best tool for each job.
+**Why ElevenLabs for meetings, not OpenAI?** Dictation prompts are short, technical, and latency-sensitive — OpenAI's `gpt-transcribe` excels there, especially with `WHISPER.txt` vocabulary guidance. Meetings are longer, more conversational, and need speaker diarization — ElevenLabs' Scribe v2 ranks [#1 across 49 models](https://artificialanalysis.ai/articles/aa-wer-v2) with a 2.3% word error rate, nearly twice as accurate as OpenAI's batch model. Voxize uses the best tool for each job.
 
 Recording needs no API key. To enable transcription, store your ElevenLabs key in the GNOME Keyring:
 

@@ -32,7 +32,7 @@ Phase 1 (RECORDING):
                                                            → live preview deltas → UI (throwaway)
 
 Phase 2 (TRANSCRIBING):
-  audio.wav → POST /audio/transcriptions (gpt-4o-transcribe, streaming)
+  audio.wav → POST /audio/transcriptions (gpt-transcribe, streaming)
             → batch deltas → UI (replaces live preview)
             → transcription.txt + clipboard
 
@@ -44,7 +44,7 @@ Phase 3 (CLEANING):
 
 **Key files:**
 - `transcribe.py` — Live preview: realtime WS client (gpt-4o-mini-transcribe, server_vad, throwaway)
-- `batch.py` — Batch transcription: POST /audio/transcriptions (gpt-4o-transcribe, streaming)
+- `batch.py` — Batch transcription: POST /audio/transcriptions (gpt-transcribe, streaming)
 - `cleanup.py` — Text cleanup: GPT-5.6 Luna (Responses API, streaming)
 - `audio.py` — Microphone capture, WAV writer, sounddevice callback
 - `app.py` — Orchestration, state transitions, provider lifecycle
@@ -72,7 +72,7 @@ Each recording session creates a directory under `$XDG_STATE_HOME/voxize/` (typi
 
 **`live_transcript.txt`** is the throwaway live preview text from the realtime WS. It may be garbled, incomplete, or have missing words — this is expected. Saved for debugging only; never used by the pipeline.
 
-**`transcription.txt`** is the batch transcript from `gpt-4o-transcribe`. This is the authoritative result — it should match the audio content accurately.
+**`transcription.txt`** is the batch transcript from `gpt-transcribe`. This is the authoritative result — it should match the audio content accurately.
 
 **`ws_events.jsonl`** logs every event *received* from the live preview WS. One JSON object per line. Useful for diagnosing WS connection issues but NOT for diagnosing transcript accuracy (the live preview is throwaway).
 
@@ -203,7 +203,7 @@ from openai import OpenAI
 from voxize.checks import get_api_key
 client = OpenAI(api_key=get_api_key("openai"))
 with open("path/to/audio.wav", "rb") as f:
-    result = client.audio.transcriptions.create(model="gpt-4o-transcribe", file=f)
+    result = client.audio.transcriptions.create(model="gpt-transcribe", file=f)
 print(result.text)
 ```
 
@@ -380,7 +380,7 @@ _stop_and_batch: wav_size=456960 (9.5s audio)
 # Batch transcription
 _start_batch: session_dir=...
 start: wav_path=...
-_run: calling API model=gpt-4o-transcribe wav_size=456960 (9.5s audio)
+_run: calling API model=gpt-transcribe wav_size=456960 (9.5s audio)
 _run: first delta received, len=3
 _run: usage input_tokens=95 output_tokens=19
 _run: complete, transcript_len=42 events=22
@@ -423,7 +423,7 @@ show_session_costs: live=$0.0004 batch=$0.0012 cleanup=$0.0002
 
 ## 7. Batch Transcription (the authoritative path)
 
-Batch transcription is now the core of the pipeline, not a verification tool. The `batch.py` module streams `audio.wav` to `POST /audio/transcriptions` with `gpt-4o-transcribe` and `response_format=text`.
+Batch transcription is now the core of the pipeline, not a verification tool. The `batch.py` module streams `audio.wav` to `POST /audio/transcriptions` with `gpt-transcribe` and `response_format=text`.
 
 ### How to diagnose batch issues
 
@@ -431,29 +431,44 @@ Batch transcription is now the core of the pipeline, not a verification tool. Th
 
 A healthy batch session looks like:
 ```
-{"type": "request", "model": "gpt-4o-transcribe", "wav_path": "...", "wav_size": 456960}
+{"type": "request", "model": "gpt-transcribe", "wav_path": "...", "wav_size": 456960}
 {"delta": "This ", "type": "transcript.text.delta", ...}
 {"delta": "is a ", "type": "transcript.text.delta", ...}
 ...
-{"text": "This is a test.", "type": "transcript.text.done", "usage": {"input_tokens": 95, "output_tokens": 19, ...}}
+{"text": "This is a test.", "type": "transcript.text.done", "usage": {"type": "duration", "seconds": 10}}
+```
+
+`gpt-transcribe` is billed by audio duration, so `usage` is
+`{"type": "duration", "seconds": N}` — no token counts. Anything reporting
+`input_tokens`/`output_tokens` means the model fell back to a token-billed
+one (`gpt-4o-transcribe` era), and `_batch_cost` will return `None`.
+
+The `request` event records the `prompt` sent (verbatim `WHISPER.txt`):
+```
+{"type": "request", "model": "gpt-transcribe", "wav_path": "...", "wav_size": 456960, "prompt": "Glossary: Luup, Supabase"}
 ```
 
 A broken batch session may show:
 ```
 {"type": "request", ...}
 {"delta": "Voxize", "type": "transcript.text.delta", ...}
-{"text": "Voxize", "type": "transcript.text.done", "usage": {"input_tokens": 300, "output_tokens": 5, ..., "input_token_details": {"text_tokens": 5, ...}}}
+{"text": "Voxize", "type": "transcript.text.done", ...}
 ```
 
-If `text_tokens` > 0 in usage, a `prompt` was injected — this causes the `gpt-4o-transcribe` decoder to echo the prompt instead of transcribing. The `prompt` parameter must NOT be passed to this model.
+A transcript that is just the prompt text back means the decoder echoed the
+prompt instead of transcribing. That was a reproducible `gpt-4o-transcribe`
+bug (see the 2026-04 journal entries) and is why `prompt` was unused for
+months. `gpt-transcribe` was measured clean on this — 0 leaks in 12 calls —
+but if it ever regresses, dropping the `prompt` kwarg in `batch.py` restores
+the old safe behavior at the cost of vocabulary accuracy.
 
 **Step 2: Check the debug log for batch timing.**
 
 ```
 _start_batch: session_dir=...
-_run: calling API model=gpt-4o-transcribe wav_size=456960 (9.5s audio)
+_run: calling API model=gpt-transcribe wav_size=456960 (9.5s audio)
 _run: first delta received, len=3              ← should arrive within 2-5s
-_run: usage input_tokens=95 output_tokens=19
+_run: usage seconds=10 reported=True           ← reported=False means we fell back to WAV duration
 _run: complete, transcript_len=42 events=22
 ```
 
