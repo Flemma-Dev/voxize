@@ -30,7 +30,7 @@ State machine drives: INITIALIZING -> RECORDING -> TRANSCRIBING -> CLEANING -> R
 **Three-phase transcription:**
 1. **Live preview** (RECORDING) — `gpt-4o-mini-transcribe` via realtime WS. Cheap, throwaway, gives visual feedback.
 2. **Batch transcription** (TRANSCRIBING) — `gpt-4o-transcribe` via `POST /audio/transcriptions`. Accurate, authoritative.
-3. **Cleanup** (CLEANING) — `gpt-5.4-nano` text reformatting. Light touchup of already-clean batch output.
+3. **Cleanup** (CLEANING) — `gpt-5.6-luna` text reformatting. Light touchup of already-clean batch output.
 
 **Threads during recording:**
 1. GTK main thread (UI)
@@ -52,7 +52,7 @@ Thread bridge: `GLib.idle_add` (worker -> GTK), `call_soon_threadsafe` (GTK -> a
 | `audio.py` | `AudioCapture` (sounddevice) + `WavWriter` (crash-safe WAV) + `LevelMeter` (passive RMS) |
 | `transcribe.py` | Live preview: realtime WS client (`gpt-4o-mini-transcribe`, `server_vad`, throwaway) |
 | `batch.py` | Batch transcription: `POST /audio/transcriptions` (`gpt-4o-transcribe`, streaming) |
-| `cleanup.py` | GPT-5.4 Nano text cleanup (Responses API, streaming) |
+| `cleanup.py` | GPT-5.6 Luna text cleanup (Responses API, streaming) |
 | `mock.py` | Mock providers for testing without API calls |
 | `prompt.py` | Focused-window detection, WHISPER.txt loading |
 | `recover.py` | Generates per-session `recover.sh` for batch re-transcription |
@@ -70,7 +70,7 @@ Thread bridge: `GLib.idle_add` (worker -> GTK), `call_soon_threadsafe` (GTK -> a
 - **Three-phase transcription** — realtime WS is unreliable for continuous dictation (server_vad over-segments, semantic_vad under-segments). Live preview is throwaway; batch transcription on the full WAV is the source of truth.
 - **`gpt-4o-mini-transcribe` for live preview** — 50% cheaper than full model, accuracy doesn't matter. `server_vad` with fast startup (audio before WS, burst drains at full speed).
 - **`gpt-4o-transcribe` for batch** — full model processes entire audio in one pass. No `prompt` parameter — `gpt-4o-transcribe` hallucinates the prompt text instead of transcribing. Vocabulary guidance is handled by the cleanup model's `<vocabulary-guidance>` block.
-- **GPT-5.4 Nano for cleanup** — batch transcript is already clean, cleanup is light touchup. Nano handles the explicit rules-based prompt well.
+- **GPT-5.6 Luna for cleanup** — batch transcript is already clean, cleanup is light touchup. Luna handles the explicit rules-based prompt well.
 - **WS failure is non-fatal** — during RECORDING, WS errors show a banner but audio continues. User can still stop and get batch transcription. Only mic failure is fatal.
 - **Fast startup** — sounddevice (~2s via numpy) and the openai SDK (~300ms) are both deferred to the bootstrap background thread. The window is visible within ~300ms; audio capture starts once sounddevice loads. Audio format constants live in `_audio_const.py` so that `batch.py` can reference them without pulling in sounddevice. Chunks queue, burst-drain when WS ready. If burst corrupts server_vad, live preview is garbled but batch fixes everything.
 - **Thread bridge over gbulb** — asyncio in daemon thread + `GLib.idle_add`. Simpler, no extra dependency.

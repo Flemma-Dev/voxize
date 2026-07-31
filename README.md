@@ -20,7 +20,7 @@ Three phases, one hotkey:
 
 1. **Live preview** — real-time streaming gives you visual feedback as you speak (via `gpt-4o-mini-transcribe`)
 2. **Batch transcription** — full audio processed in one pass, dramatically more accurate than real-time segmentation (via `gpt-4o-transcribe`)
-3. **AI cleanup** — fixes filler words, punctuation, and formatting (via `gpt-5.4-nano`)
+3. **AI cleanup** — fixes filler words, punctuation, and formatting (via `gpt-5.6-luna`)
 
 The live preview is throwaway — just visual feedback. The real transcription happens after you stop, and it's [dramatically more accurate](https://blog.angeloff.name/post/2026/05/15/speeding-up-voxize-a-cautionary-tale-about-speech-benchmarks/).
 

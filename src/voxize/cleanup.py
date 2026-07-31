@@ -1,4 +1,4 @@
-"""Text cleanup via OpenAI GPT-5.4 Nano streaming (Responses API).
+"""Text cleanup via OpenAI GPT-5.6 Luna streaming (Responses API).
 
 Runs a synchronous OpenAI SDK streaming call in a daemon thread. Delta
 tokens are posted to the GTK main thread via GLib.idle_add.
@@ -27,7 +27,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-MODEL = "gpt-5.4-nano"
+MODEL = "gpt-5.6-luna"
 
 _SYSTEM_PROMPT = (
     "# Role\n"
@@ -174,7 +174,7 @@ def build_system_prompt(prompts: list[PromptSource] | None = None) -> str:
 
 
 class Cleanup:
-    """Streams transcript through GPT-5.4 Nano for cleanup."""
+    """Streams transcript through GPT-5.6 Luna for cleanup."""
 
     def __init__(
         self,

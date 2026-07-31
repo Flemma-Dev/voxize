@@ -1,7 +1,7 @@
 """Mock providers for UI development.
 
 These emit predefined text on timers, simulating the real OpenAI Realtime
-transcription deltas and GPT-5.4 Nano cleanup streaming.
+transcription deltas and GPT-5.6 Luna cleanup streaming.
 """
 
 import logging

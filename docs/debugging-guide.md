@@ -22,7 +22,7 @@ GLib.idle_add callbacks  Posts chunks to asyncio queue      receive_loop: WS →
 **Additional threads after recording:**
 - `voxize-stop` — stops audio + cancels WS, then triggers batch
 - `voxize-batch` — batch transcription API call (streaming)
-- `voxize-cleanup` — GPT-5.4 Nano cleanup API call (streaming)
+- `voxize-cleanup` — GPT-5.6 Luna cleanup API call (streaming)
 
 **Data flow:**
 ```
@@ -37,7 +37,7 @@ Phase 2 (TRANSCRIBING):
             → transcription.txt + clipboard
 
 Phase 3 (CLEANING):
-  batch transcript → GPT-5.4 Nano (Responses API, streaming)
+  batch transcript → GPT-5.6 Luna (Responses API, streaming)
                    → cleanup deltas → UI (replaces batch text)
                    → cleaned.txt + clipboard (overwrites)
 ```
@@ -45,7 +45,7 @@ Phase 3 (CLEANING):
 **Key files:**
 - `transcribe.py` — Live preview: realtime WS client (gpt-4o-mini-transcribe, server_vad, throwaway)
 - `batch.py` — Batch transcription: POST /audio/transcriptions (gpt-4o-transcribe, streaming)
-- `cleanup.py` — Text cleanup: GPT-5.4 Nano (Responses API, streaming)
+- `cleanup.py` — Text cleanup: GPT-5.6 Luna (Responses API, streaming)
 - `audio.py` — Microphone capture, WAV writer, sounddevice callback
 - `app.py` — Orchestration, state transitions, provider lifecycle
 - `ui.py` — GTK4 widgets, state-driven updates
@@ -60,7 +60,7 @@ Each recording session creates a directory under `$XDG_STATE_HOME/voxize/` (typi
 ├── audio.wav              # Full PCM recording (always complete, crash-safe)
 ├── live_transcript.txt    # Live preview text (throwaway — for debugging only)
 ├── transcription.txt      # Batch transcript (authoritative result)
-├── cleaned.txt            # Post-cleanup text from GPT-5.4 Nano
+├── cleaned.txt            # Post-cleanup text from GPT-5.6 Luna
 ├── ws_events.jsonl        # Every WS event from live preview (OpenAI Realtime API)
 ├── batch_events.jsonl     # Every event from batch transcription API
 ├── cleanup_events.jsonl   # Every event from cleanup API (Responses API)
@@ -335,7 +335,7 @@ Thread names:
 - `Dummy-1` — sounddevice callback thread (Python names portaudio threads "Dummy-N")
 - `voxize-stop` — background thread for stopping audio + WS, triggers batch
 - `voxize-batch` — background thread for batch transcription API call
-- `voxize-cleanup` — background thread for GPT-5.4 Nano cleanup API call
+- `voxize-cleanup` — background thread for GPT-5.6 Luna cleanup API call
 - `voxize-teardown` — background thread for async teardown (cancel path)
 
 ### Healthy session timeline
@@ -391,7 +391,7 @@ transition: TRANSCRIBING -> CLEANING allowed=True
 _begin_cleanup: mock=False
 show_transcript_for_cleanup: transcript_len=42
 start: transcript_len=42
-_run: calling API model=gpt-5.4-nano
+_run: calling API model=gpt-5.6-luna
 _run: first delta received, len=6
 _run: complete, cleaned_len=38
 _on_cleanup_done: cleaned_len=38

@@ -3,7 +3,7 @@
 Three-phase transcription:
   1. Live preview  — gpt-4o-mini-transcribe via realtime WS (throwaway)
   2. Batch         — gpt-4o-transcribe via POST /audio/transcriptions
-  3. Cleanup       — gpt-5.4-nano text reformatting
+  3. Cleanup       — gpt-5.6-luna text reformatting
 
 Environment variables:
     VOXIZE_MOCK=1          Use mock transcription (no mic, no API)
@@ -697,19 +697,22 @@ class VoxizeApp(Gtk.Application):
     def _warmup_ping(self) -> None:
         """Warm the pooled TLS socket.
 
-        We call ``client.models.retrieve(MODEL)`` because gpt-5.4-nano does
-        not participate in OpenAI's automatic prompt caching (see the
-        2026-04-21 journal entry). A heavier ``responses.create`` warmup
-        aimed at priming the cache was tried and empirically confirmed to
-        return 0 cached tokens on every subsequent cleanup call; we
-        reverted to the cheap lookup until OpenAI lights caching up for
-        the gpt-5 nano/mini tier.
+        We call ``client.models.retrieve(MODEL)`` — a cheap single-item
+        lookup. It dates from gpt-5.4-nano, which never returned a prompt
+        cache hit (0/15 probes, see the 2026-04-21 journal entry), making a
+        cache-priming warmup pointless.
 
-        If/when auto caching starts working for our model, flip this back
-        to the ``responses.create``-shaped warmup (see git history for
-        commit that introduced it) and re-enable the
-        ``_accumulate_warmup_usage`` call that populates the Pings cost
-        line.
+        That premise no longer holds: gpt-5.6-luna *does* cache (2/3 hits,
+        1292 cached tokens, see the 2026-07-31 entry). Priming the cache
+        from here would make the real cleanup call a hit — worth roughly
+        2.5 s of TTFT and ~65% of the cleanup token cost. Restoring the
+        ``responses.create``-shaped warmup is the open follow-up: the shape
+        is in git history, and it needs ``_accumulate_warmup_usage`` and the
+        Pings cost line brought back with it.
+
+        Note this lookup 403s on API keys lacking the ``api.model.read``
+        scope. Harmless — the failed request still completes the TCP+TLS
+        handshake this method exists for.
         """
         client = self._client
         if not client:
@@ -1064,12 +1067,16 @@ class VoxizeApp(Gtk.Application):
     _LIVE_OUTPUT_PRICE = 5.00
     _BATCH_INPUT_PRICE = 2.50  # gpt-4o-transcribe
     _BATCH_OUTPUT_PRICE = 10.00
-    _CLEANUP_INPUT_PRICE = 0.20  # gpt-5.4-nano
-    _CLEANUP_CACHED_INPUT_PRICE = 0.02  # 10% of standard (benchlm.ai pricing guide)
-    _CLEANUP_OUTPUT_PRICE = 1.25
+    _CLEANUP_INPUT_PRICE = 0.20  # gpt-5.6-luna
+    _CLEANUP_CACHED_INPUT_PRICE = 0.02  # 10% of standard (OpenAI pricing page)
+    _CLEANUP_OUTPUT_PRICE = 1.20
+    # Luna also bills cache *writes* at 1.25x uncached input ($0.25/M), which
+    # gpt-5.4-nano did not. `usage` cannot tell a cache-writing miss from a
+    # plain miss, so we bill all uncached input at the standard rate and
+    # under-report by at most 25% of the input line on cold calls.
 
-    def _nano_cost(self, usage: dict[str, int] | None) -> float | None:
-        """Cost for a nano call, splitting cached vs non-cached input tokens."""
+    def _cleanup_cost(self, usage: dict[str, int] | None) -> float | None:
+        """Cost for a cleanup call, splitting cached vs non-cached input tokens."""
         if not usage:
             return None
         inp = usage.get("input_tokens", 0)
@@ -1104,7 +1111,7 @@ class VoxizeApp(Gtk.Application):
         b_cost = _cost(
             self._batch_usage, self._BATCH_INPUT_PRICE, self._BATCH_OUTPUT_PRICE
         )
-        c_cost = self._nano_cost(self._cleanup_usage)
+        c_cost = self._cleanup_cost(self._cleanup_usage)
         logger.debug(
             "_show_session_costs: live=%s batch=%s cleanup=%s",
             f"{l_cost:.4f}" if l_cost is not None else "n/a",
