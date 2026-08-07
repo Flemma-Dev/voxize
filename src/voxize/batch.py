@@ -143,14 +143,18 @@ class BatchTranscription:
         t_first_delta = 0.0
 
         try:
-            wav_size = os.path.getsize(wav_path)
-            audio_duration = (wav_size - WAV_HEADER_SIZE) / _WAV_BYTE_RATE
+            file_size = os.path.getsize(wav_path)
+            if wav_path.endswith(".wav"):
+                audio_duration = (file_size - WAV_HEADER_SIZE) / _WAV_BYTE_RATE
+            else:
+                audio_duration = None
             prompt = self._build_prompt()
             logger.debug(
-                "_run: calling API model=%s wav_size=%d (%.1fs audio) prompt_len=%s",
+                "_run: calling API model=%s file=%s size=%d (%.1fs audio) prompt_len=%s",
                 _MODEL,
-                wav_size,
-                audio_duration,
+                os.path.basename(wav_path),
+                file_size,
+                audio_duration or 0,
                 len(prompt) if prompt else 0,
             )
             _log_event(
@@ -158,7 +162,7 @@ class BatchTranscription:
                     "type": "request",
                     "model": _MODEL,
                     "wav_path": wav_path,
-                    "wav_size": wav_size,
+                    "wav_size": file_size,
                     "prompt": prompt,
                 }
             )
@@ -202,14 +206,13 @@ class BatchTranscription:
                         if usage:
                             # gpt-transcribe reports
                             # {"type": "duration", "seconds": N}. Fall back to
-                            # the WAV's own duration if the field is missing so
-                            # the cost line degrades rather than disappears.
+                            # the WAV-derived duration if the field is missing
+                            # so the cost line degrades rather than disappears.
                             seconds = getattr(usage, "seconds", None)
+                            fallback = round(audio_duration) if audio_duration else 0
                             self._usage = {
                                 "seconds": int(
-                                    seconds
-                                    if seconds is not None
-                                    else round(audio_duration)
+                                    seconds if seconds is not None else fallback
                                 )
                             }
                             logger.debug(

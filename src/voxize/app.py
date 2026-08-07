@@ -901,6 +901,7 @@ class VoxizeApp(Gtk.Application):
 
         # Log WAV file info (cheap; do before the handoff).
         wav_path = os.path.join(session_dir, "audio.wav") if session_dir else None
+        wav_size = 0
         if wav_path and os.path.exists(wav_path):
             from voxize._audio_const import CHANNELS, SAMPLE_RATE, WAV_HEADER_SIZE
 
@@ -911,10 +912,20 @@ class VoxizeApp(Gtk.Application):
                 (wav_size - WAV_HEADER_SIZE) / (SAMPLE_RATE * CHANNELS * 2),
             )
 
+        opus_path = audio.opus_path if audio else None
+        if opus_path:
+            opus_size = os.path.getsize(opus_path)
+            logger.debug(
+                "_stop_and_batch: opus_path=%s opus_size=%d ratio=%.1fx",
+                opus_path,
+                opus_size,
+                wav_size / opus_size if wav_size and opus_size else 0,
+            )
+
         # Step 2: kick off batch now. It runs concurrently with the
         # transcription teardown that follows.
         logger.debug("_stop_and_batch: dispatching batch start")
-        GLib.idle_add(self._start_batch, session_dir)
+        GLib.idle_add(self._start_batch, session_dir, opus_path)
 
         # Step 3: cancel WS (live_transcript.stop() can wait up to 2s for
         # usage events — that's what we're parallelising away).
@@ -955,17 +966,20 @@ class VoxizeApp(Gtk.Application):
         self._live_usage = live_usage
         return False
 
-    def _start_batch(self, session_dir: str) -> bool:
-        """GTK thread: start batch transcription of the WAV file."""
-        logger.debug("_start_batch: session_dir=%s", session_dir)
+    def _start_batch(self, session_dir: str, opus_path: str | None = None) -> bool:
+        """GTK thread: start batch transcription of the audio file."""
+        logger.debug("_start_batch: session_dir=%s opus=%s", session_dir, opus_path)
 
         # Guard against stale callback (e.g., user cancelled during stop)
         if not self._machine or self._machine.state != State.TRANSCRIBING:
             return False
 
-        wav_path = os.path.join(session_dir, "audio.wav")
-        if not os.path.exists(wav_path):
-            logger.error("_start_batch: audio.wav not found")
+        # Prefer the Opus file (much smaller upload), fall back to WAV.
+        audio_path = opus_path if opus_path and os.path.exists(opus_path) else None
+        if not audio_path:
+            audio_path = os.path.join(session_dir, "audio.wav")
+        if not os.path.exists(audio_path):
+            logger.error("_start_batch: no audio file found")
             self._ui.show_error_banner("Audio file not found")
             self._machine.transition(State.READY)
             self._show_session_costs()
@@ -975,7 +989,7 @@ class VoxizeApp(Gtk.Application):
             self._client, prompts=self._prompts, session_dir=session_dir
         )
         self._batch.start(
-            wav_path=wav_path,
+            wav_path=audio_path,
             on_delta=self._ui.append_text,
             on_complete=self._on_batch_done,
             on_error=self._on_batch_error,

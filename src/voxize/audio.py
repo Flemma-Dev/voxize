@@ -25,6 +25,7 @@ from collections.abc import Callable
 import sounddevice as sd
 
 from voxize._audio_const import BLOCK_SIZE, CHANNELS, DTYPE, SAMPLE_RATE
+from voxize.opus import OpusEncoder
 
 logger = logging.getLogger(__name__)
 
@@ -166,7 +167,9 @@ class AudioCapture:
         session_dir: str,
         on_chunk: Callable[[bytes], None] | None = None,
     ) -> None:
+        self._session_dir = session_dir
         self._wav = WavWriter(os.path.join(session_dir, "audio.wav"))
+        self._opus = OpusEncoder(session_dir)
         # Callback is swappable: during fast startup we open the stream
         # before the live-preview WS is set up, so chunks are discarded
         # until set_on_chunk() wires in RealtimeTranscription.send_audio.
@@ -192,10 +195,19 @@ class AudioCapture:
         pcm = bytes(indata)
         self._meter.update(pcm)
         self._wav.write(pcm)
+        self._opus.write(pcm)
         self._on_chunk(pcm)
+
+    @property
+    def opus_path(self) -> str | None:
+        """Path to the Opus file if encoding succeeded, else None."""
+        if self._opus.ok and os.path.exists(self._opus.path):
+            return self._opus.path
+        return None
 
     def start(self) -> None:
         self._wav.open()
+        self._opus.start()
         logger.debug(
             "audio start: rate=%d ch=%d dtype=%s blocksize=%d",
             SAMPLE_RATE,
@@ -227,5 +239,6 @@ class AudioCapture:
             self._stream.stop()
             self._stream.close()
             self._stream = None
+        self._opus.stop()
         self._wav.finalize()
-        logger.debug("audio stop: complete")
+        logger.debug("audio stop: complete opus_ok=%s", self._opus.ok)
