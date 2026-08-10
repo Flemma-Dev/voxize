@@ -81,6 +81,10 @@ progressbar.vu-meter.vu-good { --accent-bg-color: var(--vox-green); }
 progressbar.vu-meter.vu-hot  { --accent-bg-color: var(--vox-amber); }
 progressbar.vu-meter.vu-clip { --accent-bg-color: var(--vox-red); }
 
+progressbar.vu-meter.vu-warming.osd.horizontal > trough {
+    background-color: color-mix(in srgb, var(--vox-amber) 40%, transparent);
+}
+
 /* Upload / phase progress — same geometry as the VU meter.
  * Stacked phases: when a phase completes, its colour becomes the trough
  * background and the next phase's fill writes on top. */

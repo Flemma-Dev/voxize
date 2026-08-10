@@ -501,9 +501,11 @@ class OverlayWindow:
             self._spinner.set_spinning(True)
             self._start_pulse()
             self._start_meter()
+            self._meter_bar.add_css_class("vu-warming")
             self.clear_text()
 
         elif new == State.RECORDING:
+            self._meter_bar.remove_css_class("vu-warming")
             self._status_label.set_text("Recording")
             # Coming from INITIALIZING (mock mode skips WARMING), reset
             # the capture UI. Coming from WARMING, everything is already
