@@ -23,18 +23,18 @@ from voxize.state import State, StateMachine  # noqa: E402
 _VU_ZONE_CLASSES = ("vu-low", "vu-good", "vu-hot", "vu-clip")
 _PHASE_CLASSES = ("phase-batch", "phase-cleanup")
 
-_BATCH_LIVE_RATIO = 0.9842
+_BATCH_LIVE_RATIO = 0.9843
 _CLEANUP_BATCH_RATIO = 0.9167
 _MIN_LIVE_LEN = 50
 
-# Duration models for dynamic segment weights (gpt-5.6-luna era, n=228).
+# Duration models for dynamic segment weights (gpt-5.6-luna era, n=238).
 # Recalibrate with: python contrib/calibrate-progress-bar.py
-_UPLOAD_MS = 500.0
-_BATCH_TTFB_BASE_MS = 1218.0
-_BATCH_TTFB_SLOPE_MS = 1.3164
+_UPLOAD_MS = 50.0
+_BATCH_TTFB_BASE_MS = 1196.7
+_BATCH_TTFB_SLOPE_MS = 1.3181
 _BATCH_STREAM_MS_PER_CHAR = 1.1337
-_CLEANUP_TTFB_MS = 1255.5
-_CLEANUP_STREAM_MS_PER_CHAR = 1.1497
+_CLEANUP_TTFB_MS = 1264.0
+_CLEANUP_STREAM_MS_PER_CHAR = 1.4499
 _WAIT_TICK_MS = 50
 
 
@@ -82,6 +82,16 @@ class OverlayWindow:
         self._seg_cleanup_stream: float = 0.0
         self._batch_ttfb_ms: float = 0.0
         self._cleanup_ttfb_ms: float = 0.0
+        self._d_upload: float = 0.0
+        self._d_batch_ttfb: float = 0.0
+        self._d_batch_stream: float = 0.0
+        self._d_cleanup_ttfb: float = 0.0
+        self._d_cleanup_stream: float = 0.0
+        self._pl_start_us: int = 0
+        self._pl_upload_done_us: int = 0
+        self._pl_batch_first_us: int = 0
+        self._pl_batch_done_us: int = 0
+        self._pl_cleanup_first_us: int = 0
         self._wait_source: int | None = None
         self._wait_start_us: int = 0
         self._wait_from: float = 0.0
@@ -657,7 +667,7 @@ class OverlayWindow:
         self._pipeline_chars = 0
         if not self._pipeline_active:
             return
-        d_upload = _UPLOAD_MS + 0.3 * live_len
+        d_upload = _UPLOAD_MS + 0.05 * live_len
         d_batch_ttfb = _BATCH_TTFB_BASE_MS + _BATCH_TTFB_SLOPE_MS * live_len
         d_batch_stream = _BATCH_STREAM_MS_PER_CHAR * live_len
         d_cleanup_ttfb = _CLEANUP_TTFB_MS
@@ -674,14 +684,42 @@ class OverlayWindow:
         )
         self._batch_ttfb_ms = d_batch_ttfb
         self._cleanup_ttfb_ms = d_cleanup_ttfb
+        self._d_upload = d_upload
+        self._d_batch_ttfb = d_batch_ttfb
+        self._d_batch_stream = d_batch_stream
+        self._d_cleanup_ttfb = d_cleanup_ttfb
+        self._d_cleanup_stream = d_cleanup_stream
+        self._pl_start_us = GLib.get_monotonic_time()
+        self._pl_upload_done_us = 0
+        self._pl_batch_first_us = 0
+        self._pl_batch_done_us = 0
+        self._pl_cleanup_first_us = 0
         logger.debug(
-            "start_pipeline: live_len=%d segs=[%.2f %.2f %.2f %.2f %.2f]",
+            "pipeline_progress: start live_len=%d "
+            "predicted_ms=[upload=%.0f batch_ttfb=%.0f batch_stream=%.0f "
+            "cleanup_ttfb=%.0f cleanup_stream=%.0f total=%.0f] "
+            "segs=[%.3f %.3f %.3f %.3f %.3f] "
+            "constants=[bl_ratio=%.4f cb_ratio=%.4f bt_base=%.1f bt_slope=%.4f "
+            "bs_rate=%.4f ct_flat=%.1f cs_rate=%.4f]",
             live_len,
+            d_upload,
+            d_batch_ttfb,
+            d_batch_stream,
+            d_cleanup_ttfb,
+            d_cleanup_stream,
+            total,
             self._seg_upload,
             self._seg_batch_wait,
             self._seg_batch_stream,
             self._seg_cleanup_wait,
             self._seg_cleanup_stream,
+            _BATCH_LIVE_RATIO,
+            _CLEANUP_BATCH_RATIO,
+            _BATCH_TTFB_BASE_MS,
+            _BATCH_TTFB_SLOPE_MS,
+            _BATCH_STREAM_MS_PER_CHAR,
+            _CLEANUP_TTFB_MS,
+            _CLEANUP_STREAM_MS_PER_CHAR,
         )
         self._upload_bar.set_fraction(0)
         self._upload_bar.set_visible(True)
@@ -694,6 +732,15 @@ class OverlayWindow:
             frac = min(fraction, 1.0) * self._seg_upload
             self._upload_bar.set_fraction(frac)
             if fraction >= 1.0:
+                now = GLib.get_monotonic_time()
+                self._pl_upload_done_us = now
+                actual_ms = (now - self._pl_start_us) / 1000
+                logger.debug(
+                    "pipeline_progress: upload_done "
+                    "actual_ms=%.0f predicted_ms=%.0f",
+                    actual_ms,
+                    self._d_upload,
+                )
                 self._upload_bar.add_css_class("phase-batch")
                 self._start_wait(
                     self._seg_upload, self._seg_batch_wait, self._batch_ttfb_ms
@@ -708,6 +755,20 @@ class OverlayWindow:
             return
         self._stop_wait()
         self._upload_bar.set_fraction(self._seg_batch_stream)
+        now = GLib.get_monotonic_time()
+        self._pl_batch_done_us = now
+        ref = self._pl_batch_first_us or self._pl_start_us
+        actual_ms = (now - ref) / 1000
+        logger.debug(
+            "pipeline_progress: batch_done "
+            "actual_stream_ms=%.0f predicted_stream_ms=%.0f "
+            "chars=%d predicted_chars=%.0f batch_len=%d",
+            actual_ms,
+            self._d_batch_stream,
+            self._pipeline_chars,
+            self._pipeline_predicted,
+            batch_len,
+        )
         self._pipeline_batch_predicted = (
             batch_len * _CLEANUP_BATCH_RATIO if batch_len >= _MIN_LIVE_LEN else 0.0
         )
@@ -744,6 +805,26 @@ class OverlayWindow:
             return
         self._stop_wait()
         self._upload_bar.set_fraction(1.0)
+        now = GLib.get_monotonic_time()
+        ref = self._pl_cleanup_first_us or self._pl_start_us
+        actual_stream_ms = (now - ref) / 1000
+        total_ms = (now - self._pl_start_us) / 1000
+        logger.debug(
+            "pipeline_progress: done "
+            "cleanup_stream_ms=%.0f predicted_cleanup_stream_ms=%.0f "
+            "cleanup_chars=%d predicted_cleanup_chars=%.0f "
+            "total_ms=%.0f predicted_total_ms=%.0f",
+            actual_stream_ms,
+            self._d_cleanup_stream,
+            self._pipeline_chars,
+            self._pipeline_batch_predicted,
+            total_ms,
+            self._d_upload
+            + self._d_batch_ttfb
+            + self._d_batch_stream
+            + self._d_cleanup_ttfb
+            + self._d_cleanup_stream,
+        )
 
     def hide_upload_progress(self) -> None:
         if self._destroyed:
@@ -764,6 +845,16 @@ class OverlayWindow:
         self._stop_wait()
         self._pipeline_chars = 0
         self._upload_bar.set_fraction(self._seg_batch_wait)
+        now = GLib.get_monotonic_time()
+        self._pl_batch_first_us = now
+        ref = self._pl_upload_done_us or self._pl_start_us
+        actual_ms = (now - ref) / 1000
+        logger.debug(
+            "pipeline_progress: batch_first_delta "
+            "actual_ttfb_ms=%.0f predicted_ttfb_ms=%.0f",
+            actual_ms,
+            self._d_batch_ttfb,
+        )
 
     def _snap_to_cleanup_stream(self) -> None:
         """First cleanup delta — end the TTFB wait, start char tracking."""
@@ -772,6 +863,16 @@ class OverlayWindow:
         self._stop_wait()
         self._pipeline_chars = 0
         self._upload_bar.set_fraction(self._seg_cleanup_wait)
+        now = GLib.get_monotonic_time()
+        self._pl_cleanup_first_us = now
+        ref = self._pl_batch_done_us or self._pl_start_us
+        actual_ms = (now - ref) / 1000
+        logger.debug(
+            "pipeline_progress: cleanup_first_delta "
+            "actual_ttfb_ms=%.0f predicted_ttfb_ms=%.0f",
+            actual_ms,
+            self._d_cleanup_ttfb,
+        )
 
     def _start_wait(self, from_frac: float, to_frac: float, expected_ms: int) -> None:
         self._stop_wait()

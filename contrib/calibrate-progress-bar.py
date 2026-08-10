@@ -14,12 +14,18 @@ replace the existing values.  Re-run after extended usage to recalibrate.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import statistics
 import sys
 
 STATE_DIR = os.path.expanduser("~/.local/state/voxize")
+
+
+def _read(path: str) -> str:
+    with open(path) as f:
+        return f.read()
 
 
 def main() -> None:
@@ -37,8 +43,7 @@ def main() -> None:
         if not os.path.exists(debug) or not os.path.exists(live_f):
             continue
 
-        live_text = open(live_f).read()
-        live_len = len(live_text)
+        live_len = len(_read(live_f))
         if live_len < 50:
             continue
 
@@ -47,8 +52,8 @@ def main() -> None:
         if not os.path.exists(batch_txt) or not os.path.exists(clean_txt):
             continue
 
-        batch_len = len(open(batch_txt).read())
-        clean_len = len(open(clean_txt).read())
+        batch_len = len(_read(batch_txt))
+        clean_len = len(_read(clean_txt))
         if not batch_len or not clean_len:
             continue
 
@@ -74,7 +79,6 @@ def main() -> None:
         cleanup_log = os.path.join(path, "cleanup_events.jsonl")
         if os.path.exists(cleanup_log):
             try:
-                import json
                 with open(cleanup_log) as f:
                     first = json.loads(f.readline())
                 cleanup_model = first.get("model", "")
@@ -98,17 +102,20 @@ def main() -> None:
         )
 
     if len(sessions) < 20:
-        print(f"Only {len(sessions)} complete sessions found — need at least 20.", file=sys.stderr)
+        print(
+            f"Only {len(sessions)} complete sessions found -- need at least 20.",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     print(f"Sessions analysed: {len(sessions)}\n")
 
-    # ── Character ratio models ──
+    # -- Character ratio models --
     bl_ratios = [s["batch_len"] / s["live_len"] for s in sessions]
     batch_live_ratio = statistics.median(bl_ratios)
     print(f"_BATCH_LIVE_RATIO    = {batch_live_ratio:.4f}  (median batch/live chars)")
 
-    # Filter to the most recent cleanup model — different models trim
+    # Filter to the most recent cleanup model -- different models trim
     # different amounts (Luna removes ~8.5% more than Nano did).
     # Use the last session's model rather than the most frequent, since
     # we want the model that will be used going forward.
@@ -127,77 +134,98 @@ def main() -> None:
     )
     print()
 
-    # ── Linear regression helper ──
+    # -- Linear regression helper --
     def linreg(x, y):
         n = len(x)
         x_mean = sum(x) / n
         y_mean = sum(y) / n
-        ss_xy = sum((xi - x_mean) * (yi - y_mean) for xi, yi in zip(x, y))
+        ss_xy = sum(
+            (xi - x_mean) * (yi - y_mean) for xi, yi in zip(x, y, strict=True)
+        )
         ss_xx = sum((xi - x_mean) ** 2 for xi in x)
         slope = ss_xy / ss_xx if ss_xx else 0
         intercept = y_mean - slope * x_mean
         ss_tot = sum((yi - y_mean) ** 2 for yi in y)
-        ss_res = sum((yi - (intercept + slope * xi)) ** 2 for xi, yi in zip(x, y))
+        ss_res = sum(
+            (yi - (intercept + slope * xi)) ** 2
+            for xi, yi in zip(x, y, strict=True)
+        )
         r2 = 1 - ss_res / ss_tot if ss_tot else 0
         return intercept, slope, r2
 
-    # ── Duration models — use only sessions with the current cleanup model,
-    # since model changes affect latency characteristics. ──
+    # -- Duration models -- use only sessions with the current cleanup model,
+    # since model changes affect latency characteristics.
     tsessions = model_sessions
 
-    # ── Batch TTFB model: intercept + slope × live_len ──
+    # -- Batch TTFB model: intercept + slope * live_len --
     x = [s["live_len"] for s in tsessions]
     y = [s["batch_ttfb"] for s in tsessions]
     bt_intercept, bt_slope, bt_r2 = linreg(x, y)
 
     print(f"_BATCH_TTFB_BASE_MS  = {bt_intercept:.1f}")
-    print(f"_BATCH_TTFB_SLOPE_MS = {bt_slope:.4f}  (R²={bt_r2:.2f})")
+    print(f"_BATCH_TTFB_SLOPE_MS = {bt_slope:.4f}  (R2={bt_r2:.2f})")
     print()
 
-    # ── Batch streaming: ms per char ──
-    bs_rates = [s["batch_stream"] / s["live_len"] for s in tsessions if s["live_len"] > 0]
+    # -- Batch streaming: ms per char --
+    bs_rates = [
+        s["batch_stream"] / s["live_len"] for s in tsessions if s["live_len"] > 0
+    ]
     bs_median = statistics.median(bs_rates)
     print(f"_BATCH_STREAM_MS_PER_CHAR = {bs_median:.4f}  (median ms/char of live_len)")
     print()
 
-    # ── Cleanup TTFB model ──
+    # -- Cleanup TTFB model --
     y = [s["cleanup_ttfb"] for s in tsessions]
     ct_intercept, ct_slope, ct_r2 = linreg(x, y)
     ct_median = statistics.median(y)
 
     if ct_r2 < 0.1:
-        print(f"_CLEANUP_TTFB_MS = {ct_median:.1f}  (flat, R²={ct_r2:.2f})")
+        print(f"_CLEANUP_TTFB_MS = {ct_median:.1f}  (flat, R2={ct_r2:.2f})")
     else:
         print(f"_CLEANUP_TTFB_BASE_MS  = {ct_intercept:.1f}")
-        print(f"_CLEANUP_TTFB_SLOPE_MS = {ct_slope:.4f}  (R²={ct_r2:.2f})")
+        print(f"_CLEANUP_TTFB_SLOPE_MS = {ct_slope:.4f}  (R2={ct_r2:.2f})")
     print()
 
-    # ── Cleanup streaming: ms per char ──
-    cs_rates = [s["cleanup_stream"] / s["live_len"] for s in tsessions if s["live_len"] > 0]
+    # -- Cleanup streaming: ms per char --
+    # Use mean, not median -- the distribution is right-skewed and under-
+    # predicting cleanup makes the bar stall at the end.
+    cs_rates = [
+        s["cleanup_stream"] / s["live_len"] for s in tsessions if s["live_len"] > 0
+    ]
+    cs_mean = statistics.mean(cs_rates)
     cs_median = statistics.median(cs_rates)
-    print(f"_CLEANUP_STREAM_MS_PER_CHAR = {cs_median:.4f}  (median ms/char of live_len)")
+    print(
+        f"_CLEANUP_STREAM_MS_PER_CHAR = {cs_mean:.4f}"
+        f"  (mean ms/char of live_len; median={cs_median:.4f})"
+    )
     print()
 
-    # ── Upload estimate ──
-    print(f"_UPLOAD_MS = 500.0  (fixed base; upload is byte-tracked, this sets the weight)")
+    # -- Upload estimate --
+    # OGG uploads are fast (~50-150ms). The _ProgressReader already tracks
+    # exact byte progress; this constant only sets the segment weight.
+    print("_UPLOAD_MS = 50.0  (OGG uploads are fast; byte progress is tracked exactly)")
     print()
 
-    # ── Summary table ──
-    print("─" * 60)
+    # -- Summary table --
+    print("-" * 60)
     print("Segment weight examples (% of bar for a given live_len):\n")
-    print(f"{'live_len':>8} | {'upload':>7} | {'b_ttfb':>7} | {'b_strm':>7} | {'c_ttfb':>7} | {'c_strm':>7}")
+    print(
+        f"{'live_len':>8} | {'upload':>7} | {'b_ttfb':>7} "
+        f"| {'b_strm':>7} | {'c_ttfb':>7} | {'c_strm':>7}"
+    )
     print("-" * 60)
 
     for ll in [100, 300, 500, 1000, 2000, 5000]:
-        d_upload = 500.0 + 0.3 * ll
+        d_upload = 50.0 + 0.05 * ll
         d_bt = bt_intercept + bt_slope * ll
         d_bs = bs_median * ll
         d_ct = ct_median
-        d_cs = cs_median * ll
+        d_cs = cs_mean * ll
         total = d_upload + d_bt + d_bs + d_ct + d_cs
         print(
-            f"{ll:>8} | {d_upload/total*100:>6.1f}% | {d_bt/total*100:>6.1f}% "
-            f"| {d_bs/total*100:>6.1f}% | {d_ct/total*100:>6.1f}% | {d_cs/total*100:>6.1f}%"
+            f"{ll:>8} | {d_upload / total * 100:>6.1f}% | {d_bt / total * 100:>6.1f}% "
+            f"| {d_bs / total * 100:>6.1f}% | {d_ct / total * 100:>6.1f}% "
+            f"| {d_cs / total * 100:>6.1f}%"
         )
 
 

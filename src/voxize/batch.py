@@ -160,11 +160,13 @@ class BatchTranscription:
         def _log_event(event) -> None:
             if log_file:
                 try:
-                    log_file.write(
-                        event.model_dump_json()
-                        if hasattr(event, "model_dump_json")
-                        else json.dumps(event)
-                    )
+                    if hasattr(event, "model_dump_json"):
+                        line = event.model_dump_json()
+                    else:
+                        line = json.dumps(event)
+                    if line.startswith("{"):
+                        line = f'{{"ts":{time.monotonic():.6f},{line[1:]}'
+                    log_file.write(line)
                     log_file.write("\n")
                     log_file.flush()
                 except Exception:
