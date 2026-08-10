@@ -23,10 +23,19 @@ from voxize.state import State, StateMachine  # noqa: E402
 _VU_ZONE_CLASSES = ("vu-low", "vu-good", "vu-hot", "vu-clip")
 _PHASE_CLASSES = ("phase-batch", "phase-cleanup")
 
-_BATCH_LIVE_RATIO = 0.9836
-_CLEANUP_BATCH_RATIO = 0.9202
-_PROGRESS_CAP = 0.95
+_BATCH_LIVE_RATIO = 0.9842
+_CLEANUP_BATCH_RATIO = 0.9167
 _MIN_LIVE_LEN = 50
+
+# Duration models for dynamic segment weights (gpt-5.6-luna era, n=228).
+# Recalibrate with: python contrib/calibrate-progress-bar.py
+_UPLOAD_MS = 500.0
+_BATCH_TTFB_BASE_MS = 1218.0
+_BATCH_TTFB_SLOPE_MS = 1.3164
+_BATCH_STREAM_MS_PER_CHAR = 1.1337
+_CLEANUP_TTFB_MS = 1255.5
+_CLEANUP_STREAM_MS_PER_CHAR = 1.1497
+_WAIT_TICK_MS = 50
 
 
 def _dbfs_to_fraction(dbfs: float) -> float:
@@ -62,8 +71,22 @@ class OverlayWindow:
         self._had_first_text = False
         self._meter_source: int | None = None
         self._level_meter = None  # set via set_level_meter()
-        self._phase_predicted: float = 0.0
-        self._phase_chars: int = 0
+        self._pipeline_active = False
+        self._pipeline_predicted: float = 0.0
+        self._pipeline_chars: int = 0
+        self._pipeline_batch_predicted: float = 0.0
+        self._seg_upload: float = 0.0
+        self._seg_batch_wait: float = 0.0
+        self._seg_batch_stream: float = 0.0
+        self._seg_cleanup_wait: float = 0.0
+        self._seg_cleanup_stream: float = 0.0
+        self._batch_ttfb_ms: float = 0.0
+        self._cleanup_ttfb_ms: float = 0.0
+        self._wait_source: int | None = None
+        self._wait_start_us: int = 0
+        self._wait_from: float = 0.0
+        self._wait_to: float = 0.0
+        self._wait_ms: int = 0
         self._autoclose_total = autoclose_seconds
         self._autoclose_remaining = 0
         self._autoclose_source: int | None = None
@@ -351,12 +374,14 @@ class OverlayWindow:
             self._awaiting_batch = False
             self._stop_text_pulse()
             self.clear_text()
+            self._snap_to_batch_stream()
         if self._awaiting_cleanup and self._machine.state == State.CLEANING:
             # First cleanup token — swap out the pulsing transcript
             logger.debug("append_text: first cleanup token, swapping transcript")
             self._awaiting_cleanup = False
             self._stop_text_pulse()
             self.clear_text()
+            self._snap_to_cleanup_stream()
         self._overlay.set_visible(True)
         buf = self._text_view.get_buffer()
         buf.insert(buf.get_end_iter(), text)
@@ -616,78 +641,158 @@ class OverlayWindow:
         self._meter_bar.add_css_class(zone)
         return True
 
-    # ── Upload progress ──
+    # ── Pipeline progress (upload → batch → cleanup) ──
 
-    def set_upload_progress(self, fraction: float) -> None:
+    def start_pipeline(self, live_len: int) -> None:
+        """Arm the unified progress bar for the full post-recording pipeline."""
         if self._destroyed:
             return
+        self._pipeline_active = live_len >= _MIN_LIVE_LEN
+        self._pipeline_predicted = (
+            live_len * _BATCH_LIVE_RATIO if self._pipeline_active else 0.0
+        )
+        self._pipeline_batch_predicted = 0.0
+        self._pipeline_chars = 0
+        if not self._pipeline_active:
+            return
+        d_upload = _UPLOAD_MS + 0.3 * live_len
+        d_batch_ttfb = _BATCH_TTFB_BASE_MS + _BATCH_TTFB_SLOPE_MS * live_len
+        d_batch_stream = _BATCH_STREAM_MS_PER_CHAR * live_len
+        d_cleanup_ttfb = _CLEANUP_TTFB_MS
+        d_cleanup_stream = _CLEANUP_STREAM_MS_PER_CHAR * live_len
+        total = (
+            d_upload + d_batch_ttfb + d_batch_stream + d_cleanup_ttfb + d_cleanup_stream
+        )
+        self._seg_upload = d_upload / total
+        self._seg_batch_wait = self._seg_upload + d_batch_ttfb / total
+        self._seg_batch_stream = self._seg_batch_wait + d_batch_stream / total
+        self._seg_cleanup_wait = self._seg_batch_stream + d_cleanup_ttfb / total
+        self._seg_cleanup_stream = min(
+            self._seg_cleanup_wait + d_cleanup_stream / total, 0.95
+        )
+        self._batch_ttfb_ms = d_batch_ttfb
+        self._cleanup_ttfb_ms = d_cleanup_ttfb
+        logger.debug(
+            "start_pipeline: live_len=%d segs=[%.2f %.2f %.2f %.2f %.2f]",
+            live_len,
+            self._seg_upload,
+            self._seg_batch_wait,
+            self._seg_batch_stream,
+            self._seg_cleanup_wait,
+            self._seg_cleanup_stream,
+        )
+        self._upload_bar.set_fraction(0)
         self._upload_bar.set_visible(True)
-        self._upload_bar.set_fraction(min(1.0, fraction))
+
+    def set_upload_progress(self, fraction: float) -> None:
+        """Upload byte progress [0, 1] → mapped to [0, seg_upload] of pipeline."""
+        if self._destroyed:
+            return
+        if self._pipeline_active:
+            frac = min(fraction, 1.0) * self._seg_upload
+            self._upload_bar.set_fraction(frac)
+            if fraction >= 1.0:
+                self._upload_bar.add_css_class("phase-batch")
+                self._start_wait(
+                    self._seg_upload, self._seg_batch_wait, self._batch_ttfb_ms
+                )
+        else:
+            self._upload_bar.set_visible(True)
+            self._upload_bar.set_fraction(min(1.0, fraction))
+
+    def on_batch_complete(self, batch_len: int) -> None:
+        """Batch done — snap to segment boundary, arm cleanup, start wait."""
+        if self._destroyed or not self._pipeline_active:
+            return
+        self._stop_wait()
+        self._upload_bar.set_fraction(self._seg_batch_stream)
+        self._pipeline_batch_predicted = (
+            batch_len * _CLEANUP_BATCH_RATIO if batch_len >= _MIN_LIVE_LEN else 0.0
+        )
+        self._pipeline_chars = 0
+        self._upload_bar.remove_css_class("phase-batch")
+        self._upload_bar.add_css_class("phase-cleanup")
+        if self._pipeline_batch_predicted > 0:
+            self._start_wait(
+                self._seg_batch_stream, self._seg_cleanup_wait, self._cleanup_ttfb_ms
+            )
+
+    def on_pipeline_delta(self, text: str) -> None:
+        """Update pipeline progress with a streaming delta (batch or cleanup)."""
+        if self._destroyed or not self._pipeline_active:
+            return
+        self._pipeline_chars += len(text)
+        state = self._machine.state
+        if state == State.TRANSCRIBING and self._pipeline_predicted > 0:
+            t = min(self._pipeline_chars / self._pipeline_predicted, 1.0)
+            seg_start = self._seg_batch_wait
+            seg_end = self._seg_batch_stream
+        elif state == State.CLEANING and self._pipeline_batch_predicted > 0:
+            t = min(self._pipeline_chars / self._pipeline_batch_predicted, 1.0)
+            seg_start = self._seg_cleanup_wait
+            seg_end = self._seg_cleanup_stream
+        else:
+            return
+        frac = seg_start + t * (seg_end - seg_start)
+        self._upload_bar.set_fraction(min(frac, seg_end))
+
+    def finish_pipeline(self) -> None:
+        """Snap to 100%."""
+        if self._destroyed or not self._pipeline_active:
+            return
+        self._stop_wait()
+        self._upload_bar.set_fraction(1.0)
 
     def hide_upload_progress(self) -> None:
         if self._destroyed:
             return
+        self._stop_wait()
+        self._pipeline_active = False
         self._upload_bar.set_visible(False)
         self._upload_bar.set_fraction(0)
         for cls in _PHASE_CLASSES:
             self._upload_bar.remove_css_class(cls)
 
-    # ── Phase progress (batch / cleanup) ──
+    # ── Wait animation (TTFB gaps) ──
 
-    def start_batch_progress(self, live_len: int) -> None:
-        """Begin batch progress tracking. ``live_len`` is the live preview char count."""
-        if self._destroyed:
+    def _snap_to_batch_stream(self) -> None:
+        """First batch delta — end the TTFB wait, start char tracking."""
+        if not self._pipeline_active:
             return
-        self._phase_predicted = (
-            live_len * _BATCH_LIVE_RATIO if live_len >= _MIN_LIVE_LEN else 0.0
-        )
-        self._phase_chars = 0
-        if self._phase_predicted <= 0:
-            return
-        logger.debug(
-            "start_batch_progress: live_len=%d predicted=%.0f",
-            live_len,
-            self._phase_predicted,
-        )
-        self._upload_bar.add_css_class("phase-batch")
-        self._upload_bar.set_fraction(0)
-        self._upload_bar.set_visible(True)
+        self._stop_wait()
+        self._pipeline_chars = 0
+        self._upload_bar.set_fraction(self._seg_batch_wait)
 
-    def start_cleanup_progress(self, batch_len: int) -> None:
-        """Begin cleanup progress tracking. ``batch_len`` is the batch transcript char count."""
-        if self._destroyed:
+    def _snap_to_cleanup_stream(self) -> None:
+        """First cleanup delta — end the TTFB wait, start char tracking."""
+        if not self._pipeline_active:
             return
-        self._phase_predicted = (
-            batch_len * _CLEANUP_BATCH_RATIO if batch_len >= _MIN_LIVE_LEN else 0.0
-        )
-        self._phase_chars = 0
-        if self._phase_predicted <= 0:
-            return
-        logger.debug(
-            "start_cleanup_progress: batch_len=%d predicted=%.0f",
-            batch_len,
-            self._phase_predicted,
-        )
-        self._upload_bar.remove_css_class("phase-batch")
-        self._upload_bar.add_css_class("phase-cleanup")
-        self._upload_bar.set_fraction(0)
-        self._upload_bar.set_visible(True)
+        self._stop_wait()
+        self._pipeline_chars = 0
+        self._upload_bar.set_fraction(self._seg_cleanup_wait)
 
-    def on_phase_delta(self, text: str) -> None:
-        """Update phase progress bar with a streaming delta."""
-        if self._destroyed or self._phase_predicted <= 0:
-            return
-        self._phase_chars += len(text)
-        frac = min(self._phase_chars / self._phase_predicted, _PROGRESS_CAP)
+    def _start_wait(self, from_frac: float, to_frac: float, expected_ms: int) -> None:
+        self._stop_wait()
+        self._wait_from = from_frac
+        self._wait_to = to_frac
+        self._wait_ms = expected_ms
+        self._wait_start_us = GLib.get_monotonic_time()
+        self._wait_source = GLib.timeout_add(_WAIT_TICK_MS, self._tick_wait)
+
+    def _stop_wait(self) -> None:
+        if self._wait_source is not None:
+            GLib.source_remove(self._wait_source)
+            self._wait_source = None
+
+    def _tick_wait(self) -> bool:
+        elapsed_ms = (GLib.get_monotonic_time() - self._wait_start_us) / 1000
+        t = min(elapsed_ms / self._wait_ms, 1.0)
+        frac = self._wait_from + t * (self._wait_to - self._wait_from)
         self._upload_bar.set_fraction(frac)
-
-    def finish_phase_progress(self) -> None:
-        """Snap the current phase to 100%."""
-        if self._destroyed or self._phase_predicted <= 0:
-            return
-        self._upload_bar.set_fraction(1.0)
-        self._phase_predicted = 0.0
-        self._phase_chars = 0
+        if t >= 1.0:
+            self._wait_source = None
+            return False
+        return True
 
     # ── Session directory ──
 
@@ -856,4 +961,5 @@ class OverlayWindow:
         self._stop_pulse()
         self._stop_text_pulse()
         self._stop_meter()
+        self._stop_wait()
         self._stop_autoclose_countdown()

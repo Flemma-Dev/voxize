@@ -983,10 +983,10 @@ class VoxizeApp(Gtk.Application):
         return False
 
     def _set_live_len(self, live_len: int) -> bool:
-        """GTK thread: arm the batch progress bar with the live preview length."""
+        """GTK thread: arm the pipeline progress bar."""
         logger.debug("_set_live_len: live_len=%d", live_len)
         self._live_len = live_len
-        self._ui.start_batch_progress(live_len)
+        self._ui.start_pipeline(live_len)
         return False
 
     def _start_batch(self, session_dir: str, opus_path: str | None = None) -> bool:
@@ -1022,14 +1022,14 @@ class VoxizeApp(Gtk.Application):
 
     def _on_batch_delta(self, text: str) -> None:
         self._ui.append_text(text)
-        self._ui.on_phase_delta(text)
+        self._ui.on_pipeline_delta(text)
 
     def _on_batch_done(self, transcript: str) -> None:
         """Batch transcription complete — save, clipboard, start cleanup."""
         logger.debug("_on_batch_done: transcript_len=%d", len(transcript))
         self._batch_usage = self._batch.usage if self._batch else None
         self._batch = None
-        self._ui.finish_phase_progress()
+        self._ui.on_batch_complete(len(transcript))
 
         # Guard against stale callback
         if not self._machine or self._machine.state != State.TRANSCRIBING:
@@ -1088,7 +1088,6 @@ class VoxizeApp(Gtk.Application):
 
         # Show the batch transcript pulsing and arm the cleanup swap
         self._ui.show_transcript_for_cleanup(transcript)
-        self._ui.start_cleanup_progress(len(transcript))
 
         if _MOCK:
             self._cleanup = MockCleanup()
@@ -1111,13 +1110,13 @@ class VoxizeApp(Gtk.Application):
 
     def _on_cleanup_delta(self, text: str) -> None:
         self._ui.append_text(text)
-        self._ui.on_phase_delta(text)
+        self._ui.on_pipeline_delta(text)
 
     def _on_cleanup_done(self, cleaned: str) -> None:
         logger.debug("_on_cleanup_done: cleaned_len=%d", len(cleaned))
         self._cleanup_usage = self._cleanup.usage if self._cleanup else None
         self._cleanup = None
-        self._ui.finish_phase_progress()
+        self._ui.finish_pipeline()
         if self._machine and self._machine.state == State.CLEANING:
             # Save cleaned text and copy to clipboard (overwrites batch transcript)
             if cleaned and self._session_dir:
