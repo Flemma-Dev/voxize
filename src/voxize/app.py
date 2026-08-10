@@ -488,7 +488,7 @@ class VoxizeApp(Gtk.Application):
                 return
             self._transcription = transcription
             transcription.start(
-                on_delta=self._ui.append_text,
+                on_delta=self._on_live_delta,
                 on_error=self._on_ws_error,
                 on_ready=self._on_ws_ready,
                 on_speech=self._ui.on_speech,
@@ -507,6 +507,18 @@ class VoxizeApp(Gtk.Application):
         if self._machine and self._machine.state == State.RECORDING:
             self._start_warmup()
         return False
+
+    def _on_live_delta(self, text: str) -> None:
+        """Gate live-preview deltas — drop if we've left RECORDING.
+
+        The WS receive loop can deliver deltas via GLib.idle_add for up to
+        ~55ms after the TRANSCRIBING transition (until transcription.stop()
+        cancels it). Without this gate, a stale WS delta would trigger the
+        _awaiting_batch swap in append_text, clearing the text area and
+        consuming the swap before the real batch delta arrives.
+        """
+        if self._machine and self._machine.state == State.RECORDING:
+            self._ui.append_text(text)
 
     def _on_ws_ready(self) -> None:
         """WS session configured — just bookkeeping, not a state gate."""
