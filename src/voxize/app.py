@@ -993,6 +993,7 @@ class VoxizeApp(Gtk.Application):
             on_delta=self._ui.append_text,
             on_complete=self._on_batch_done,
             on_error=self._on_batch_error,
+            on_upload_progress=self._ui.set_upload_progress,
         )
         return False  # one-shot idle
 

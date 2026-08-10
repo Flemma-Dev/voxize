@@ -1,8 +1,8 @@
 """Batch transcription via OpenAI Audio API.
 
-Sends a WAV file to POST /audio/transcriptions with streaming. Runs a
-synchronous OpenAI SDK call in a daemon thread. Delta text is posted to
-the GTK main thread via GLib.idle_add.
+Sends an audio file to POST /audio/transcriptions with streaming. Runs
+a synchronous OpenAI SDK call in a daemon thread. Delta text is posted
+to the GTK main thread via GLib.idle_add.
 
 Lifecycle:
     b = BatchTranscription(client, prompts=..., session_dir=...)
@@ -12,6 +12,7 @@ Lifecycle:
 
 from __future__ import annotations
 
+import io
 import json
 import logging
 import os
@@ -32,6 +33,35 @@ logger = logging.getLogger(__name__)
 
 _MODEL = "gpt-transcribe"
 _WAV_BYTE_RATE = SAMPLE_RATE * CHANNELS * 2
+
+
+class _ProgressReader(io.RawIOBase):
+    """Wraps a file object to report read progress via a callback."""
+
+    def __init__(
+        self,
+        fp: io.RawIOBase,
+        total: int,
+        on_progress: Callable[[float], None],
+    ) -> None:
+        self._fp = fp
+        self._total = total
+        self._read = 0
+        self._on_progress = on_progress
+
+    def readinto(self, b):
+        n = self._fp.readinto(b)
+        if n and n > 0:
+            self._read += n
+            self._on_progress(self._read / self._total if self._total else 1.0)
+        return n
+
+    def readable(self):
+        return True
+
+    @property
+    def name(self):
+        return self._fp.name
 
 
 class BatchTranscription:
@@ -72,20 +102,22 @@ class BatchTranscription:
         on_delta: Callable[[str], None],
         on_complete: Callable[[str], None],
         on_error: Callable[[str], None] | None = None,
+        on_upload_progress: Callable[[float], None] | None = None,
     ) -> None:
         """Start batch transcription in a background thread.
 
         Args:
-            wav_path: Path to the WAV file to transcribe.
+            wav_path: Path to the audio file to transcribe.
             on_delta: Called on GTK thread with each streaming text chunk.
             on_complete: Called on GTK thread with the full transcript.
             on_error: Called on GTK thread with error message on failure.
+            on_upload_progress: Called on GTK thread with fraction [0, 1].
         """
         logger.debug("start: wav_path=%s", wav_path)
         self._cancelled = False
         self._thread = threading.Thread(
             target=self._run,
-            args=(wav_path, on_delta, on_complete, on_error),
+            args=(wav_path, on_delta, on_complete, on_error, on_upload_progress),
             daemon=True,
             name="voxize-batch",
         )
@@ -112,6 +144,7 @@ class BatchTranscription:
         on_delta: Callable[[str], None],
         on_complete: Callable[[str], None],
         on_error: Callable[[str], None] | None,
+        on_upload_progress: Callable[[float], None] | None = None,
     ) -> None:
         from gi.repository import GLib
 
@@ -138,6 +171,7 @@ class BatchTranscription:
                     pass
 
         accumulated: list[str] = []
+        raw_file = None
         wav_file = None
         t_call = 0.0
         t_first_delta = 0.0
@@ -167,7 +201,15 @@ class BatchTranscription:
                 }
             )
 
-            wav_file = open(wav_path, "rb")  # noqa: SIM115 — closed in finally
+            raw_file = open(wav_path, "rb")  # noqa: SIM115 — closed in finally
+            if on_upload_progress:
+                wav_file = _ProgressReader(
+                    raw_file,
+                    file_size,
+                    lambda frac: GLib.idle_add(on_upload_progress, frac),
+                )
+            else:
+                wav_file = raw_file
             t_call = time.monotonic()
             extra = {"prompt": prompt} if prompt else {}
             # `with` ensures stream.close() fires before we hand off to the
@@ -259,5 +301,7 @@ class BatchTranscription:
         finally:
             if wav_file:
                 wav_file.close()
+            if raw_file and raw_file is not wav_file:
+                raw_file.close()
             if log_file:
                 log_file.close()

@@ -12,6 +12,7 @@ window {
     --vox-red:        #ef4444;
     --vox-amber:      #f59e0b;
     --vox-green:      #22c55e;
+    --vox-cyan:       #06b6d4;
 
     /* Override libadwaita's destructive palette with our muted red */
     --destructive-bg-color: rgba(239, 68, 68, 0.25);
@@ -77,6 +78,16 @@ progressbar.vu-meter.osd.horizontal > trough > progress {
 progressbar.vu-meter.vu-good { --accent-bg-color: var(--vox-green); }
 progressbar.vu-meter.vu-hot  { --accent-bg-color: var(--vox-amber); }
 progressbar.vu-meter.vu-clip { --accent-bg-color: var(--vox-red); }
+
+/* Upload progress — same geometry as the VU meter, cyan */
+progressbar.upload-meter.osd {
+    --accent-bg-color: var(--vox-cyan);
+}
+
+progressbar.upload-meter.osd.horizontal > trough,
+progressbar.upload-meter.osd.horizontal > trough > progress {
+    min-height: 3px;
+}
 
 /* Fade overlay — CSS gradient replacing the former cairo DrawingArea */
 .fade-overlay {

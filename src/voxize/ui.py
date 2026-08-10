@@ -142,6 +142,13 @@ class OverlayWindow:
         self._meter_bar.set_visible(False)
         main.append(self._meter_bar)
 
+        # Upload progress — thin cyan bar, visible during TRANSCRIBING upload
+        self._upload_bar = Gtk.ProgressBar()
+        self._upload_bar.add_css_class("osd")
+        self._upload_bar.add_css_class("upload-meter")
+        self._upload_bar.set_visible(False)
+        main.append(self._upload_bar)
+
         # Spinner — shown while waiting for first text in a new phase
         self._spinner = Gtk.Spinner()
         self._spinner.set_halign(Gtk.Align.CENTER)
@@ -335,6 +342,7 @@ class OverlayWindow:
             logger.debug("append_text: first batch delta, swapping live preview")
             self._awaiting_batch = False
             self._stop_text_pulse()
+            self.hide_upload_progress()
             self.clear_text()
         if self._awaiting_cleanup and self._machine.state == State.CLEANING:
             # First cleanup token — swap out the pulsing transcript
@@ -597,6 +605,20 @@ class OverlayWindow:
                 self._meter_bar.remove_css_class(cls)
         self._meter_bar.add_css_class(zone)
         return True
+
+    # ── Upload progress ──
+
+    def set_upload_progress(self, fraction: float) -> None:
+        if self._destroyed:
+            return
+        self._upload_bar.set_visible(True)
+        self._upload_bar.set_fraction(min(1.0, fraction))
+
+    def hide_upload_progress(self) -> None:
+        if self._destroyed:
+            return
+        self._upload_bar.set_visible(False)
+        self._upload_bar.set_fraction(0)
 
     # ── Session directory ──
 
