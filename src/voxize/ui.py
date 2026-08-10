@@ -9,11 +9,12 @@ import gi
 
 logger = logging.getLogger(__name__)
 
+gi.require_version("Adw", "1")
 gi.require_version("Gdk", "4.0")
 gi.require_version("Gtk", "4.0")
 
 # gi.require_version() above is executable code; all subsequent imports trigger E402.
-from gi.repository import Gdk, Gio, GLib, Gtk, Pango  # noqa: E402
+from gi.repository import Adw, Gdk, Gio, GLib, Gtk, Pango  # noqa: E402
 
 from voxize import mode_switcher  # noqa: E402
 from voxize.prompt import PromptSource  # noqa: E402
@@ -128,9 +129,11 @@ class OverlayWindow:
         # Dim text area when window loses focus
         self._window.connect("notify::is-active", self._on_active_changed)
 
-        # Content area
+        # Content area — wrapped in a ToastOverlay for "Copied." feedback
+        self._toast_overlay = Adw.ToastOverlay()
         main = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-        self._window.set_child(main)
+        self._toast_overlay.set_child(main)
+        self._window.set_child(self._toast_overlay)
 
         # Level meter — thin OSD progress bar, visible only during RECORDING
         self._meter_bar = Gtk.ProgressBar()
@@ -619,18 +622,26 @@ class OverlayWindow:
             )
 
     def _on_copy(self, _btn: Gtk.Button) -> None:
+        self.copy_to_clipboard()
+
+    def copy_to_clipboard(self) -> bool:
+        """Copy the current text buffer to the clipboard. Returns True if text was copied."""
         buf = self._text_view.get_buffer()
         start, end = buf.get_bounds()
         text = buf.get_text(start, end, False)
-        if text:
-            logger.debug("_on_copy: text_len=%d", len(text))
-            display = Gdk.Display.get_default()
-            if display:
-                display.get_clipboard().set(text)
-            else:
-                logger.debug("_on_copy: no display available")
-        else:
-            logger.debug("_on_copy: no text to copy")
+        if not text:
+            logger.debug("copy_to_clipboard: no text to copy")
+            return False
+        logger.debug("copy_to_clipboard: text_len=%d", len(text))
+        display = Gdk.Display.get_default()
+        if not display:
+            logger.debug("copy_to_clipboard: no display available")
+            return False
+        display.get_clipboard().set(text)
+        toast = Adw.Toast(title="Copied.")
+        toast.set_timeout(2)
+        self._toast_overlay.add_toast(toast)
+        return True
 
     def _on_cancel(self, _btn: Gtk.Button) -> None:
         logger.debug("_on_cancel: state=%s", self._machine.state.name)
