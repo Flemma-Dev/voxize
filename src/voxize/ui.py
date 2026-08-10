@@ -276,22 +276,18 @@ class OverlayWindow:
         live_cost: float | None,
         batch_cost: float | None,
         cleanup_cost: float | None,
-        warmup_cost: float | None = None,
     ) -> None:
         """Show session costs in the context bar (plain text).
 
-        ``warmup_cost`` covers the keep-alive pings, which are real billable
-        cleanup-model calls now that they prime the prompt cache. Optional so
-        callers that don't track them (mock flows) keep working.
+        ``cleanup_cost`` includes warmup-ping spend (same model/pricing).
         """
         if self._destroyed:
             return
         logger.debug(
-            "show_session_costs: live=$%s batch=$%s cleanup=$%s pings=$%s",
+            "show_session_costs: live=$%s batch=$%s cleanup=$%s",
             f"{live_cost:.4f}" if live_cost is not None else "n/a",
             f"{batch_cost:.4f}" if batch_cost is not None else "n/a",
             f"{cleanup_cost:.4f}" if cleanup_cost is not None else "n/a",
-            f"{warmup_cost:.4f}" if warmup_cost is not None else "n/a",
         )
         parts = []
         total = 0.0
@@ -299,7 +295,6 @@ class OverlayWindow:
             ("Live", live_cost),
             ("Batch", batch_cost),
             ("Cleanup", cleanup_cost),
-            ("Pings", warmup_cost),
         ]:
             if cost is not None:
                 parts.append(f"{label} ${cost:.4f}")

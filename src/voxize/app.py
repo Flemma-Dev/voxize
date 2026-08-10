@@ -1237,19 +1237,23 @@ class VoxizeApp(Gtk.Application):
         )
         b_cost = self._batch_cost(self._batch_usage)
         c_cost = self._cleanup_cost(self._cleanup_usage)
-        # Pings hit the cleanup model, so they price identically — including
-        # the cached-input split, which is the point of firing them.
+        # Pings hit the cleanup model at identical pricing (including the
+        # cached-input split).  Fold into the cleanup bucket for display.
         w_cost = self._cleanup_cost(self._warmup_usage)
+        if c_cost is not None and w_cost is not None:
+            c_cost += w_cost
+        elif w_cost is not None:
+            c_cost = w_cost
         logger.debug(
-            "_show_session_costs: live=%s batch=%s cleanup=%s pings=%s",
+            "_show_session_costs: live=%s batch=%s cleanup=%s (incl. pings=%s)",
             f"{l_cost:.4f}" if l_cost is not None else "n/a",
             f"{b_cost:.4f}" if b_cost is not None else "n/a",
             f"{c_cost:.4f}" if c_cost is not None else "n/a",
             f"{w_cost:.4f}" if w_cost is not None else "n/a",
         )
 
-        if any(c is not None for c in (l_cost, b_cost, c_cost, w_cost)):
-            self._ui.show_session_costs(l_cost, b_cost, c_cost, w_cost)
+        if any(c is not None for c in (l_cost, b_cost, c_cost)):
+            self._ui.show_session_costs(l_cost, b_cost, c_cost)
 
     # ── Mode switching ──
 
