@@ -21,6 +21,12 @@ from voxize.prompt import PromptSource  # noqa: E402
 from voxize.state import State, StateMachine  # noqa: E402
 
 _VU_ZONE_CLASSES = ("vu-low", "vu-good", "vu-hot", "vu-clip")
+_PHASE_CLASSES = ("phase-batch", "phase-cleanup")
+
+_BATCH_LIVE_RATIO = 0.9836
+_CLEANUP_BATCH_RATIO = 0.9202
+_PROGRESS_CAP = 0.95
+_MIN_LIVE_LEN = 50
 
 
 def _dbfs_to_fraction(dbfs: float) -> float:
@@ -56,6 +62,8 @@ class OverlayWindow:
         self._had_first_text = False
         self._meter_source: int | None = None
         self._level_meter = None  # set via set_level_meter()
+        self._phase_predicted: float = 0.0
+        self._phase_chars: int = 0
         self._autoclose_total = autoclose_seconds
         self._autoclose_remaining = 0
         self._autoclose_source: int | None = None
@@ -342,7 +350,6 @@ class OverlayWindow:
             logger.debug("append_text: first batch delta, swapping live preview")
             self._awaiting_batch = False
             self._stop_text_pulse()
-            self.hide_upload_progress()
             self.clear_text()
         if self._awaiting_cleanup and self._machine.state == State.CLEANING:
             # First cleanup token — swap out the pulsing transcript
@@ -519,6 +526,7 @@ class OverlayWindow:
             # show_transcript_for_cleanup arms the swap and starts text pulse
 
         elif new == State.READY:
+            self.hide_upload_progress()
             self._status_label.set_text("Ready")
             self._timer_label.set_visible(False)
             self._copy_btn.set_visible(True)
@@ -531,6 +539,7 @@ class OverlayWindow:
                 self._start_autoclose_countdown()
 
         elif new == State.CANCELLED:
+            self.hide_upload_progress()
             self._stop_timer()
             # Defer window.close() — calling it synchronously from within
             # machine.transition() nests window destruction inside the
@@ -539,6 +548,7 @@ class OverlayWindow:
             GLib.idle_add(self._window.close)
 
         elif new == State.ERROR:
+            self.hide_upload_progress()
             self._status_label.set_text("Error")
             self._timer_label.set_visible(False)
             self._stop_timer()
@@ -619,6 +629,65 @@ class OverlayWindow:
             return
         self._upload_bar.set_visible(False)
         self._upload_bar.set_fraction(0)
+        for cls in _PHASE_CLASSES:
+            self._upload_bar.remove_css_class(cls)
+
+    # ── Phase progress (batch / cleanup) ──
+
+    def start_batch_progress(self, live_len: int) -> None:
+        """Begin batch progress tracking. ``live_len`` is the live preview char count."""
+        if self._destroyed:
+            return
+        self._phase_predicted = (
+            live_len * _BATCH_LIVE_RATIO if live_len >= _MIN_LIVE_LEN else 0.0
+        )
+        self._phase_chars = 0
+        if self._phase_predicted <= 0:
+            return
+        logger.debug(
+            "start_batch_progress: live_len=%d predicted=%.0f",
+            live_len,
+            self._phase_predicted,
+        )
+        self._upload_bar.add_css_class("phase-batch")
+        self._upload_bar.set_fraction(0)
+        self._upload_bar.set_visible(True)
+
+    def start_cleanup_progress(self, batch_len: int) -> None:
+        """Begin cleanup progress tracking. ``batch_len`` is the batch transcript char count."""
+        if self._destroyed:
+            return
+        self._phase_predicted = (
+            batch_len * _CLEANUP_BATCH_RATIO if batch_len >= _MIN_LIVE_LEN else 0.0
+        )
+        self._phase_chars = 0
+        if self._phase_predicted <= 0:
+            return
+        logger.debug(
+            "start_cleanup_progress: batch_len=%d predicted=%.0f",
+            batch_len,
+            self._phase_predicted,
+        )
+        self._upload_bar.remove_css_class("phase-batch")
+        self._upload_bar.add_css_class("phase-cleanup")
+        self._upload_bar.set_fraction(0)
+        self._upload_bar.set_visible(True)
+
+    def on_phase_delta(self, text: str) -> None:
+        """Update phase progress bar with a streaming delta."""
+        if self._destroyed or self._phase_predicted <= 0:
+            return
+        self._phase_chars += len(text)
+        frac = min(self._phase_chars / self._phase_predicted, _PROGRESS_CAP)
+        self._upload_bar.set_fraction(frac)
+
+    def finish_phase_progress(self) -> None:
+        """Snap the current phase to 100%."""
+        if self._destroyed or self._phase_predicted <= 0:
+            return
+        self._upload_bar.set_fraction(1.0)
+        self._phase_predicted = 0.0
+        self._phase_chars = 0
 
     # ── Session directory ──
 

@@ -13,6 +13,8 @@ window {
     --vox-amber:      #f59e0b;
     --vox-green:      #22c55e;
     --vox-cyan:       #06b6d4;
+    --vox-cyan-dim:   #18444b;
+    --vox-cyan-mid:   #107182;
 
     /* Override libadwaita's destructive palette with our muted red */
     --destructive-bg-color: rgba(239, 68, 68, 0.25);
@@ -79,14 +81,30 @@ progressbar.vu-meter.vu-good { --accent-bg-color: var(--vox-green); }
 progressbar.vu-meter.vu-hot  { --accent-bg-color: var(--vox-amber); }
 progressbar.vu-meter.vu-clip { --accent-bg-color: var(--vox-red); }
 
-/* Upload progress — same geometry as the VU meter, cyan */
+/* Upload / phase progress — same geometry as the VU meter.
+ * Stacked phases: when a phase completes, its colour becomes the trough
+ * background and the next phase's fill writes on top. */
 progressbar.upload-meter.osd {
-    --accent-bg-color: var(--vox-cyan);
+    --accent-bg-color: var(--vox-cyan-dim);
 }
 
 progressbar.upload-meter.osd.horizontal > trough,
 progressbar.upload-meter.osd.horizontal > trough > progress {
     min-height: 3px;
+}
+
+progressbar.upload-meter.phase-batch.osd.horizontal > trough {
+    background-color: var(--vox-cyan-dim);
+}
+progressbar.upload-meter.phase-batch.osd {
+    --accent-bg-color: var(--vox-cyan-mid);
+}
+
+progressbar.upload-meter.phase-cleanup.osd.horizontal > trough {
+    background-color: var(--vox-cyan-mid);
+}
+progressbar.upload-meter.phase-cleanup.osd {
+    --accent-bg-color: var(--vox-cyan);
 }
 
 /* Fade overlay — CSS gradient replacing the former cairo DrawingArea */

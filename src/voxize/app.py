@@ -135,6 +135,7 @@ class VoxizeApp(Gtk.Application):
 
         # Batch transcript (passed from TRANSCRIBING to CLEANING)
         self._batch_transcript: str = ""
+        self._live_len: int = 0
 
         # Session cost tracking (three phases + the warmup pings, which are
         # real billable cleanup-model calls now that they prime the cache)
@@ -962,6 +963,9 @@ class VoxizeApp(Gtk.Application):
             len(live_transcript),
         )
 
+        # Arm batch progress bar before the first delta can arrive.
+        GLib.idle_add(self._set_live_len, len(live_transcript))
+
         # Save live transcript for debugging (not the authoritative result)
         if live_transcript and session_dir:
             try:
@@ -969,13 +973,20 @@ class VoxizeApp(Gtk.Application):
             except Exception:
                 logger.exception("Failed to save live_transcript.txt")
 
-        # Step 4: hand live-preview usage back to GTK for the cost summary.
+        # Step 4: hand live-preview usage back to GTK.
         GLib.idle_add(self._set_live_usage, live_usage)
 
     def _set_live_usage(self, live_usage) -> bool:
         """GTK thread: store live-preview usage once WS teardown settles."""
         logger.debug("_set_live_usage: live_usage=%s", live_usage)
         self._live_usage = live_usage
+        return False
+
+    def _set_live_len(self, live_len: int) -> bool:
+        """GTK thread: arm the batch progress bar with the live preview length."""
+        logger.debug("_set_live_len: live_len=%d", live_len)
+        self._live_len = live_len
+        self._ui.start_batch_progress(live_len)
         return False
 
     def _start_batch(self, session_dir: str, opus_path: str | None = None) -> bool:
@@ -1002,18 +1013,23 @@ class VoxizeApp(Gtk.Application):
         )
         self._batch.start(
             wav_path=audio_path,
-            on_delta=self._ui.append_text,
+            on_delta=self._on_batch_delta,
             on_complete=self._on_batch_done,
             on_error=self._on_batch_error,
             on_upload_progress=self._ui.set_upload_progress,
         )
         return False  # one-shot idle
 
+    def _on_batch_delta(self, text: str) -> None:
+        self._ui.append_text(text)
+        self._ui.on_phase_delta(text)
+
     def _on_batch_done(self, transcript: str) -> None:
         """Batch transcription complete — save, clipboard, start cleanup."""
         logger.debug("_on_batch_done: transcript_len=%d", len(transcript))
         self._batch_usage = self._batch.usage if self._batch else None
         self._batch = None
+        self._ui.finish_phase_progress()
 
         # Guard against stale callback
         if not self._machine or self._machine.state != State.TRANSCRIBING:
@@ -1072,12 +1088,13 @@ class VoxizeApp(Gtk.Application):
 
         # Show the batch transcript pulsing and arm the cleanup swap
         self._ui.show_transcript_for_cleanup(transcript)
+        self._ui.start_cleanup_progress(len(transcript))
 
         if _MOCK:
             self._cleanup = MockCleanup()
             self._cleanup.start(
                 transcript=transcript,
-                on_delta=self._ui.append_text,
+                on_delta=self._on_cleanup_delta,
                 on_complete=self._on_cleanup_done,
             )
         else:
@@ -1086,16 +1103,21 @@ class VoxizeApp(Gtk.Application):
             )
             self._cleanup.start(
                 transcript=transcript,
-                on_delta=self._ui.append_text,
+                on_delta=self._on_cleanup_delta,
                 on_complete=self._on_cleanup_done,
                 on_error=self._on_cleanup_error,
             )
         return False  # one-shot idle
 
+    def _on_cleanup_delta(self, text: str) -> None:
+        self._ui.append_text(text)
+        self._ui.on_phase_delta(text)
+
     def _on_cleanup_done(self, cleaned: str) -> None:
         logger.debug("_on_cleanup_done: cleaned_len=%d", len(cleaned))
         self._cleanup_usage = self._cleanup.usage if self._cleanup else None
         self._cleanup = None
+        self._ui.finish_phase_progress()
         if self._machine and self._machine.state == State.CLEANING:
             # Save cleaned text and copy to clipboard (overwrites batch transcript)
             if cleaned and self._session_dir:
