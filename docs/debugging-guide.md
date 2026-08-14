@@ -549,3 +549,110 @@ For future reference, here are all pacing values that were tried:
 | 0.036 (36ms) | 1.1x | ~7s | Testing (expected to work — 65ms cumulative drift) |
 
 The OpenAI cookbook suggests 5x pacing for file transcription, but this is inappropriate for live streaming where the burst-to-realtime transition confuses the VAD. The key insight: **even small bursts can permanently corrupt the VAD's state for the entire session**.
+
+## 13. GTK4 UI Traps (BREATH overlay)
+
+Every item here was a silent failure — GTK either logged nothing, or logged a
+warning that is easy to filter away. All were settled by writing a throwaway
+probe rather than by reasoning about what GTK "should" do. **If you doubt a
+GTK rendering or input behaviour, write a 20-line probe and measure it.** That
+is the single most useful habit for this file; assumptions cost several
+rebuild cycles each.
+
+### Rendering
+
+1. **`box-shadow` renders *outside* the widget allocation.** It is not clipped.
+   The overlay's halo is a plain `box-shadow` on `.card` landing in the card's
+   28px transparent margin. An elaborate radial-gradient substitute was built
+   on the assumption that it *was* clipped; it bled through the card as a
+   blurry donut.
+2. **GTK4 CSS has no `line-height`.** The transcript's 1.6 leading comes from
+   `set_pixels_inside_wrap()` / `set_pixels_below_lines()`. The per-line height
+   is *measured* at runtime, not hardcoded: it differs by several px between
+   Source Serif 4 and any fallback, and a constant makes the six-line cap a lie.
+3. **`text-decoration-color` and `text-decoration-style` are both ignored.**
+   An underline always paints in the text colour, and `dotted` is a hard parse
+   error surfacing only as `Gtk-WARNING ... unknown text decoration style
+   value`. Use `border-bottom` on the label instead.
+4. **An overlaid `GtkProgressBar`'s trough hides the bar beneath it.** The
+   pipeline rail stacks two bars in a `Gtk.Overlay`; giving both an opaque
+   trough silently covered the journey fill. Only the lower bar paints a track.
+5. **`window.csd` carries libadwaita's own window shadow.** That is the source
+   of a mystery "second outline" around a transparent window. Grep a dump of
+   the stock libadwaita stylesheet for any node you are fighting.
+
+### Sizing
+
+6. **`GtkScrolledWindow` silently rejects `min > max`.** Setting min before
+   raising max leaves the min at its **old value** with no exception, only
+   `gtk_scrolled_window_set_min_content_height: assertion 'height <=
+   max_content_height' failed`. Always
+   `set_min_content_height(-1)` → `set_max_content_height(h)` →
+   `set_min_content_height(h)`.
+7. **`Gtk.Overlay` takes its size from `set_child()`; `add_overlay()` widgets
+   do not contribute.** An empty child with the real content as an overlay
+   collapses the window to ~30px.
+8. **A wrapping `Gtk.TextView` has no useful natural height.**
+   `set_propagate_natural_height(True)` settles at ~2 lines regardless of
+   content, because height-for-width is not resolved at request time. Measure
+   with `widget.measure(Gtk.Orientation.VERTICAL, width)` — **not**
+   `get_iter_location()`, whose rect stops at the last glyph and omits trailing
+   line spacing, leaving the viewport a few px short and producing a scrollbar
+   for text that visibly fits. Bail out and re-queue while `get_width() <= 1`.
+9. **A non-resizable window is required for the card to grow.** `set_resizable(False)`;
+   a resizable window keeps its mapped size and ignores the child's grown request.
+
+### Position and input
+
+10. **The compositor centres a window once, at map time, using the size it has
+    *then*.** With `org.gnome.mutter center-new-windows=true`, whatever height
+    the window has at `present()` is what gets centred, and later growth is
+    anchored to the top edge. Presenting while the state machine was still
+    INITIALIZING mapped a 131px stub (transcript, meter and buttons all hidden)
+    that jumped to 230px the moment the mic came up — landing the card 49px
+    below centre before the user had spoken. `_prime_initial_size()` lays
+    INITIALIZING out like WARMING so the mapped size is honest. It derives the
+    height rather than calling `set_default_size` with a constant, because the
+    height depends on the measured serif line height. On Wayland a window
+    cannot reposition itself, so map time is the only chance to be centred.
+11. **A read-only `Gtk.TextView` still takes focus and still handles Ctrl+C.**
+    The window's key controller was in the default BUBBLE phase, so the
+    TextView consumed the accelerator and copied its own empty selection.
+    The controller is now `PropagationPhase.CAPTURE`; a live selection is
+    handed back to the TextView so selection-copy still works.
+12. **An invisible `Gtk.HeaderBar` gives no drag area.** Drag-to-move came for
+    free when the HeaderBar *was* the visible status row. Once the status line
+    moved into the card the titlebar was zero-height and the window could not
+    be dragged at all. Wrap the row in a `Gtk.WindowHandle`; buttons inside
+    still receive their clicks (verify with a real click, see below).
+
+### Verifying UI behaviour headlessly
+
+Screenshots are rendered by `scripts/generate_screenshots.py`
+(`--all` for every state). Two things about the environment are load-bearing:
+
+- **If `WAYLAND_DISPLAY` is set, `xvfb-run` is inert.** GTK prefers the Wayland
+  backend and ignores the `DISPLAY` Xvfb exports, so captures go through the
+  real compositor and the windows briefly appear on screen. Fine for capture.
+- **It silently breaks anything driving input**, because `xdotool` talks to
+  Xvfb while the app is on Wayland. A probe written this way read the *host*
+  clipboard and reported a false result. Pin both to X11:
+
+  ```sh
+  nsx xvfb-run xdotool -- xvfb-run -a nix develop . --command bash -c \
+    "WAYLAND_DISPLAY= GDK_BACKEND=x11 uv run python your_probe.py"
+  ```
+
+  Trap 11 was confirmed this way: seed the clipboard with a sentinel, send a
+  real `ctrl+c`, read it back — then flip the phase to BUBBLE and watch the
+  sentinel survive. **Reproduce the bug with the fix reverted**; a passing
+  test alone does not prove you fixed the thing you think you did.
+
+- **Do not over-filter the output.** Grep for `CRITICAL|WARNING|Traceback` at
+  minimum. A narrow `saved|Traceback` filter once hid a `Gtk-CRITICAL` that was
+  the root cause of a bug chased for four rounds.
+
+- **Popovers render into their own `GdkSurface`**, so `Gtk.WidgetPaintable` on
+  the toplevel never captures them. Render against the popover's own renderer
+  (`_capture(popover, name, native=popover)`), and pop it up only once the
+  toplevel is mapped.

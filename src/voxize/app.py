@@ -34,7 +34,7 @@ gi.require_version("Adw", "1")
 # gi.require_version() above is executable code; all subsequent imports trigger E402.
 from gi.repository import Adw, Gdk, Gio, GLib, Gtk  # noqa: E402
 
-from voxize import clipboard, config, mode_switcher  # noqa: E402
+from voxize import clipboard, config  # noqa: E402
 from voxize._trace import trace as _trace  # noqa: E402
 from voxize.batch import BatchTranscription  # noqa: E402
 from voxize.checks import get_api_key  # noqa: E402
@@ -182,17 +182,20 @@ class VoxizeApp(Gtk.Application):
             css,
             Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION,
         )
-        mode_switcher.load_css(display)
         _trace("CSS loaded")
 
-        # Window
+        # Window — RGBA for glow bleed (28px transparent margin around card)
         win = Gtk.ApplicationWindow(application=self)
         win.set_resizable(False)
-        win.set_default_size(420, -1)
+        win.set_default_size(516, -1)  # 460 card + 2x28 glow bleed
         win.connect("close-request", self._on_close_request)
 
-        # Escape key
+        # Escape key. CAPTURE, not the default BUBBLE: the read-only TextView
+        # takes focus and handles Ctrl+C itself, so in the bubble phase it
+        # swallowed the accelerator and copied its (empty) selection instead
+        # of the transcript. Unhandled keys still fall through to the widgets.
         ctrl = Gtk.EventControllerKey()
+        ctrl.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
         ctrl.connect("key-pressed", self._on_key, win)
         win.add_controller(ctrl)
 
@@ -1325,7 +1328,14 @@ class VoxizeApp(Gtk.Application):
     def _on_key(self, _ctrl, keyval, _code, mod, win) -> bool:
         if mod & Gdk.ModifierType.CONTROL_MASK and self._ui is not None:
             if keyval == Gdk.KEY_c:
+                # A live selection means the user asked for that text, not
+                # the whole transcript — let the TextView serve it.
+                if self._ui.has_text_selection():
+                    return False
                 self._ui.copy_to_clipboard()
+                return True
+            if keyval == Gdk.KEY_o:
+                self._ui._on_open_folder(None)
                 return True
             if keyval == Gdk.KEY_m and self._ui._on_switch_to_meeting is not None:
                 self._switch_to_meeting()

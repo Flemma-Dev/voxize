@@ -9,6 +9,12 @@ let
     gobject-introspection
     portaudio
     libsecret # gi.repository.Secret (keyring access)
+
+    # Typography for the overlay. The transcript is the product, so the
+    # serif is a hard dependency, not a nicety — without Source Serif 4
+    # the text falls back to DejaVu Serif and the design reads wrong.
+    source-serif # transcript (OFL)
+    ibm-plex # micro-labels in the guidance popover
   ];
 
   devDeps = with pkgs; [

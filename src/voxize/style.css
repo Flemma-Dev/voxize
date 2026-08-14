@@ -1,178 +1,764 @@
-/* Voxize overlay theme — dark opaque, based on design doc §5 */
-/* Sizing uses em so the UI scales with the system font.               */
+/* Voxize BREATH — floating card, RGBA window, state-carried hue.
+ *
+ * Shared by two apps. The dictation overlay is the transparent card below;
+ * the meeting recorder uses ordinary windows and only borrows the palette,
+ * the status line and a handful of widget rules. Anything that strips
+ * window chrome must therefore be scoped to .overlay-window, and anything
+ * defining a custom property must sit on `window`, not `.card`.
+ *
+ * Structure:
+ *   window.overlay-window (transparent, libadwaita CSD shadow killed)
+ *     └─ .card  (28px margin — the visible surface; its box-shadow is
+ *                the halo, painted outside the allocation into the margin)
+ *
+ * Hue system — one colour carries the state, as fill / dot / button-label:
+ *   ember  #e2604a / #ff7a63 / #f6b3a4   listening, first pass
+ *   amber  #e2984a / #f0b56a / #f0b56a   working, both passes
+ *   sage   #8fbf9a / #8fbf9a / #bfe6c8   ready
+ *
+ * Typography:
+ *   transcript  Source Serif 4, 19px/1.6, weight 300 — the only large type
+ *   UI          system font, 12–12.5px
+ *   micro       IBM Plex Mono, <= 11px, only for labels
+ */
+
+/* ═══ Palette ═══
+ * Declared on every window, not on .card, so the meeting recorder's
+ * windows — which have no .card ancestor — resolve these too. */
 
 window {
-    /* Palette — CSS custom properties, same mechanism libadwaita uses */
-    --vox-bg:         #1e1e1e;
-    --vox-fg:         rgba(255, 255, 255, 0.88);
-    --vox-fg-dim:     rgba(255, 255, 255, 0.5);
-    --vox-border:     rgba(255, 255, 255, 0.08);
-    --vox-border-dim: rgba(255, 255, 255, 0.06);
-    --vox-selection:  rgba(255, 255, 255, 0.2);
-    --vox-red:        #ef4444;
-    --vox-amber:      #f59e0b;
-    --vox-green:      #22c55e;
-    --vox-cyan:       #06b6d4;
-    --vox-cyan-dim:   #18444b;
-    --vox-cyan-mid:   #107182;
+    --vox-fg:         #cfc2b8;
+    --vox-fg-bright:  #f4efe8;
+    --vox-fg-dim:     #8d8378;
+    --vox-fg-faint:   #57514b;
+    --vox-border:     rgba(255, 255, 255, 0.07);
+    --vox-selection:  rgba(255, 255, 255, 0.18);
 
-    /* Override libadwaita's destructive palette with our muted red */
-    --destructive-bg-color: rgba(239, 68, 68, 0.25);
-    --destructive-fg-color: var(--vox-red);
-    --destructive-color:    var(--vox-red);
+    /* Each hue is a triple: `hue` fills (rail, level dots), `bright` is the
+     * status dot, `soft` is the label on the one filled button. */
+    --vox-ember:        #e2604a;
+    --vox-ember-bright: #ff7a63;
+    --vox-ember-deep:   #c9553f;
+    --vox-ember-soft:   #f6b3a4;
+    --vox-amber:        #e2984a;
+    --vox-amber-bright: #f0b56a;
+    --vox-amber-soft:   #f0b56a;
+    --vox-sage:         #8fbf9a;
+    --vox-sage-bright:  #8fbf9a;
+    --vox-sage-soft:    #bfe6c8;
 
-    --monospace-font-family: monospace;
+    /* Level-meter zones. These deliberately break the "one hue carries the
+     * state" rule — the meter answers "is my mic set up right", which is a
+     * different question from "what is the app doing", and it is the one
+     * signal a single hue genuinely cannot carry. Muted to sit next to the
+     * ember card rather than the stock traffic-light greens and reds. */
+    --vox-level-low:    #8d8378;
+    --vox-level-good:   #8fbf9a;
+    --vox-level-hot:    #e2984a;
+    --vox-level-clip:   #ff5540;
 
-    background-color: var(--vox-bg);
+    --vox-hue:        var(--vox-ember);
+    --vox-hue-bright: var(--vox-ember-bright);
+    --vox-hue-soft:   var(--vox-ember-soft);
+}
+
+/* ═══ Overlay window: kill every libadwaita decoration ═══
+ * Scoped to .overlay-window (set by OverlayWindow._build). The meeting
+ * recorder shares this stylesheet and needs its ordinary window chrome. */
+
+window.overlay-window,
+window.overlay-window.background,
+window.overlay-window.csd,
+window.overlay-window.csd:backdrop {
+    background: none;
+    background-color: transparent;
+    box-shadow: none;
+    border: none;
+    outline: none;
+    color: rgba(255, 255, 255, 0.88);
+}
+
+window.overlay-window > decoration,
+window.overlay-window decoration {
+    background: none;
+    box-shadow: none;
+    border: none;
+    margin: 0;
+}
+
+/* The invisible drag titlebar must not paint */
+window.overlay-window > .titlebar,
+window.overlay-window > headerbar.titlebar {
+    background: none;
+    background-color: transparent;
+    box-shadow: none;
+    border: none;
+    min-height: 0;
+    padding: 0;
+}
+
+/* ═══ Card ═══ */
+
+.card {
+    background: linear-gradient(180deg, #1e1b1f, #131217);
     border: 1px solid var(--vox-border);
-    border-radius: 12px;
+    border-radius: 22px;
+    color: var(--vox-fg);
+    font-size: 12px;
+
+    /* Halo, drop shadow and top highlight — GTK4 paints box-shadow outside
+     * the allocation, so these land in the card's 28px margin. The design's
+     * drop shadow is 0 24px 56px, which would extend past the bleed zone and
+     * be clipped by the window surface; it is scaled to fit 28px instead.
+     * The inset highlight catches the top edge where the gradient is lightest. */
+    box-shadow: 0 0 40px color-mix(in srgb, var(--vox-hue) 22%, transparent),
+                0 8px 22px rgba(0, 0, 0, 0.5),
+                inset 0 1px 0 rgba(255, 255, 255, 0.05);
+
+    transition: background-color 400ms ease-in-out,
+                box-shadow 400ms ease-in-out;
+
+    --destructive-bg-color: rgba(201, 85, 63, 0.22);
+    --destructive-fg-color: var(--vox-ember-bright);
+    --destructive-color:    var(--vox-ember-bright);
+}
+
+/* Per-state hue + a barely-there wash of that hue over the surface.
+ *
+ * Working is amber for the dot and halo from the *first* pass — only the
+ * rail stays ember until the handover, and it takes its colour from
+ * --vox-ember directly rather than the state hue. */
+.card.warming-state {
+    --vox-hue: var(--vox-amber);
+    --vox-hue-bright: var(--vox-amber);
+    --vox-hue-soft: var(--vox-amber-soft);
+    background: linear-gradient(180deg, #1e1b1f, #131217);
+}
+
+.card.recording-state {
+    --vox-hue: var(--vox-ember);
+    --vox-hue-bright: var(--vox-ember-bright);
+    --vox-hue-soft: var(--vox-ember-soft);
+    background: linear-gradient(180deg, #1f1a1c, #131217);
+}
+
+/* Silence pulls the dot back to a deeper ember; speech brightens it. */
+.card.recording-state.silence {
+    --vox-hue-bright: var(--vox-ember-deep);
+}
+
+.card.working-state {
+    --vox-hue: var(--vox-amber);
+    --vox-hue-bright: var(--vox-amber);
+    --vox-hue-soft: var(--vox-amber-soft);
+    background: linear-gradient(180deg, #201c1c, #131217);
+}
+
+.card.working-state.phase-cleanup {
+    --vox-hue-bright: var(--vox-amber-bright);
+}
+
+.card.ready-state {
+    --vox-hue: var(--vox-sage);
+    --vox-hue-bright: var(--vox-sage-bright);
+    --vox-hue-soft: var(--vox-sage-soft);
+    background: linear-gradient(180deg, #1a1d1b, #131217);
+}
+
+/* ═══ Halo ═══
+ * One hue carries the state. Silence breathes, speech holds solid,
+ * ready is motionless — stillness is the "done" signal. Keyframes
+ * hardcode their hue because GTK4 cannot interpolate a var() swap. */
+
+@keyframes halo-breathe-ember {
+    0%, 100% { box-shadow: 0 0 30px rgba(226, 96, 74, 0.10),
+                           0 8px 22px rgba(0, 0, 0, 0.5),
+                           inset 0 1px 0 rgba(255, 255, 255, 0.06); }
+    50%      { box-shadow: 0 0 44px rgba(226, 96, 74, 0.24),
+                           0 8px 22px rgba(0, 0, 0, 0.5),
+                           inset 0 1px 0 rgba(255, 255, 255, 0.06); }
+}
+
+@keyframes halo-breathe-amber {
+    0%, 100% { box-shadow: 0 0 30px rgba(226, 152, 74, 0.08),
+                           0 8px 22px rgba(0, 0, 0, 0.5),
+                           inset 0 1px 0 rgba(255, 255, 255, 0.05); }
+    50%      { box-shadow: 0 0 44px rgba(226, 152, 74, 0.22),
+                           0 8px 22px rgba(0, 0, 0, 0.5),
+                           inset 0 1px 0 rgba(255, 255, 255, 0.05); }
+}
+
+.card.glow-warming {
+    animation: halo-breathe-amber 3.1s ease-in-out infinite;
+}
+
+.card.glow-silence {
+    animation: halo-breathe-ember 2.6s ease-in-out infinite;
+}
+
+.card.glow-speech {
+    box-shadow: 0 0 40px rgba(226, 96, 74, 0.16),
+                0 8px 22px rgba(0, 0, 0, 0.5),
+                inset 0 1px 0 rgba(255, 255, 255, 0.06);
+    animation: none;
+}
+
+.card.glow-working,
+.card.glow-working-cleanup {
+    box-shadow: 0 0 32px rgba(226, 152, 74, 0.12),
+                0 8px 22px rgba(0, 0, 0, 0.5),
+                inset 0 1px 0 rgba(255, 255, 255, 0.05);
+    animation: none;
+}
+
+.card.glow-ready {
+    box-shadow: 0 0 20px rgba(143, 191, 154, 0.07),
+                0 8px 22px rgba(0, 0, 0, 0.5),
+                inset 0 1px 0 rgba(255, 255, 255, 0.05);
+    animation: none;
+}
+
+/* ═══ Status line ═══ */
+
+.status-dot {
+    font-size: 9px;
+    color: var(--vox-hue-bright);
+    text-shadow: 0 0 7px color-mix(in srgb, var(--vox-hue-bright) 75%, transparent);
+    transition: opacity 400ms ease-in-out, color 400ms ease-in-out;
+}
+
+.status-dot.cancelled { color: var(--vox-fg-dim); text-shadow: none; }
+
+.status-label {
+    font-size: 12.5px;
+    font-weight: 500;
+    color: var(--vox-fg);
+    letter-spacing: 0.02em;
+}
+
+/* Speech is the only moment the status word goes to full strength */
+.card.speech .status-label {
+    color: #e8ded4;
+}
+
+.timer-label {
+    font-size: 12.5px;
+    color: var(--vox-fg-dim);
+    font-feature-settings: "tnum";
+}
+
+/* Warming/working/ready: the timer is not the story, so it recedes */
+.timer-label.timer-dim {
+    color: var(--vox-fg-faint);
+}
+
+.mode-word {
+    font-size: 12.5px;
+    color: #4f4a45;
+    background: none;
+    border: none;
+    box-shadow: none;
+    outline: none;
+    min-height: 0;
+    padding: 0 2px;
+    transition: opacity 200ms ease;
+}
+
+.mode-word:hover {
+    opacity: 1.0;
+    background: none;
     color: var(--vox-fg);
 }
 
-/* HeaderBar — transparent over window bg, with subtle bottom border */
-headerbar {
-    background: transparent;
+/* Icons — present, not competing with the words */
+.status-icon {
+    background: none;
+    border: none;
     box-shadow: none;
-    padding: 0.3em 0.6em;
+    outline: none;
+    min-width: 22px;
+    min-height: 22px;
+    padding: 2px;
+    color: var(--vox-fg);
+    opacity: 0.4;
+    transition: opacity 200ms ease;
 }
 
-headerbar:last-child {
-    border-bottom: 1px solid var(--vox-border-dim);
+.status-icon:hover,
+.status-icon:focus {
+    opacity: 1.0;
+    background: none;
 }
 
-/* Status indicator dot */
-.status-dot {
-    font-size: 0.7em;
-    transition: opacity 400ms ease-in-out;
+.status-icon > image {
+    -gtk-icon-size: 15px;
 }
 
-.status-dot.warming      { color: var(--vox-amber); }
-.status-dot.recording    { color: var(--vox-red); }
-.status-dot.transcribing { color: var(--vox-amber); }
-.status-dot.cleaning     { color: var(--vox-amber); }
-.status-dot.ready        { color: var(--vox-green); }
-.status-dot.error        { color: var(--vox-red); }
-.status-dot.cancelled    { color: var(--vox-fg-dim); }
-.status-dot.dim       { opacity: 0.3; }
+/* ═══ Transcript ═══ */
 
-/* Status label */
-.status-label {
-    font-weight: bold;
+/* The transcript is the product, so it is the brightest thing on the card
+ * and it brightens further as the text firms up: live preview and batch
+ * output at #e4ddd4, the final cleaned result at #f4efe8. */
+textview.text-area {
+    --view-fg-color: #e4ddd4;
+    --view-bg-color: transparent;
+    background: none;
+    background-color: transparent;
+    color: #e4ddd4;
+    font-family: "Source Serif 4", "Source Serif Pro", "Noto Serif", serif;
+    font-size: 19px;
+    font-weight: 300;
+    transition: opacity 220ms ease-in-out;
 }
 
-/* Timer */
-.timer-label {
+.card.ready-state textview.text-area {
+    --view-fg-color: #f4efe8;
+    color: #f4efe8;
+}
+
+textview.text-area text {
+    background-color: transparent;
+}
+
+/* Live preview is throwaway — say so, gently, in advance */
+textview.text-area.live-text {
+    opacity: 0.88;
+}
+
+/* On stop the live text drops once to a flat 45% and holds */
+textview.text-area.text-outgoing {
+    opacity: 0.45;
+}
+
+textview.text-area.backdrop {
+    --view-fg-color: var(--vox-fg-dim);
     color: var(--vox-fg-dim);
 }
 
-/* Level meter — thin OSD progress bar at top of content area.
- * .osd gives us border-radius:0, no shadows, 2px height.
- * We bump to 3px and override --accent-bg-color for zone colours. */
-progressbar.vu-meter.osd {
-    --accent-bg-color: var(--vox-fg-dim);
+textview.text-area text selection {
+    background-color: var(--vox-selection);
+    color: #ffffff;
 }
 
-progressbar.vu-meter.osd.horizontal > trough,
-progressbar.vu-meter.osd.horizontal > trough > progress {
-    min-height: 3px;
+/* Placeholder line for WARMING — "waiting for audio" */
+textview.text-area.waiting {
+    font-style: italic;
+    opacity: 0.3;
 }
 
-progressbar.vu-meter.vu-good { --accent-bg-color: var(--vox-green); }
-progressbar.vu-meter.vu-hot  { --accent-bg-color: var(--vox-amber); }
-progressbar.vu-meter.vu-clip { --accent-bg-color: var(--vox-red); }
+/* ═══ Scrollbar — always-on 3px thumb, never auto-hiding ═══ */
 
-progressbar.vu-meter.vu-warming.osd.horizontal > trough {
-    background-color: color-mix(in srgb, var(--vox-amber) 40%, transparent);
-}
-
-/* Upload / phase progress — same geometry as the VU meter.
- * Stacked phases: when a phase completes, its colour becomes the trough
- * background and the next phase's fill writes on top. */
-progressbar.upload-meter.osd {
-    --accent-bg-color: var(--vox-cyan-dim);
-}
-
-progressbar.upload-meter.osd.horizontal > trough,
-progressbar.upload-meter.osd.horizontal > trough > progress {
-    min-height: 3px;
-}
-
-progressbar.upload-meter.phase-batch.osd.horizontal > trough {
-    background-color: var(--vox-cyan-dim);
-}
-progressbar.upload-meter.phase-batch.osd {
-    --accent-bg-color: var(--vox-cyan-mid);
-}
-
-progressbar.upload-meter.phase-cleanup.osd.horizontal > trough {
-    background-color: var(--vox-cyan-mid);
-}
-progressbar.upload-meter.phase-cleanup.osd {
-    --accent-bg-color: var(--vox-cyan);
-}
-
-/* Fade overlay — CSS gradient replacing the former cairo DrawingArea */
-.fade-overlay {
-    background-image: linear-gradient(
-        to bottom,
-        #1e1e1e,
-        rgba(30, 30, 30, 0)
-    );
-}
-
-/* Kill ScrolledWindow overshoot/undershoot shadows */
 scrolledwindow undershoot,
 scrolledwindow overshoot {
     background: none;
     box-shadow: none;
 }
 
-/* Text display */
-textview.text-area {
-    --view-fg-color: var(--vox-fg);
-    --view-bg-color: transparent;
-    background: transparent;
-    transition: opacity 500ms ease-in-out;
+scrolledwindow > scrollbar {
+    background: none;
+    background-color: transparent;
+    border: none;
+    box-shadow: none;
+    padding: 0;
+    margin: 0;
+    min-width: 9px;
 }
 
-textview.text-area.processing {
-    opacity: 0.5;
+scrolledwindow > scrollbar > range > trough {
+    background-color: rgba(255, 255, 255, 0.05);
+    border: none;
+    border-radius: 99px;
+    margin: 4px 3px;
+    min-width: 3px;
+    outline: none;
 }
 
-/* Dim text when window loses focus, matching headerbar backdrop behavior */
-textview.text-area.backdrop {
-    --view-fg-color: var(--vox-fg-dim);
+scrolledwindow > scrollbar > range > trough > slider {
+    background-color: #4e4740;
+    border: none;
+    outline: none;
+    border-radius: 99px;
+    margin: 0;
+    min-width: 3px;
+    min-height: 24px;
+    transition: background-color 200ms ease;
 }
 
-textview.text-area text selection {
-    background-color: var(--vox-selection);
-    color: white;
+scrolledwindow > scrollbar > range > trough > slider:hover {
+    background-color: color-mix(in srgb, var(--vox-fg) 45%, transparent);
 }
 
-/* Buttons */
-headerbar button {
-    border-radius: 6px;
-    padding: 0.3em 1em;
+scrolledwindow > scrollbar > range > trough > slider:disabled {
+    opacity: 0;
 }
 
-/* Error bar — bottom panel, non-destructive */
-.error-bar {
-    padding: 0.5em 0.75em;
-    border-top: 1px solid color-mix(in srgb, var(--vox-red) 30%, transparent);
-    background-color: color-mix(in srgb, var(--vox-red) 10%, transparent);
+/* ═══ Level dots — segmented meter ═══ */
+
+/* The zone class lives on the container, so one swap recolours every dot.
+ * Low is the default — no class means "too quiet", which is also the right
+ * neutral for silence, where extent is meaningless. */
+.level-dots {
+    margin-left: 4px;
+    --vox-level: var(--vox-level-low);
 }
 
-.error-bar .error-icon {
-    color: var(--vox-red);
-    margin-right: 0.5em;
+.level-dots.zone-good { --vox-level: var(--vox-level-good); }
+.level-dots.zone-hot  { --vox-level: var(--vox-level-hot); }
+.level-dots.zone-clip { --vox-level: var(--vox-level-clip); }
+
+.level-dot {
+    min-width: 5px;
+    min-height: 5px;
+    border-radius: 99px;
+    margin: 0 3px 0 0;
+    background-color: var(--vox-level);
+    opacity: 0.16;
+    /* Colour eases so a level hovering on a zone boundary reads as a drift
+     * rather than a flicker; extent still snaps at 90ms. */
+    transition: opacity 90ms ease, background-color 260ms ease;
 }
 
-.error-bar .error-message {
+.level-dot.lit {
+    opacity: 1.0;
+}
+
+/* The leading lit dot blooms so the edge of the fill is findable */
+.level-dot.leading {
+    box-shadow: 0 0 6px color-mix(in srgb, var(--vox-level) 55%, transparent);
+}
+
+/* Silence — extent is meaningless, so abandon it and shimmer */
+@keyframes dot-shimmer {
+    0%, 100% { opacity: 0.16; }
+    50%      { opacity: 0.42; }
+}
+
+.level-dot.silence-shimmer {
+    animation: dot-shimmer 2.2s ease-in-out infinite;
+}
+
+/* Warming — outlined shapes read as "not armed" */
+.card.warming-state .level-dot {
+    background-color: transparent;
+    box-shadow: inset 0 0 0 1px #6d5c42;
+    opacity: 0.75;
+    animation: none;
+}
+
+/* ═══ Pipeline rail ═══
+ * Two stacked ProgressBars: the journey bar carries the live fraction in
+ * the current phase hue; the behind-you bar paints the completed phase
+ * territory as its trough. */
+
+/* The rail carries its own 12px bottom gap so the pill needs no top
+ * margin — the pill sits flush under the transcript in the states that
+ * have no rail at all (warming, recording), exactly as the design does. */
+.rail {
+    min-height: 2px;
+    margin: 0 0 12px 0;
+}
+
+progressbar.rail-journey,
+progressbar.rail-behind {
+    background: none;
+}
+
+/* Only the journey bar paints the unfilled track. The behind-you bar is
+ * overlaid on top of it, so an opaque trough there would hide the fill. */
+progressbar.rail-journey > trough {
+    background-color: #221f24;
+    border: none;
+    border-radius: 0;
+    min-height: 2px;
+    padding: 0;
+    box-shadow: none;
+}
+
+progressbar.rail-behind > trough {
+    background-color: transparent;
+    border: none;
+    border-radius: 0;
+    min-height: 2px;
+    padding: 0;
+    box-shadow: none;
+}
+
+progressbar.rail-journey > trough > progress {
+    background-color: var(--vox-ember);
+    background-image: none;
+    border: none;
+    border-radius: 0;
+    min-height: 2px;
+    box-shadow: 0 0 5px color-mix(in srgb, var(--vox-ember) 55%, transparent);
+    transition: background-color 240ms ease-in-out;
+}
+
+progressbar.rail-journey.phase-cleanup > trough > progress {
+    background-color: var(--vox-amber);
+    box-shadow: 0 0 5px color-mix(in srgb, var(--vox-amber) 55%, transparent);
+}
+
+/* Ready: a flat sage tint across the full width, no glow — nothing on
+ * the card animates or blooms once the transcript is final. */
+progressbar.rail-journey.phase-ready > trough > progress {
+    background-color: rgba(143, 191, 154, 0.28);
+    box-shadow: none;
+}
+
+/* Behind-you bar: dimmed territory already crossed */
+progressbar.rail-behind > trough > progress {
+    background-color: color-mix(in srgb, var(--vox-ember) 40%, transparent);
+    background-image: none;
+    border: none;
+    border-radius: 0;
+    min-height: 2px;
+    box-shadow: none;
+}
+
+progressbar.rail-behind.phase-cleanup > trough > progress {
+    background-color: color-mix(in srgb, var(--vox-amber) 40%, transparent);
+}
+
+/* ═══ Error banner ═══ */
+
+.error-banner {
+    background-color: rgba(226, 96, 74, 0.09);
+    border-radius: 12px;
+    margin: 0 12px 10px 12px;
+    padding: 9px 12px;
+}
+
+.error-banner .error-dot {
+    font-size: 8px;
+    color: var(--vox-ember-bright);
+    text-shadow: 0 0 6px color-mix(in srgb, var(--vox-ember-bright) 70%, transparent);
+}
+
+/* Unscoped: the dictation banner and the meeting recorder's .error-bar
+ * both label their message with this class. */
+.error-message {
+    font-size: 11.5px;
+    color: #c6a79f;
+}
+
+/* ═══ Action pill ═══ */
+
+.action-pill {
+    background-color: rgba(255, 255, 255, 0.045);
+    border-radius: 16px;
+    padding: 9px 10px 9px 16px;
+    margin: 0 12px 12px 12px;
+}
+
+.action-pill button {
+    background: none;
+    background-image: none;
+    background-color: transparent;
+    border: none;
+    box-shadow: none;
+    outline: none;
+    border-radius: 11px;
+    padding: 7px 15px;
+    min-height: 26px;
+    font-size: 12.5px;
+    font-weight: 500;
     color: var(--vox-fg-dim);
-    font-size: 0.85em;
+    transition: background-color 200ms ease, color 200ms ease;
 }
 
-/* Tag entry — inline pill input for key terms */
+.action-pill button:hover {
+    background-color: rgba(255, 255, 255, 0.06);
+    color: var(--vox-fg);
+}
+
+/* The one filled control */
+.action-pill button.primary-action {
+    background-color: color-mix(in srgb, var(--vox-hue) 20%, transparent);
+    color: var(--vox-hue-soft);
+    font-weight: 500;
+}
+
+.action-pill button.primary-action:hover {
+    background-color: color-mix(in srgb, var(--vox-hue) 34%, transparent);
+    color: var(--vox-hue-soft);
+}
+
+/* Warming — Stop is present but not yet inviting */
+.card.warming-state .action-pill button.primary-action {
+    background-color: rgba(255, 255, 255, 0.045);
+    color: #6d675f;
+}
+
+/* Pill dims under the toast rather than reflowing */
+.action-pill.toasting {
+    opacity: 0.3;
+}
+
+/* Cancel button — always flat text */
+.action-pill button.cancel-btn {
+    font-weight: 400;
+    padding: 7px 6px;
+}
+
+/* ═══ Toast ═══ */
+
+/* Adw.ToastOverlay anchors to the bottom of the *window*, which sits 28px
+ * below the card. The offset lifts the toast onto the pill it replaces:
+ * 28px bleed + 12px pill margin + half the pill's height. */
+toast {
+    background-color: #22271f;
+    background-image: none;
+    color: var(--vox-sage-bright);
+    border: 1px solid rgba(143, 191, 154, 0.3);
+    border-radius: 14px;
+    box-shadow: 0 10px 26px rgba(0, 0, 0, 0.55);
+    padding: 5px 12px;
+    margin-bottom: 58px;
+    font-size: 12.5px;
+    font-weight: 500;
+}
+
+toast > widget {
+    margin: 0 4px;
+}
+
+/* One word, no dismiss affordance — it times out in 2s and the pill
+ * underneath is the thing you actually want back. `-gtk-icon-size: 0`
+ * would do it too, but it trips a gtk_icon_theme_lookup assertion on
+ * every toast; collapsing the box and hiding the paint is silent. */
+toast button {
+    min-width: 0;
+    min-height: 0;
+    padding: 0;
+    margin: 0;
+    opacity: 0;
+}
+
+toast button > image {
+    min-width: 0;
+    min-height: 0;
+    opacity: 0;
+}
+
+toast label {
+    color: #dff0e3;
+    font-weight: 500;
+}
+
+/* ═══ Guidance popover ═══ */
+
+popover.guidance-popover {
+    background: none;
+    background-color: transparent;
+}
+
+popover.guidance-popover > arrow {
+    background-color: #23202a;
+    border: 1px solid rgba(255, 255, 255, 0.11);
+    box-shadow: none;
+    min-width: 0;
+    min-height: 0;
+}
+
+popover.guidance-popover > contents {
+    background-color: #23202a;
+    border: 1px solid rgba(255, 255, 255, 0.11);
+    border-radius: 14px;
+    box-shadow: 0 18px 40px rgba(0, 0, 0, 0.6);
+    padding: 14px 16px 15px;
+    color: rgba(236, 232, 228, 0.92);
+}
+
+.guidance-title {
+    font-family: "IBM Plex Mono", monospace;
+    font-size: 10px;
+    font-weight: 500;
+    letter-spacing: 0.16em;
+    color: #7d7469;
+    margin-bottom: 7px;
+}
+
+.guidance-file {
+    background: none;
+    border: none;
+    box-shadow: none;
+    outline: none;
+    padding: 0;
+    min-height: 0;
+}
+
+.guidance-file:hover {
+    background: none;
+}
+
+/* The design underlines the filename with a dotted 1px rule in #5b544c.
+ * GTK4 honours neither text-decoration-style nor text-decoration-color —
+ * an underline comes out the same colour as the text — so the rule is
+ * drawn as a border on the label instead, solid rather than dotted. */
+.guidance-filename {
+    font-size: 12px;
+    font-weight: 500;
+    color: #d9cec3;
+    border-bottom: 1px solid #5b544c;
+    padding-bottom: 1px;
+}
+
+.guidance-preview {
+    font-size: 11.5px;
+    color: #7d7469;
+}
+
+/* ═══ Meeting app ═══ */
+
+/* VU meter for meeting recorder */
+progressbar.vu-meter,
+progressbar.vu-meter.osd {
+    background: none;
+}
+
+progressbar.vu-meter > trough {
+    background-color: rgba(255, 255, 255, 0.06);
+    border: none;
+    border-radius: 4px;
+    min-height: 6px;
+    padding: 0;
+}
+
+progressbar.vu-meter > trough > progress {
+    background-color: var(--vox-hue-bright);
+    background-image: none;
+    border: none;
+    border-radius: 4px;
+    min-height: 6px;
+}
+
+/* Meeting error bar */
+.error-bar {
+    background-color: rgba(226, 96, 74, 0.12);
+    border-radius: 8px;
+    padding: 6px 10px;
+    margin: 4px 0;
+}
+
+.error-icon {
+    color: var(--vox-ember-bright);
+}
+
+/* Per-state dot colours for meeting */
+.status-dot.recording { color: var(--vox-ember-bright); }
+.status-dot.warming   { color: var(--vox-amber-bright); }
+.status-dot.cleaning,
+.status-dot.transcribing { color: var(--vox-amber-bright); }
+.status-dot.ready     { color: var(--vox-sage-bright); }
+
+/* ═══ Meeting app (unchanged surfaces) ═══ */
+
+.countdown-number {
+    font-size: 4em;
+    font-weight: 200;
+    color: var(--vox-fg);
+}
+
 .tag-entry-frame.focused {
     outline-color: color-mix(in srgb, var(--accent-color) 50%, transparent);
     outline-width: 2px;
@@ -197,7 +783,7 @@ headerbar button {
 
 .tag-pill-selected {
     background: rgba(255, 255, 255, 0.18);
-    outline: 1px solid var(--vox-fg-dim);
+    outline: 1px solid rgba(255, 255, 255, 0.4);
     outline-offset: -1px;
 }
 
@@ -214,39 +800,27 @@ headerbar button {
     opacity: 1;
 }
 
-/* Speaker rename — collapsible fieldset */
 .rename-section {
-    border: 1px solid var(--vox-border);
+    border: 1px solid rgba(255, 255, 255, 0.07);
     border-radius: 10px;
     padding: 6px 10px;
 }
 
 .rename-original {
-    color: var(--vox-fg-dim);
-    font-family: var(--monospace-font-family);
+    color: rgba(255, 255, 255, 0.5);
+    font-family: "IBM Plex Mono", monospace;
     font-size: 0.9em;
 }
 
-/* Mode switcher — pill segmented control (button overrides loaded
-   at PRIORITY_USER in Python to beat libadwaita headerbar rules) */
 .mode-switcher {
     border: 1px solid rgba(255, 255, 255, 0.15);
     border-radius: 12px;
     padding: 3px;
 }
 
-/* Countdown — large number shown before meeting recording starts */
-.countdown-number {
-    font-size: 4em;
-    font-weight: 200;
-    color: var(--vox-fg);
-}
-
-/* Context bar — persistent prompt indicator */
 .context-bar {
     background: transparent;
-    border-top: 1px solid var(--vox-border-dim);
     padding: 0.3em 0.75em;
     font-size: 0.8em;
-    color: var(--vox-fg-dim);
+    color: rgba(255, 255, 255, 0.5);
 }

@@ -1,3 +1,8 @@
 __pycache__/
 .direnv/
 spike/
+
+# Design-review screenshots — regenerate with
+#   uv run python scripts/generate_screenshots.py --all
+# Only the three README assets are tracked.
+assets/state-*.png

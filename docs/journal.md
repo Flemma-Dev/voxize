@@ -1041,3 +1041,116 @@ Everything works as designed: duration billing (`seconds=13` for 12.8s), the pro
 So the warmup is a **latency optimisation costing ~$0.02/month**, and its latency benefit remains unproven — 252 ms and 863 ms observed against noise of the same size. It moves prefill off the post-stop critical path, which is where the user is actually waiting, and that is the only argument for it. If the accumulating `cached_tokens` data shows cleanup hitting the cache from cross-session leftovers anyway, drop the payload: `_warmup_primed` already gates it and the cheap-ping path exists, so it is a one-line reversal.
 
 **Files changed:** `src/voxize/prompt.py` (`build_transcription_prompt`, `write_prompt_snapshot`, `_MAX_PROMPT_CHARS`), `src/voxize/batch.py` (delegates), `src/voxize/recover.py` (delegates), `src/voxize/app.py` (writes the snapshot next to recover.sh), `CLAUDE.md`, `docs/debugging-guide.md`.
+
+## 2026-08-14 — BREATH visual refresh
+
+The overlay is rebuilt to the "BREATH v4" design: a 460px floating card inside
+a 516px RGBA window, the extra 28px per side being transparent bleed the halo
+is painted into. Chrome collapses to a status line and one action pill; the
+transcript is the only large type and is the product. One hue carries the
+state — ember listening, amber working, sage ready — driving halo, status dot,
+rail and the single filled button together.
+
+The design lives outside the repo (a rendered PDF and the HTML it came from),
+so the values that matter are recorded here rather than referenced:
+
+| | Value |
+|---|---|
+| Card | `linear-gradient(180deg, …, #131217)`, radius 22px, `inset 0 1px 0 rgba(255,255,255,.05)` |
+| Ember (fill / dot / button label) | `#e2604a` / `#ff7a63` / `#f6b3a4`, silence dot `#c9553f` |
+| Amber | `#e2984a` / `#f0b56a` / `#f0b56a` |
+| Sage | `#8fbf9a` / `#8fbf9a` / `#bfe6c8` |
+| Transcript | Source Serif 4, 19px/1.6, weight 300; `#e4ddd4` live, `#f4efe8` at ready |
+| Geometry | status line `17/20`, gap 10; text area `14/22/16`; pill radius 16, padding `9 10 9 16`, buttons radius 11 |
+
+A first pass was implemented by reading screenshots of the PDF, which got the
+gradients, radii and hex values wrong — flat fills, radius 16, and a palette
+(`#c9553f`/`#cf9741`/`#4f8f63`) uniformly darker and less saturated than the
+design. Working from the source HTML corrected all of it. Two structural
+errors came out of the same pass: the action pill was given a uniform
+`margin-top: 12px` when the design only opens that gap when the rail is
+present, and the rail Overlay was held in the tree at 2px even when hidden. A
+probe settled it — `card h=186` was exactly the sum of its children's natural
+heights, so nothing was being squeezed and the gap was the pill's own margin.
+The rail is now hidden outside working/ready and carries its own 12px.
+
+`source-serif` and `ibm-plex` are now **non-optional** in `shell.nix`. Without
+Source Serif 4 the transcript silently falls back to DejaVu Serif and the
+design reads wrong.
+
+### Deliberate override of a design `CUT`: level-meter zones
+
+The design cuts level zones outright — "no clip pip, no CLIP tag, no zone
+colours — one ember hue throughout" — arguing that someone dictating a Slack
+message does not know what clipping is. **That is overruled, and it should
+not be reverted.** The meter is used as a mic-gain check, and a single ember
+hue meant it "only ever goes red", destroying the signal it existed to carry.
+
+The dots take four zones via a `--vox-level` property swapped by a class on
+`.level-dots`:
+
+| Zone | Fraction | RMS dBFS | Colour |
+|---|---|---|---|
+| low | ≤ 0.33 | < −40.2 | `#8d8378` grey |
+| good | 0.33–0.80 | −40.2 … −12 | `#8fbf9a` sage |
+| hot | 0.80–0.95 | −12 … −3 | `#e2984a` amber |
+| clip | > 0.95 | > −3 | `#ff5540` red |
+
+**The thresholds are the pre-BREATH ones, carried over unchanged.** The meter
+is only useful as a gain check if "green" keeps meaning the same input level,
+so the boundaries were not retuned — only the colours, because the originals
+(`#22c55e`, `#ef4444`) are stock traffic-light and fight the muted palette.
+Zones apply only while VAD reports speech: a level sampled during silence is
+the room's noise floor, and colouring it would report the room, not the mic.
+
+This is the one place the "one hue carries the state" rule is broken on
+purpose. The meter answers *is my mic set up right*, which is a different
+question from *what is the app doing*, and it is the single signal one hue
+cannot carry. Halo, status dot, rail and Stop still follow the state hue.
+
+### Three regressions the rewrite introduced
+
+**The meeting app was broken, and worse than it first appeared.** Every custom
+property had been declared inside `.card`, which meeting windows have no
+ancestor of, so `--vox-fg`, `--vox-fg-dim` and `--vox-hue-bright` were all
+unresolved there. Beyond that, the decoration-stripping rules were on bare
+`window` — so they were also blanking the *meeting* windows' backgrounds,
+which is why the session list rendered with a white headerbar. The palette
+moved to `window`; the stripping rules are scoped to a new `.overlay-window`
+class set by `OverlayWindow._build`; `vu-meter`, `error-bar`, `error-icon` and
+the per-state `.status-dot` colours are restored. Both meeting windows are
+back in the screenshot harness so this class of regression is visible again.
+
+**Drag-to-move was gone.** It had come for free from the `Gtk.HeaderBar` being
+the visible status row; once the status line moved into the card the titlebar
+was invisible and zero-height. The row is now wrapped in a `Gtk.WindowHandle`.
+
+**Ctrl+C copied nothing at READY** — the read-only TextView holds focus and
+handles the accelerator itself. See `docs/debugging-guide.md` §13 for that and
+the rest of the GTK4 traps this work turned up.
+
+### Window height: a ratchet, and an honest map size
+
+Each pass (live → batch → cleanup) clears the buffer, so the card collapsed to
+one line and re-grew three times a session, tearing the window. The text area
+is now a ratchet — `_resize_text_area()` keeps a `_height_floor` it never goes
+below. The cap only ever rises (6 lines live → 10 at ready), so the floor can
+never push past the line limit. Cost is some empty space when a later pass is
+genuinely shorter, which is the intended trade.
+
+Separately, the window was mapped at 131px while still INITIALIZING — a stub
+with transcript, meter and buttons all hidden — and the compositor centres
+what it sees at map time. `_prime_initial_size()` fixes it; details in the
+debugging guide.
+
+### Known remaining deviation
+
+The §2 text handoff calls for two `Gtk.TextView`s in a `Gtk.Overlay`
+crossfading over 220ms with the buffer never cleared. Not implemented; the
+code still clears on each handoff. Left deliberately — it is animation-only so
+the screenshot loop cannot verify it, and it lands in `_resize_text_area()`,
+the most delicate code in `ui.py`. Do it at a real display, not blind.
+
+**Files changed:** `src/voxize/style.css` (rewrite), `src/voxize/ui.py`,
+`src/voxize/app.py`, `shell.nix`, `scripts/generate_screenshots.py`,
+`docs/debugging-guide.md`.
