@@ -96,6 +96,9 @@ uv run python -m voxize.meeting
 
 <img src="assets/meeting-welcome.png" alt="Meeting session list" width="400">
 
+> [!NOTE]
+> The meeting recorder is deliberately plain. It picks up the dictation overlay's palette — same ember level meters, same sage "done" dot — but not its design language: these are ordinary GTK windows, not the floating card. The visual refresh covered the dictation overlay only. Everything here works; it just hasn't been designed.
+
 After recording, a built-in workbench lets you transcribe with speaker diarization, rename speakers, and generate meeting titles — all without leaving the app. You can supply key terms before transcribing to improve accuracy on domain-specific vocabulary.
 
 **Why ElevenLabs for meetings, not OpenAI?** Dictation prompts are short, technical, and latency-sensitive — OpenAI's `gpt-transcribe` excels there, especially with `WHISPER.txt` vocabulary guidance. Meetings are longer, more conversational, and need speaker diarization — ElevenLabs' Scribe v2 ranks [#1 across 49 models](https://artificialanalysis.ai/articles/aa-wer-v2) with a 2.3% word error rate, nearly twice as accurate as OpenAI's batch model. Voxize uses the best tool for each job.
