@@ -63,12 +63,17 @@ class BackendClient:
         A malformed command (wrong field set) is a bug and raises
         ``protocol.ProtocolError``.
         """
-        line = protocol.encode(protocol.command(type_, **fields))
+        # backslashreplace: a cwd read from /proc may hold non-UTF-8 bytes
+        # (surrogateescape'd in the str). They go out as a JSON \udcXX escape
+        # and come back as the same str, so os.fsencode recovers the bytes.
+        data = protocol.encode(protocol.command(type_, **fields)).encode(
+            "utf-8", errors="backslashreplace"
+        )
         if not self._stdin_open:
             logger.debug("send: %s dropped, stdin closed", type_)
             return
         try:
-            self._proc.stdin.write(line.encode("utf-8"))
+            self._proc.stdin.write(data)
             self._proc.stdin.flush()
             logger.debug("send: %s", type_)
         except (BrokenPipeError, OSError, ValueError) as e:

@@ -152,3 +152,25 @@ def test_send_after_the_backend_exited_is_harmless():
     proc.wait(timeout=10)
     client.send("stop")  # must not raise
     client.send("stop")
+
+
+def test_a_non_utf8_cwd_reaches_the_backend(tmp_path):
+    # /proc hands back raw bytes; Python surrogateescapes them into the str.
+    cwd = tmp_path / os.fsdecode(b"caf\xe9")
+    cwd.mkdir()
+    (cwd / "WHISPER.txt").write_text("Glossary: Luup")
+    proc = spawn_backend()
+    rec = Recorder()
+    lost: list[str] = []
+    client = BackendClient(proc, on_event=rec, on_lost=lost.append)
+    client.send("start", cwd=str(cwd), glossaries=[])
+    run_until(lambda: rec.of("context"), what="context")
+    [source] = rec.of("context")[0]["sources"]
+    assert os.fsencode(source["path"]) == os.fsencode(cwd / "WHISPER.txt")
+    run_until(lambda: "RECORDING" in rec.states(), what="RECORDING")
+    client.finish()
+    client.send("close", trash_if_empty=False)
+    client.close_stdin()
+    run_until(lambda: client.eof, what="stdout EOF")
+    assert proc.wait(timeout=10) == 0
+    assert lost == []
