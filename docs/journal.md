@@ -1336,9 +1336,10 @@ module, only `protocol`, `config`, `_trace`, `clipboard` and `mode_switcher`.
   of lag, the same cadence as the old wait tick).
 
 **Behaviour changes, deliberate:**
-- Startup check failures (missing API key or tool) now show in the ERROR card.
+- Startup check failures (a missing API key) now show in the ERROR card.
   They used to print to stderr and exit before any window, invisible from a
-  hotkey.
+  hotkey. The backend only checks the key; missing GTK still prints to stderr
+  from `gui/__main__.py`.
 - The Ctrl+M trash rule uses a sticky "ever had content" in the presenter. The
   old `_had_first_text` flag reset on TRANSCRIBING.
 - The GUI's own diagnostics (focus and Enter routing, the instrumentation
@@ -1379,13 +1380,14 @@ real sessions each, time-to-window and time-to-mic from `VOXIZE_TRACE`,
 medians of three. To be filled in here.
 
 **Deferred, not fixed:**
-- Stale `text` events are possible after CANCELLED (no state gate in the
-  begin-transcribing and delta handlers, inherited from `app.py`); they now
-  reach the protocol and flip `had_content`.
+- ~~Stale `text` events after CANCELLED~~ Resolved in the final review:
+  `_on_batch_delta` / `_on_cleanup_delta` / `_begin_transcribing` are now
+  state-gated.
 - The vocabulary icon now appears with the backend's `context` event, a few
   frames after the window is presented. Check on a real display.
-- The packaged (Nix-wrapped) build must resolve `voxize` in the child
-  (`sys.executable -m voxize.backend`); verify in nix-meridian.
+- ~~Nix-wrapped build resolving `voxize` in the child~~ Resolved:
+  nix-meridian's `package.nix` already sets `--prefix PYTHONPATH`; it only
+  needs a rev bump.
 - The real D-Bus focused-window path of `gui/context.py` was not exercised
   in the sandbox.
 - A GUI-side failure before `session` leaves no `gui.log`.

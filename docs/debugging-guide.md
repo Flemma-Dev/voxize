@@ -87,7 +87,7 @@ Each recording session creates a directory under `$XDG_STATE_HOME/voxize/` (typi
 
 **`batch_events.jsonl`** logs every event from the batch transcription API (request, `transcript.text.delta`, `transcript.text.done` with usage). This is the key file for diagnosing batch accuracy issues.
 
-**`debug.log`** has trace-level logging from all threads with millisecond timestamps and thread names. This is the primary debugging tool. Progress-bar lines start with `pipeline_progress:` and come from logger `voxize.backend.presenter`; `contrib/calibrate-progress-bar.py` reads them.
+**`debug.log`** has trace-level logging from all threads with millisecond timestamps and thread names. This is the primary debugging tool. Progress-bar lines start with `pipeline_progress:` and come from logger `voxize.backend.presenter`; they are the predicted-vs-actual record. `contrib/calibrate-progress-bar.py` reads the `phase_timing:` lines from `voxize.batch` and `voxize.cleanup` instead.
 
 **`protocol.jsonl`** is every message the backend sent and received, timestamped, one JSON object per line. Use it to tell a backend problem (the event never went out) from a GUI problem (it went out and the window ignored it). Messages before `session` are buffered and written once the directory exists.
 

@@ -40,7 +40,7 @@ State machine drives: INITIALIZING -> RECORDING -> TRANSCRIBING -> CLEANING -> R
 
 Thread bridge (inside the backend): `GLib.idle_add` (worker -> main loop), `call_soon_threadsafe` (main loop -> asyncio).
 
-**The backend is a separate process.** `python -m voxize.backend` runs on a plain `GLib.MainLoop` and is driven over stdio by `voxize.protocol` JSON Lines (commands on stdin, events on stdout). The GTK window is a subprocess client of it; a Textual TUI is planned as the second client. Only `voxize/gui/` touches GTK4, and frontends import only `protocol`, `config`, `_trace`, `clipboard` and `mode_switcher`. **The dividing rule:** the backend owns domain facts and the estimates derived from them; frontends own presentation and interaction (see `docs/architecture-decision-headless-backend.md`). Tests (`tests/test_import_rules.py`) enforce both directions: no Gtk/Gdk/Adw or `voxize.gui` in the backend, no backend modules in the GUI.
+**The backend is a separate process.** `python -m voxize.backend` runs on a plain `GLib.MainLoop` and is driven over stdio by `voxize.protocol` JSON Lines (commands on stdin, events on stdout). The GTK window is a subprocess client of it; a Textual TUI is planned as the second client. Only `voxize/gui/` touches GTK4, and frontends import only `protocol`, `config`, `_trace`, `clipboard` and `mode_switcher`. **The dividing rule:** the backend owns domain facts and the estimates derived from them; frontends own presentation and interaction (see `docs/architecture-decision-headless-backend.md`). Tests enforce both directions: `tests/test_backend_stdio.py::test_backend_never_imports_gtk_or_frontends` for the backend (no Gtk/Gdk/Adw, `voxize.gui` or `voxize.tui`), `tests/test_import_rules.py` for the GUI (no backend modules).
 
 ### Module map
 
@@ -51,10 +51,11 @@ Thread bridge (inside the backend): `GLib.idle_add` (worker -> main loop), `call
 | `backend/presenter.py` | Pipeline progress model, stall detection, transcript stage handoffs, failure fallback, `had_content` |
 | `backend/stdio.py` | `claim_stdout()`: moves the real stdout to a private fd for protocol lines and points fd 1 at stderr |
 | `backend/server.py` | Stdio server: private stdout fd, stdin watch, `protocol.jsonl`, EOF/signal/close lifecycle |
+| `gui/__main__.py` | GUI entry point: spawns the backend subprocess before importing GTK, then runs `VoxizeApp` |
 | `gui/app.py` | GTK Application: protocol client, keys, signals, clipboard |
 | `gui/ui.py` | Dictation window widgets: toolbar strip, transcript card, status row, level/progress strip |
 | `gui/context.py` | Focused-window detection → `cwd` + glossary paths for `start` |
-| `gui/backend_client.py` | Spawns the backend, reads events, sends commands, logs its stderr |
+| `gui/backend_client.py` | Wraps the spawned backend's pipes: reads events, sends commands, logs its stderr |
 | `gui/client_state.py` | State mirror: applies events, terminal states are final |
 | `state.py` | State machine (pure logic, no GTK) |
 | `_audio_const.py` | Audio format constants (sample rate, channels, WAV header) — no heavy deps |
