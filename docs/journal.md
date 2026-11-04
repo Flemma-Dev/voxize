@@ -1500,8 +1500,8 @@ failure still sends the same sequence as before.
   no longer reach the pipe.
 
 **Verified, and how:**
-- `uv run pytest -q`: 217 passed on the final code (119 after the GUI
-  refactor, Task 3), ruff and black clean. New tests: `ClientCore`,
+- `uv run pytest -q`: 217 passed on the final code (119 right after the
+  GUI refactor), ruff and black clean. New tests: `ClientCore`,
   `SessionLog` and `BackendPipe`; the card model; the clipboard chain and
   stdout rules; the Textual app with fakes (`run_test`, headless); the same
   app against a real mock backend for each `VOXIZE_MOCK_OUTCOME`; and
@@ -1509,14 +1509,14 @@ failure still sends the same sequence as before.
   a pty with stdout a pipe and asserts the transcript has no trailing
   newline, exit 0 and no process left behind. Moving `isatty` after the
   claim makes that test fail.
-- GUI on a private Xvfb (Task 3): 24 screenshots, old build against new, 22
-  pixel-identical (the two differences are old-harness timing, in the
-  stage 1 entry); a mock dictation autoclosed with rc=0 and no orphaned
-  backend.
-- TUI screenshots (Task 10): 45 SVGs, 15 scenes at 60x12, 88x24 and 200x60.
+- GUI on a private Xvfb, after the refactor: `generate_screenshots.py --all`
+  wrote 24 screenshots without error, and a mock dictation ran to autoclose
+  with rc=0 and no orphaned backend. No old-against-new pixel comparison was
+  repeated for this work (the 22 of 24 figure is stage 1's).
+- TUI screenshots (screenshot pass): 45 SVGs, 15 scenes at 60x12, 88x24 and 200x60.
   Viewed: recording, transcribing, stalled, ready, cancel confirm. The card is
   capped at 88 columns and centred at 200x60, and fits at 60x12.
-- tmux smoke run (Task 10, private `tmux -L voxize-test`, mock mode, fake
+- tmux smoke run (private `tmux -L voxize-test`, mock mode, fake
   `wl-copy`, 100x30 pane, `voxize-tui | cat > out.txt`): exit 0; stdout was
   exactly `Fix the typo in the README.` (27 bytes, no trailing newline); the
   pipe closed 0.32 s after Enter even though the fake `wl-copy` left a 30 s
@@ -1542,6 +1542,7 @@ failure still sends the same sequence as before.
 `client.py`, `pipe.py`), `src/voxize/tui/` (new: `__main__.py`, `app.py`,
 `card.py`, `widgets.py`, `tui.tcss`, `backend.py`, `deliver.py`),
 `src/voxize/gui/app.py`, `src/voxize/gui/backend_client.py`,
-`src/voxize/_trace.py`, `pyproject.toml`, `uv.lock`,
+`src/voxize/gui/ui.py` and `scripts/generate_screenshots.py` (one-line import
+changes), `src/voxize/_trace.py`, `pyproject.toml`, `uv.lock`,
 `scripts/tui_screenshots.py`, `tests/`, `CLAUDE.md`,
 `docs/architecture-decision-headless-backend.md`, `README.md`.
