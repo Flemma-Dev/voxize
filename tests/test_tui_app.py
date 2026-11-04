@@ -25,15 +25,17 @@ SOURCES = [{"path": "/work/WHISPER.txt", "content": "Supabase, Luup."}]
 RECORDING = (HELLO, st("WARMING"), st("RECORDING"))
 
 
-def ready_with(text):
+def ready_with(text, batch=None):
+    """Scenario to READY; `batch` (default: same as `text`) is the pre-cleanup text."""
+    batch = text if batch is None else batch
     return (
         *RECORDING,
         ev("text", stage="live", op="replace", text="draft"),
         st("TRANSCRIBING"),
-        ev("text", stage="batch", op="replace", text=text),
-        ev("result", stage="batch", text=text),
+        ev("text", stage="batch", op="replace", text=batch),
+        ev("result", stage="batch", text=batch),
         st("CLEANING"),
-        ev("text", stage="batch", op="replace", text=text),
+        ev("text", stage="batch", op="replace", text=batch),
         ev("text", stage="cleaned", op="replace", text=text),
         ev("result", stage="cleaned", text=text),
         st("READY"),
@@ -246,9 +248,10 @@ def test_results_are_copied_in_order():
     app, _, copier = make()
 
     async def scenario(pilot):
-        await feed(app, pilot, *ready_with("Fix it."))
+        await feed(app, pilot, *ready_with("Fix it.", batch="fix it"))
         await pilot.pause()
-        assert copier.copies == ["Fix it.", "Fix it."]
+        assert copier.copies == ["fix it", "Fix it."]
+        assert text(app, "transcript") == "Fix it."
         assert not shown(app, "notice")
 
     run(app, scenario)
