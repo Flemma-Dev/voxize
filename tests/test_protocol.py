@@ -43,7 +43,7 @@ def test_encode_is_one_compact_line():
     )
     assert line.endswith("\n")
     assert line.count("\n") == 1  # the text's newline is escaped
-    assert "é" in line  # not é
+    assert "é" in line  # non-ASCII kept raw, not escaped as \u00e9
     assert ": " not in line
 
 
@@ -62,6 +62,11 @@ def test_decode_rejects_non_objects_and_missing_type():
     for line in ("[1]", '"x"', '{"no": "type"}', '{"type": 3}', "not json"):
         with pytest.raises(ValueError):
             protocol.decode(line)
+
+
+def test_decode_rejects_invalid_utf8_as_protocol_error():
+    with pytest.raises(ProtocolError):
+        protocol.decode(b"\xff")
 
 
 def test_decode_ignores_unknown_fields():

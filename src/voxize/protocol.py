@@ -94,7 +94,7 @@ def decode(line: str | bytes) -> dict:
     """Parse one line. Raises ProtocolError (a ValueError) if it is not a message."""
     try:
         obj = json.loads(line)
-    except json.JSONDecodeError as e:
+    except ValueError as e:  # JSONDecodeError, or UnicodeDecodeError for bad bytes
         raise ProtocolError(f"not JSON: {e}") from e
     if not isinstance(obj, dict) or not isinstance(obj.get("type"), str):
         raise ProtocolError("not a message: expected an object with a string 'type'")
