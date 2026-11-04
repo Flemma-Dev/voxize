@@ -504,3 +504,63 @@ def test_a_signal_hangs_up_without_close_and_prints_nothing():
     run(app, scenario)
     assert app.return_value is None
     assert transport.stdin_closed and "close" not in transport.types()
+
+
+class GatedClipboard(FakeClipboard):
+    """A copy that stays in flight until the test releases it."""
+
+    def __init__(self):
+        super().__init__()
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def copy(self, text):
+        self.started.set()
+        await self.release.wait()
+        return await super().copy(text)
+
+
+def test_a_signal_during_the_exit_copy_prints_nothing():
+    copier = GatedClipboard()
+    app, transport, _ = make(copier)
+
+    async def scenario(pilot):
+        await feed(app, pilot, *ready_with("Fix it."))
+        # The results' own copies are gated too; let them drain first.
+        copier.release.set()
+        await pilot.pause()
+        copier.release.clear()
+        copier.started.clear()
+        # pilot.press would wait for the gated copy; run the key's action aside.
+        enter = asyncio.create_task(app.action_primary())
+        await asyncio.wait_for(copier.started.wait(), 5)
+        app._on_signal(signal.SIGTERM)
+        copier.release.set()
+        await enter
+        await pilot.pause()
+
+    run(app, scenario)
+    assert app.return_value is None
+    assert transport.stdin_closed and "close" not in transport.types()
+
+
+class RaisingClipboard(FakeClipboard):
+    async def copy(self, text):
+        raise RuntimeError("boom")
+
+
+def test_a_failing_copy_is_logged_and_does_not_crash(caplog):
+    app, _, _ = make(RaisingClipboard())
+
+    async def scenario(pilot):
+        with caplog.at_level("ERROR", logger="voxize.tui.app"):
+            await feed(app, pilot, *ready_with("Fix it."))
+            await pilot.pause()
+        assert app.is_running
+        assert text(app, "transcript")
+
+    run(app, scenario)
+    assert any(
+        r.name == "voxize.tui.app" and "copy failed" in r.getMessage()
+        for r in caplog.records
+    )

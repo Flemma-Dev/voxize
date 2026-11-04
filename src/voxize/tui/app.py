@@ -144,6 +144,7 @@ class VoxizeTui(App[str | None]):
         self._timer: Timer | None = None
         self._confirm: ConfirmCancel | None = None
         self._leaving = False
+        self._signalled = False
         self.core.state.on_change(self._on_state_change)
 
     def get_default_screen(self) -> Screen:
@@ -307,7 +308,13 @@ class VoxizeTui(App[str | None]):
     # ── Clipboard and leaving ──
 
     async def _copy(self, text: str) -> None:
-        await self.copier.copy(text)
+        try:
+            await self.copier.copy(text)
+        except Exception:
+            # Workers run with exit_on_error=False: without this the failure
+            # would vanish. The card stays usable; tui.log gets the trace.
+            logger.exception("copy failed")
+            return
         if self.copier.unavailable and not self.card.clipboard_notice:
             self.card.set_clipboard_unavailable()
             self._render()
@@ -318,6 +325,8 @@ class VoxizeTui(App[str | None]):
         self._leaving = True
         # exit() would cancel a copy still running; let it finish first.
         await self.copier.settle()
+        if self._signalled:
+            return  # a signal during the copy already hung up and exited
         self.core.close(trash_if_empty=False)
         self.exit(self.card.deliverable)
 
@@ -328,5 +337,9 @@ class VoxizeTui(App[str | None]):
         releases the mic lock and restores ducked volumes itself.
         """
         logger.info("Signal %s received, shutting down", sig)
+        # A copy at exit may still be in flight: its _leave must not then
+        # close the backend or exit with the transcript.
+        self._signalled = True
+        self._leaving = True
         self.core.hang_up()
         self.exit(None)

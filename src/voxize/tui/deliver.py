@@ -49,6 +49,8 @@ async def run_tool(cmd: list[str], text: str, stderr: IO | int) -> bool:
     tui.log: not the terminal, which is the screen, and not a pipe, which
     the forked child would hold open. Only the parent process is awaited.
     """
+    # "replace": a lone surrogate must not raise once the tool is running.
+    data = text.encode("utf-8", errors="replace")
     try:
         proc = await asyncio.create_subprocess_exec(
             *cmd,
@@ -60,9 +62,7 @@ async def run_tool(cmd: list[str], text: str, stderr: IO | int) -> bool:
         logger.debug("run_tool: %s did not start: %s", cmd[0], e)
         return False
     try:
-        await asyncio.wait_for(
-            proc.communicate(text.encode("utf-8")), timeout=TOOL_TIMEOUT_S
-        )
+        await asyncio.wait_for(proc.communicate(data), timeout=TOOL_TIMEOUT_S)
     except (TimeoutError, OSError) as e:
         logger.debug("run_tool: %s did not finish: %r", cmd[0], e)
         with contextlib.suppress(ProcessLookupError):
@@ -149,7 +149,7 @@ def claim_terminal_stdout() -> int | None:
 
 def write_output(fd: int, text: str) -> None:
     """Write all of ``text`` to ``fd``, then close it (the reader sees EOF)."""
-    data = memoryview(text.encode("utf-8"))
+    data = memoryview(text.encode("utf-8", errors="replace"))
     try:
         while data:
             data = data[os.write(fd, data) :]

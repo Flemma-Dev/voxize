@@ -51,6 +51,20 @@ def test_run_tool_stderr_goes_to_the_given_file(tmp_path):
     assert "oops" in (tmp_path / "tui.log").read_text()
 
 
+def test_run_tool_survives_a_lone_surrogate(tmp_path):
+    got = tmp_path / "got.txt"
+    cmd = tool(tmp_path, f"cat > {got}")
+    assert asyncio.run(run_tool([cmd], "a\udc80b", subprocess.DEVNULL))
+    assert got.read_bytes() == b"a?b"
+
+
+def test_write_output_survives_a_lone_surrogate():
+    r, w = os.pipe()
+    deliver.write_output(w, "a\udc80b")
+    assert os.read(r, 100) == b"a?b"
+    os.close(r)
+
+
 def test_run_tool_failures_are_false(tmp_path, monkeypatch):
     assert not asyncio.run(
         run_tool([tool(tmp_path, "exit 3")], "x", subprocess.DEVNULL)
