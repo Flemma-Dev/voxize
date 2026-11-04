@@ -10,10 +10,11 @@ def test_first_text_of_each_stage_replaces():
     assert t.add("cleaned", "Hello, world.") == "replace"
 
 
-def test_after_a_whole_replace_the_next_same_stage_text_appends():
+def test_after_a_whole_replace_a_new_stage_replaces_and_the_same_stage_appends():
     t = Transcript()
     t.replace("batch", "Full batch transcript.")
     assert t.stage == "batch"
+    assert t.add("batch", " More") == "append"
     assert t.add("cleaned", "Full") == "replace"
 
 

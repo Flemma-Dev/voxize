@@ -222,3 +222,22 @@ def test_lone_surrogate_is_delivered_escaped_and_later_events_flow(monkeypatch):
     first, second = os.read(out_r, 65536).splitlines()
     assert protocol.decode(first)["text"] == "a\udc80b"  # round-trips as \udc80
     assert protocol.decode(second)["type"] == "hello"
+
+
+def test_protocol_jsonl_lands_in_the_session_dir(monkeypatch, tmp_path):
+    # Mock sessions create no folder, so announce one by hand.
+    server, _in_r, _in_w, _exits, _ = _in_process_server(monkeypatch)
+    server.send_hello()  # before `session`: buffered, then flushed
+    server.send(protocol.event("session", dir=str(tmp_path)))
+    server._dispatch(b'{"type":"stop"}')  # an inbound message
+    server.send(protocol.event("no_speech"))
+    server._log.close()
+    lines = (tmp_path / "protocol.jsonl").read_text().splitlines()
+    records = [json.loads(line) for line in lines]
+    assert [(r["dir"], r["msg"]["type"]) for r in records] == [
+        ("out", "hello"),
+        ("out", "session"),
+        ("in", "stop"),
+        ("out", "no_speech"),
+    ]
+    assert all(isinstance(r["t"], float) for r in records)

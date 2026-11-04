@@ -230,7 +230,12 @@ class Pipeline:
         )
 
     def delta(self, text: str, stage: str) -> None:
-        """A streaming delta of ``stage`` ("batch" or "cleaned")."""
+        """A streaming delta of ``stage`` ("batch" or "cleaned").
+
+        Call order: ``batch_first_delta`` / ``cleanup_first_delta`` comes
+        before ``delta`` for the same chunk, and ``begin()`` only on entering
+        TRANSCRIBING (Session gates both on the state).
+        """
         if not self._active:
             self._mark_progress()
             return
