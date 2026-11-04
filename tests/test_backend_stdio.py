@@ -9,6 +9,8 @@ import time
 
 from helpers import MOCK_ENV
 
+from voxize import protocol
+
 
 class Backend:
     """A backend subprocess with line-buffered event reading."""
@@ -211,3 +213,12 @@ def test_unencodable_event_does_not_silence_later_ones(monkeypatch):
     server.send({"type": "level", "dbfs": float("nan")})
     server.send({"type": "hello", "protocol": 1})
     assert b'"hello"' in os.read(out_r, 65536)
+
+
+def test_lone_surrogate_is_delivered_escaped_and_later_events_flow(monkeypatch):
+    server, _in_r, _in_w, _exits, (out_r,) = _in_process_server(monkeypatch)
+    server.send({"type": "text", "stage": "live", "op": "append", "text": "a\udc80b"})
+    server.send({"type": "hello", "protocol": 1})
+    first, second = os.read(out_r, 65536).splitlines()
+    assert protocol.decode(first)["text"] == "a\udc80b"  # round-trips as \udc80
+    assert protocol.decode(second)["type"] == "hello"

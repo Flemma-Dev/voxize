@@ -86,7 +86,12 @@ class ProtocolLog:
 class Server:
     def __init__(self, in_fd: int, out_fd: int, *, mock: MockOptions | None) -> None:
         self._in_fd = in_fd
-        self._out = os.fdopen(out_fd, "w", encoding="utf-8", buffering=1)
+        # backslashreplace: a lone surrogate in an event (valid in a Python
+        # str, not in UTF-8) is written as the literal text \udc80, which is a
+        # JSON escape inside a string and round-trips on the reader's side.
+        self._out = os.fdopen(
+            out_fd, "w", encoding="utf-8", errors="backslashreplace", buffering=1
+        )
         self._out_dead = False
         self._exited = False
         self._closing = False  # close/EOF/signal seen: write errors are expected
@@ -104,8 +109,9 @@ class Server:
         try:
             line = protocol.encode(msg)
         except ValueError:
-            # One unencodable event (NaN, lone surrogate) must not silence
-            # the rest of the stream.
+            # One unencodable event (NaN) must not silence the rest of the
+            # stream. Lone surrogates do not land here: they encode fine and
+            # are escaped by the stream's backslashreplace handler.
             logger.warning("send: dropping unencodable %s event", msg.get("type"))
             return
         try:
