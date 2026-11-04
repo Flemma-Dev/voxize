@@ -1,5 +1,11 @@
 # Voxize Implementation Journal
 
+> **Frozen at v0.3.0 (2026-11-04).** This is history: read it for why things
+> are the way they are up to that release, but don't append to it. From v0.3.1
+> on, real design choices go in `docs/architecture-decision-*.md`, short durable
+> rules in CLAUDE.md's "Key technical decisions", and measurements, deviations
+> and what wasn't verified in the commit message body.
+
 ### 2026-03-27 — Session 1: Phase 0 Bootstrap
 
 **Phase**: 0 — Bootstrap

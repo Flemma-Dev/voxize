@@ -106,7 +106,7 @@ Thread bridge (inside the backend): `GLib.idle_add` (worker -> main loop), `call
 ## Design documents
 
 - `docs/design.md` — **immutable** original specification. Never edit.
-- `docs/journal.md` — living record of implementation decisions and deviations. Append-only, chronological.
+- `docs/journal.md` — implementation decisions and deviations up to v0.3.0, chronological. **Frozen**: read it for history, don't append.
 - `docs/architecture-decision-layer-shell-and-dual-frontend.md` — why gtk4-layer-shell was dropped.
 - `docs/architecture-decision-headless-backend.md` — why the backend is a headless stdio process and the GUI is a client of it; the dividing rule.
 - `docs/debugging-guide.md` — VAD pacing experiments, debug.log format, diagnostic patterns.
@@ -115,7 +115,7 @@ Thread bridge (inside the backend): `GLib.idle_add` (worker -> main loop), `call
 
 ### Commits
 
-[Conventional Commits](https://www.conventionalcommits.org/): `feat`, `fix`, `docs`, `refactor`, etc. Always ask before committing. Journal entries amend into feature commits, not separate.
+[Conventional Commits](https://www.conventionalcommits.org/): `feat`, `fix`, `docs`, `refactor`, etc. Always ask before committing. The story of a change — measurements, deviations, what wasn't verified — goes in the commit message body; a real design choice gets an ADR (`docs/architecture-decision-*.md`); a short durable rule goes in Key technical decisions.
 
 ### Linting
 
