@@ -33,7 +33,7 @@ gi.require_version("Gtk", "4.0")
 from gi.repository import Adw, Gdk, GLib, Graphene, Gsk, Gtk, Pango  # noqa: E402
 
 from voxize import mode_switcher  # noqa: E402
-from voxize.gui.client_state import ClientState  # noqa: E402
+from voxize.frontend.state import ClientState  # noqa: E402
 from voxize.gui.ui import OverlayWindow, _format_timer  # noqa: E402
 from voxize.meeting.sessions import list_meeting_sessions  # noqa: E402
 from voxize.protocol import State  # noqa: E402

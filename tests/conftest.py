@@ -1,5 +1,6 @@
-"""Shared test setup: every test gets its own XDG dirs and a clean VOXIZE_* env."""
+"""Shared test setup: own XDG dirs, a clean VOXIZE_* env, a clean voxize logger."""
 
+import logging
 import os
 
 import pytest
@@ -12,3 +13,17 @@ def _isolated_env(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
     for key in [k for k in os.environ if k.startswith("VOXIZE_")]:
         monkeypatch.delenv(key)
+
+
+@pytest.fixture(autouse=True)
+def _restore_voxize_logger():
+    # Frontends attach a SessionLog to logger "voxize" and set it to DEBUG;
+    # undo both so no test writes into another's log.
+    root = logging.getLogger("voxize")
+    handlers, level = list(root.handlers), root.level
+    yield
+    for handler in list(root.handlers):
+        if handler not in handlers:
+            root.removeHandler(handler)
+            handler.close()
+    root.setLevel(level)

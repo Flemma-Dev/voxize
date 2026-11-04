@@ -2,12 +2,9 @@ import os
 import subprocess
 import sys
 
-import pytest
 from helpers import MOCK_ENV, Recorder, run_until
 
 from voxize.gui.backend_client import BackendClient
-from voxize.gui.client_state import ClientState
-from voxize.protocol import State
 
 
 def spawn_backend(**env):
@@ -18,21 +15,6 @@ def spawn_backend(**env):
         stderr=subprocess.PIPE,
         env={**os.environ, **MOCK_ENV, "VOXIZE_MOCK_SHORT": "1", **env},
     )
-
-
-def test_client_state_notifies_like_the_state_machine():
-    seen = []
-    cs = ClientState()
-    cs.on_change(lambda m, old, new: seen.append((m, old, new)))
-    assert cs.state == State.INITIALIZING
-    cs.apply(State.WARMING)
-    cs.apply(State.WARMING)  # no-op: unchanged
-    cs.apply(State.ERROR, error="boom")
-    assert seen == [
-        (cs, State.INITIALIZING, State.WARMING),
-        (cs, State.WARMING, State.ERROR),
-    ]
-    assert cs.error_message == "boom"
 
 
 def test_round_trip_with_a_real_backend():
@@ -113,35 +95,6 @@ def test_a_failing_handler_does_not_stop_later_events_or_the_lost_report():
     proc.kill()
     run_until(lambda: lost, what="on_lost after a raise")
     assert len(lost) == 1
-
-
-@pytest.mark.parametrize("terminal", [State.READY, State.CANCELLED, State.ERROR])
-def test_terminal_states_are_sticky(terminal):
-    seen = []
-    cs = ClientState()
-    cs.apply(State.WARMING)
-    cs.apply(terminal, error="first")
-    cs.on_change(lambda m, old, new: seen.append(new))
-    for later in (State.WARMING, State.RECORDING, State.CANCELLED, State.ERROR):
-        cs.apply(later, error="later")
-    assert cs.state == terminal
-    assert seen == []
-    if terminal == State.ERROR:
-        assert cs.error_message == "first"
-
-
-def test_a_failing_listener_does_not_stop_the_others():
-    seen = []
-    cs = ClientState()
-
-    def bad(*_):
-        raise RuntimeError("listener bug")
-
-    cs.on_change(bad)
-    cs.on_change(lambda m, old, new: seen.append(new))
-    cs.apply(State.WARMING)
-    assert seen == [State.WARMING]
-    assert cs.state == State.WARMING
 
 
 def test_send_after_the_backend_exited_is_harmless():

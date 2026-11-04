@@ -1,10 +1,10 @@
-"""The GUI's copy of the backend's session state.
+"""A frontend's copy of the backend's session state.
 
 Reads like voxize.state.StateMachine — ``state``, ``error_message``,
-``on_change(cb)`` with ``cb(machine, old, new)`` — so ui.py reads it the way
-it read the real machine. Transitions come from ``state`` events: the GUI
-never decides one, except ERROR when the backend is lost. READY, CANCELLED
-and ERROR are terminal here as in the backend: later transitions are refused.
+``on_change(cb)`` with ``cb(machine, old, new)``. Transitions come from
+``state`` events: a frontend never decides one, except ERROR when the
+backend is unusable (voxize.frontend.client). READY, CANCELLED and ERROR are
+terminal here as in the backend: later transitions are refused.
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ from voxize.protocol import State
 
 logger = logging.getLogger(__name__)
 
-_TERMINAL = frozenset({State.READY, State.CANCELLED, State.ERROR})
+TERMINAL = frozenset({State.READY, State.CANCELLED, State.ERROR})
 
 
 class ClientState:
@@ -37,9 +37,9 @@ class ClientState:
         old = self._state
         if new == old:
             return
-        if old in _TERMINAL:
+        if old in TERMINAL:
             # Terminal means terminal, as in the backend's machine: a late
-            # event must not pull the window off READY or an error card.
+            # event must not pull the frontend off READY or an error card.
             logger.debug(
                 "state: %s -> %s refused, already terminal", old.name, new.name
             )

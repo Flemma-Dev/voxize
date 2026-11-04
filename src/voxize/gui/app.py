@@ -32,8 +32,8 @@ from gi.repository import Adw, Gdk, Gio, GLib, Gtk  # noqa: E402
 
 from voxize import clipboard, config, protocol  # noqa: E402
 from voxize._trace import trace as _trace  # noqa: E402
+from voxize.frontend.state import ClientState  # noqa: E402
 from voxize.gui.backend_client import BackendClient  # noqa: E402
-from voxize.gui.client_state import ClientState  # noqa: E402
 from voxize.gui.context import detect_context  # noqa: E402
 from voxize.gui.ui import OverlayWindow, describe_widget  # noqa: E402
 from voxize.protocol import State  # noqa: E402

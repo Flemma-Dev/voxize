@@ -25,7 +25,7 @@ gi.require_version("Gtk", "4.0")
 # gi.require_version() above is executable code; all subsequent imports trigger E402.
 from gi.repository import Adw, Gdk, Gio, GLib, Gtk, Pango  # noqa: E402
 
-from voxize.gui.client_state import ClientState  # noqa: E402
+from voxize.frontend.state import ClientState  # noqa: E402
 from voxize.protocol import State  # noqa: E402
 
 # No prediction (L < 50): pulse instead of a fraction.
