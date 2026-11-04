@@ -1,20 +1,12 @@
 """State machine for Voxize session lifecycle."""
 
 import logging
-from enum import Enum, auto
+
+from voxize.protocol import State
+
+__all__ = ["InvalidTransition", "State", "StateMachine"]
 
 logger = logging.getLogger(__name__)
-
-
-class State(Enum):
-    INITIALIZING = auto()
-    WARMING = auto()
-    RECORDING = auto()
-    TRANSCRIBING = auto()
-    CLEANING = auto()
-    READY = auto()
-    CANCELLED = auto()
-    ERROR = auto()
 
 
 _ALLOWED: dict[State, frozenset[State]] = {
