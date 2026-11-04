@@ -30,6 +30,18 @@ else:
     _T0 = time.monotonic()
 
 _PREV = _T0
+_TAG = ""
+
+
+def set_tag(tag: str) -> None:
+    """Prefix this process's trace lines, e.g. ``[gui]`` or ``[backend]``."""
+    global _TAG
+    _TAG = f"[{tag}] "
+
+
+def export_origin() -> None:
+    """Make child processes measure from our t=0 (via VOXIZE_TRACE_T0)."""
+    os.environ["VOXIZE_TRACE_T0"] = repr(time.time() - (time.monotonic() - _T0))
 
 
 def trace(label: str) -> None:
@@ -41,7 +53,7 @@ def trace(label: str) -> None:
     delta_ms = (now - _PREV) * 1000
     _PREV = now
     print(
-        f"[voxize-trace] t+{total_ms:8.1f}ms  (+{delta_ms:7.1f}ms)  {label}",
+        f"[voxize-trace] {_TAG}t+{total_ms:8.1f}ms  (+{delta_ms:7.1f}ms)  {label}",
         file=sys.stderr,
         flush=True,
     )

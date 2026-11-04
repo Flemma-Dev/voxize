@@ -5,9 +5,13 @@ transcription deltas, gpt-transcribe batch streaming (with upload progress)
 and GPT-5.6 Luna cleanup streaming, plus a level meter for the UI to poll.
 """
 
+from __future__ import annotations
+
 import logging
 import math
+import os
 import time
+from dataclasses import dataclass
 
 from gi.repository import GLib
 
@@ -55,6 +59,57 @@ _CLEANED = (
     "is that the friction between having a thought and having it "
     "written down cleanly should be as close to zero as possible."
 )
+
+
+@dataclass(frozen=True)
+class MockOptions:
+    """Mock-mode knobs, from the VOXIZE_MOCK* environment variables.
+
+    ``fast`` (VOXIZE_MOCK_FAST=1) shrinks the fixed delays — warming,
+    preview start, cleanup thinking time and cleanup token rate — so tests
+    can run a whole dictation in a few seconds.
+    """
+
+    outcome: str = "ok"
+    short: bool = False
+    error_ms: int | None = None
+    stop_ms: int | None = None
+    ttfb_ms: int = 1200
+    fast: bool = False
+
+    @property
+    def warming_ms(self) -> int:
+        return 50 if self.fast else 1500
+
+    @property
+    def preview_delay_ms(self) -> int:
+        return 50 if self.fast else 1500
+
+    @property
+    def cleanup_delay_ms(self) -> int:
+        return 50 if self.fast else 2500
+
+    @property
+    def cleanup_tick_ms(self) -> int:
+        return 5 if self.fast else 60
+
+    @classmethod
+    def from_env(cls, env=os.environ) -> MockOptions | None:
+        if not env.get("VOXIZE_MOCK"):
+            return None
+
+        def _int(name: str) -> int | None:
+            value = env.get(name)
+            return int(value) if value else None
+
+        return cls(
+            outcome=env.get("VOXIZE_MOCK_OUTCOME", "ok"),
+            short=bool(env.get("VOXIZE_MOCK_SHORT")),
+            error_ms=_int("VOXIZE_ERROR"),
+            stop_ms=_int("VOXIZE_STOP"),
+            ttfb_ms=int(env.get("VOXIZE_MOCK_TTFB", "1200")),
+            fast=bool(env.get("VOXIZE_MOCK_FAST")),
+        )
 
 
 class MockLevelMeter:
@@ -218,9 +273,12 @@ class MockBatch:
 class MockCleanup:
     """Emits cleaned text word-by-word at ~16 words/sec (simulates fast API streaming)."""
 
-    def __init__(self, text: str = _CLEANED, fail: bool = False) -> None:
+    def __init__(
+        self, text: str = _CLEANED, fail: bool = False, tick_ms: int = 60
+    ) -> None:
         self._text = text
         self._fail = fail
+        self._tick_ms = tick_ms
         self._source: int | None = None
         self._words: list[str] = []
         self._pos = 0
@@ -262,7 +320,7 @@ class MockCleanup:
 
     def _begin(self) -> bool:
         logger.debug("MockCleanup._begin: starting token emission")
-        self._source = GLib.timeout_add(60, self._tick)
+        self._source = GLib.timeout_add(self._tick_ms, self._tick)
         return False  # one-shot
 
     def _tick(self) -> bool:

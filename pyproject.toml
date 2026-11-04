@@ -60,3 +60,6 @@ testpaths = ["tests"]
 pythonpath = ["src"]
 # Nothing here uses anyio; its pytest plugin emits a PytestRemovedIn10Warning.
 addopts = "-p no:anyio"
+# PyGObject warns on import of GLib (its override reads the deprecated
+# unix_signal_add_full); nothing here can change that, so keep the run quiet.
+filterwarnings = ["ignore:GLib.unix_signal_add_full is deprecated:gi.PyGIDeprecationWarning"]

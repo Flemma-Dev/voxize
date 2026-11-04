@@ -145,8 +145,12 @@ def _config_path() -> str:
 def _write_template(path: str) -> bool:
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w") as f:
+        # Atomic: the GUI and the backend both call load() at startup, so a
+        # first run can have two writers. A reader must never see half a file.
+        tmp = f"{path}.{os.getpid()}.tmp"
+        with open(tmp, "w") as f:
             f.write(_TEMPLATE)
+        os.replace(tmp, path)
     except OSError:
         logger.debug("config: failed to write template at %s", path, exc_info=True)
         return False

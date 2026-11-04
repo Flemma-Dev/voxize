@@ -25,19 +25,13 @@ _GENERIC_SCHEMA = Secret.Schema.new(
 
 
 def check_all() -> list[str]:
-    """Run all startup checks, returning a list of error messages (empty = all good)."""
+    """Run the backend's startup checks, returning error messages (empty = all good).
+
+    The backend needs no GTK; the GUI checks for GTK itself before it
+    imports it.
+    """
     logger.debug("check_all: running startup checks")
     errors: list[str] = []
-
-    # GTK4
-    try:
-        gi.require_version("Gtk", "4.0")
-        from gi.repository import Gtk  # noqa: F401
-
-        logger.debug("check_all: GTK4 available")
-    except (ImportError, ValueError) as e:
-        logger.debug("check_all: GTK4 not available: %s", e)
-        errors.append(f"GTK4 not available: {e}")
 
     # API keys via libsecret
     for service, label in [("openai", "OpenAI")]:
