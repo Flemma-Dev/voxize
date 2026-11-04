@@ -28,7 +28,11 @@ _trace.trace("backend spawned")
 
 from voxize.tui.app import VoxizeTui  # noqa: E402 — after the backend spawn
 from voxize.tui.backend import AsyncBackendClient  # noqa: E402
-from voxize.tui.deliver import final_output  # noqa: E402
+from voxize.tui.deliver import (  # noqa: E402
+    claim_terminal_stdout,
+    final_output,
+    write_output,
+)
 
 _trace.trace("imported voxize.tui.app")
 
@@ -40,6 +44,9 @@ def main() -> None:
         lambda on_event, on_lost: AsyncBackendClient(BACKEND, on_event, on_lost),
         cwd=cwd,
     )
+    # Decided before claiming: final_output wants the original stdout's kind.
+    isatty = sys.stdout.isatty()
+    out_fd = claim_terminal_stdout()
     _trace.trace("VoxizeTui() constructed; entering app.run()")
     # From here Textual owns stderr (the screen): trace lines go to tui.log.
     _trace.set_sink(logging.getLogger("voxize.tui.trace").debug)
@@ -48,8 +55,10 @@ def main() -> None:
     finally:
         _trace.set_sink(None)
         app.session_log.detach()
-    out, code = final_output(text, sys.stdout.isatty())
-    if out:
+    out, code = final_output(text, isatty)
+    if out_fd is not None:
+        write_output(out_fd, out)
+    elif out:
         sys.stdout.write(out)
         sys.stdout.flush()
     sys.exit(code)

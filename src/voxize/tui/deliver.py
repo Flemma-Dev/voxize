@@ -125,3 +125,33 @@ def final_output(text: str | None, isatty: bool) -> tuple[str, int]:
     if not text:
         return "", 1
     return (text + "\n" if isatty else text), 0
+
+
+def claim_terminal_stdout() -> int | None:
+    """Give fd 1 to the terminal; return a private fd for the transcript.
+
+    Textual sizes the screen with ``shutil.get_terminal_size()``, which asks
+    fd 1. With ``voxize-tui | consumer`` that is a pipe, so the card would
+    be laid out at the 80x24 fallback whatever the real terminal size is.
+    So when stdout is not a terminal but stderr is, the pipe moves to a
+    private fd (non-inheritable, so no child holds it open) and fd 1 becomes
+    the terminal. As a side benefit, a stray write to "stdout" during the
+    run can no longer corrupt the piped transcript.
+
+    Returns None, changing nothing, when there is nothing to do.
+    """
+    if os.isatty(1) or not os.isatty(2):
+        return None
+    private = os.dup(1)  # non-inheritable by default (PEP 446)
+    os.dup2(2, 1)
+    return private
+
+
+def write_output(fd: int, text: str) -> None:
+    """Write all of ``text`` to ``fd``, then close it (the reader sees EOF)."""
+    data = memoryview(text.encode("utf-8"))
+    try:
+        while data:
+            data = data[os.write(fd, data) :]
+    finally:
+        os.close(fd)

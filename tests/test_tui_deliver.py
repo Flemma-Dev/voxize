@@ -4,7 +4,14 @@ Real subprocesses, but fake tools: no test touches the desktop clipboard.
 """
 
 import asyncio
+import fcntl
+import os
+import pty
+import select
+import struct
 import subprocess
+import sys
+import termios
 import time
 
 import pytest
@@ -162,3 +169,74 @@ def test_copies_are_serialised_so_cleaned_lands_last():
 )
 def test_final_output(text, isatty, expected):
     assert final_output(text, isatty) == expected
+
+
+def read_until(fd: int, marker: bytes, timeout: float = 10.0) -> bytes:
+    got, deadline = b"", time.monotonic() + timeout
+    while marker not in got and time.monotonic() < deadline:
+        if select.select([fd], [], [], 0.2)[0]:
+            try:
+                got += os.read(fd, 4096)
+            except OSError:
+                break
+    return got
+
+
+CLAIM_CHILD = """
+import os, shutil
+from voxize.tui.deliver import claim_terminal_stdout, write_output
+fd = claim_terminal_stdout()
+cols, lines = shutil.get_terminal_size()
+os.write(1, f"SIZE={cols}x{lines};FD={fd is not None};".encode())
+if fd is not None:
+    write_output(fd, "Fix it.")
+"""
+
+
+def test_claim_terminal_stdout_keeps_the_terminal_size_when_piped():
+    master, slave = pty.openpty()
+    fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 30, 100, 0, 0))
+    try:
+        proc = subprocess.Popen(
+            [sys.executable, "-c", CLAIM_CHILD],
+            stdout=subprocess.PIPE,
+            stderr=slave,
+            # The pytest run puts COLUMNS=80 in the process environment, and
+            # shutil honours it over the tty; the child must ask the tty.
+            env={k: v for k, v in os.environ.items() if k not in ("COLUMNS", "LINES")},
+        )
+        piped, _ = proc.communicate(timeout=20)
+        seen = read_until(master, b"FD=True;")
+        assert proc.returncode == 0
+    finally:
+        os.close(master)
+        os.close(slave)
+    assert b"SIZE=100x30;FD=True;" in seen
+    assert piped == b"Fix it."  # exactly, no newline added
+
+
+def test_claim_terminal_stdout_is_a_no_op_when_stdout_is_a_tty():
+    master, slave = pty.openpty()
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-c", CLAIM_CHILD],
+            stdout=slave,
+            stderr=slave,
+            timeout=20,
+        )
+        seen = read_until(master, b"FD=")
+    finally:
+        os.close(master)
+        os.close(slave)
+    assert proc.returncode == 0
+    assert b"FD=False;" in seen
+
+
+def test_claim_terminal_stdout_is_a_no_op_when_stderr_is_not_a_tty():
+    proc = subprocess.run(
+        [sys.executable, "-c", CLAIM_CHILD],
+        capture_output=True,
+        timeout=20,
+    )
+    assert proc.returncode == 0
+    assert proc.stdout.endswith(b"FD=False;")  # still on the pipe, untouched
