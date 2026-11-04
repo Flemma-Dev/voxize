@@ -112,11 +112,37 @@ def test_stdin_eof_cancels_and_exits():
     assert b.states()[-1] == "CANCELLED"
 
 
+def test_malformed_start_then_eof_still_exits():
+    b = Backend()
+    b.read_until(lambda b: b.events)
+    b.send({"type": "start", "cwd": 5, "glossaries": 5})
+    b.proc.stdin.close()
+    b.read_until(lambda b: b.eof)
+    assert b.proc.wait(timeout=10) == 0
+    assert "WARMING" not in b.states()  # the start was ignored
+    assert "malformed start" in b.stderr_text()
+
+
+def test_lines_after_close_are_not_dispatched():
+    b = Backend()
+    b.read_until(lambda b: b.events)
+    # One write, so close and the start behind it arrive in the same chunk.
+    b.proc.stdin.write(
+        b'{"type":"close","trash_if_empty":false}\n'
+        b'{"type":"start","cwd":null,"glossaries":[]}\n'
+    )
+    b.proc.stdin.flush()
+    b.read_until(lambda b: b.eof)
+    assert b.proc.wait(timeout=10) == 0
+    assert "WARMING" not in b.states()  # the start behind close never ran
+
+
 def test_sigterm_exits():
     b = Backend()
     b.send({"type": "start", "cwd": None, "glossaries": []})
     b.read_until(lambda b: "RECORDING" in b.states())
     b.proc.send_signal(signal.SIGTERM)
+    b.read_until(lambda b: b.eof)
     assert b.proc.wait(timeout=10) == 0
 
 
@@ -144,3 +170,44 @@ def test_claim_stdout_diverts_stray_writes():
     out = subprocess.run([sys.executable, "-c", code], capture_output=True, check=True)
     assert out.stdout == b'{"type":"hello","protocol":1}\n'
     assert b"stray" in out.stderr
+
+
+def _in_process_server(monkeypatch):
+    """A Server on pipes, with _exit stubbed (the real one redirects 0/1/2)."""
+    from voxize.backend.server import Server
+
+    in_r, in_w = os.pipe()
+    out_r, out_w = os.pipe()
+    server = Server(in_r, out_w, mock=None)
+    exits = []
+    monkeypatch.setattr(server, "_exit", lambda: exits.append(1))
+    return server, in_r, in_w, exits, (out_r,)
+
+
+def test_handler_exception_keeps_the_stdin_watch(monkeypatch):
+    server, in_r, in_w, _exits, _ = _in_process_server(monkeypatch)
+
+    def boom(*_a):
+        raise RuntimeError("handler bug")
+
+    monkeypatch.setattr(server.session, "start", boom)
+    os.write(in_w, b'{"type":"start","cwd":null,"glossaries":[]}\n')
+    assert server._on_stdin(in_r, None) is True  # watch survives
+
+
+def test_close_raising_still_exits_once(monkeypatch):
+    server, _in_r, _in_w, exits, _ = _in_process_server(monkeypatch)
+
+    def boom(*_a, **_k):
+        raise RuntimeError("close bug")
+
+    monkeypatch.setattr(server.session, "close", boom)
+    server._close(trash_if_empty=False)
+    assert exits == [1]
+
+
+def test_unencodable_event_does_not_silence_later_ones(monkeypatch):
+    server, _in_r, _in_w, _exits, (out_r,) = _in_process_server(monkeypatch)
+    server.send({"type": "level", "dbfs": float("nan")})
+    server.send({"type": "hello", "protocol": 1})
+    assert b'"hello"' in os.read(out_r, 65536)
