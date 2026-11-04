@@ -15,6 +15,7 @@ This project expects the [superpowers](https://github.com/obra/superpowers) plug
 ```sh
 nix develop                      # enter dev shell (all system deps)
 uv run python -m voxize          # dictation overlay (bind to a global hotkey)
+uv run voxize-tui                # terminal client (Textual); prints the transcript on exit
 uv run python -m voxize.meeting  # meeting recorder (mic + system → stereo WAV)
 uv run python -m voxize.backend  # headless backend (stdio JSON Lines; spawned by the GUI)
 ```
@@ -40,7 +41,7 @@ State machine drives: INITIALIZING -> RECORDING -> TRANSCRIBING -> CLEANING -> R
 
 Thread bridge (inside the backend): `GLib.idle_add` (worker -> main loop), `call_soon_threadsafe` (main loop -> asyncio).
 
-**The backend is a separate process.** `python -m voxize.backend` runs on a plain `GLib.MainLoop` and is driven over stdio by `voxize.protocol` JSON Lines (commands on stdin, events on stdout). The GTK window is a subprocess client of it; a Textual TUI is planned as the second client. Only `voxize/gui/` touches GTK4, and frontends import only `protocol`, `config`, `_trace`, `clipboard` and `mode_switcher`. **The dividing rule:** the backend owns domain facts and the estimates derived from them; frontends own presentation and interaction (see `docs/architecture-decision-headless-backend.md`). Tests enforce both directions: `tests/test_backend_stdio.py::test_backend_never_imports_gtk_or_frontends` for the backend (no Gtk/Gdk/Adw, `voxize.gui` or `voxize.tui`), `tests/test_import_rules.py` for the GUI (no backend modules).
+**The backend is a separate process.** `python -m voxize.backend` runs on a plain `GLib.MainLoop` and is driven over stdio by `voxize.protocol` JSON Lines (commands on stdin, events on stdout). The GTK window and the Textual terminal client (`voxize-tui`) are both subprocess clients of it. Only `voxize/gui/` touches GTK4, and frontends import only `protocol`, `config`, `_trace` and `frontend` (shared, gi-free client plumbing), plus the GTK-side `clipboard` and `mode_switcher`. **The dividing rule:** the backend owns domain facts and the estimates derived from them; frontends own presentation and interaction (see `docs/architecture-decision-headless-backend.md`). Tests enforce both directions: `tests/test_backend_stdio.py::test_backend_never_imports_gtk_or_frontends` for the backend (no Gtk/Gdk/Adw, `voxize.gui` or `voxize.tui`), `tests/test_import_rules.py` for the frontends (no backend modules; `frontend/` and `tui/` import no `gi`).
 
 ### Module map
 
@@ -55,8 +56,17 @@ Thread bridge (inside the backend): `GLib.idle_add` (worker -> main loop), `call
 | `gui/app.py` | GTK Application: protocol client, keys, signals, clipboard |
 | `gui/ui.py` | Dictation window widgets: toolbar strip, transcript card, status row, level/progress strip |
 | `gui/context.py` | Focused-window detection → `cwd` + glossary paths for `start` |
-| `gui/backend_client.py` | Wraps the spawned backend's pipes: reads events, sends commands, logs its stderr |
-| `gui/client_state.py` | State mirror: applies events, terminal states are final |
+| `gui/backend_client.py` | `BackendPipe` on GLib watches: reads events, sends commands, logs and echoes its stderr |
+| `frontend/state.py` | `ClientState`: a frontend's mirror of the backend's state; terminal states are final |
+| `frontend/client.py` | `ClientCore`: hello/version check, sticky frontend failure, backend-lost, close-once |
+| `frontend/pipe.py` | `BackendPipe`: send, line framing, stderr tail, lost report — no event loop |
+| `frontend/session_log.py` | `SessionLog`: buffers frontend log lines until `session`, then `gui.log` / `tui.log` |
+| `tui/__main__.py` | TUI entry point: spawns the backend before importing Textual, prints the transcript on exit |
+| `tui/app.py` | Textual app: protocol client, keys, cancel confirm, vocabulary, clipboard, signals |
+| `tui/card.py` | Pure presentation model of the card (the GUI's strings and rules, no toolkit) |
+| `tui/widgets.py` / `tui/tui.tcss` | Card widgets and styles (full screen, capped at 88×24) |
+| `tui/backend.py` | `BackendPipe` on asyncio readers; backend stderr to `tui.log` only |
+| `tui/deliver.py` | Clipboard chain (wl-copy → xclip/xsel → OSC 52), the stdout write, and `claim_terminal_stdout` / `write_output` (keep Textual's size detection working when stdout is piped) |
 | `state.py` | State machine (pure logic, no GTK) |
 | `_audio_const.py` | Audio format constants (sample rate, channels, WAV header) — no heavy deps |
 | `audio.py` | `AudioCapture` (sounddevice) + `WavWriter` (crash-safe WAV) + `LevelMeter` (passive RMS) |
@@ -123,7 +133,7 @@ uv run black --check src/
 uv run pytest
 ```
 
-Presenter unit tests (fake clock); stdio contract tests that spawn `python -m voxize.backend` with `VOXIZE_MOCK=1` (`VOXIZE_MOCK_FAST=1` shrinks the fixed mock delays); in-process `Session` tests that cover each `VOXIZE_MOCK_OUTCOME`; GUI client, app and context tests; and the import-rule tests.
+Presenter unit tests (fake clock); stdio contract tests that spawn `python -m voxize.backend` with `VOXIZE_MOCK=1` (`VOXIZE_MOCK_FAST=1` shrinks the fixed mock delays); in-process `Session` tests that cover each `VOXIZE_MOCK_OUTCOME`; GUI client, app and context tests; Textual TUI tests (`run_test`, headless) with fakes and against a mock backend; and the import-rule tests.
 
 ### Running ad-hoc NixOS tools
 
@@ -144,9 +154,9 @@ Libadwaita uses CSS custom properties (`--name` / `var(--name)`), not `@define-c
 
 ## Session data
 
-`~/.local/state/voxize/<ISO-timestamp>/` — `audio.wav`, `live_transcript.txt`, `transcription.txt`, `cleaned.txt`, `prompt.txt`, `ws_events.jsonl`, `batch_events.jsonl`, `cleanup_events.jsonl`, `debug.log`, `protocol.jsonl`, `gui.log`, `recover.sh`.
+`~/.local/state/voxize/<ISO-timestamp>/` — `audio.wav`, `live_transcript.txt`, `transcription.txt`, `cleaned.txt`, `prompt.txt`, `ws_events.jsonl`, `batch_events.jsonl`, `cleanup_events.jsonl`, `debug.log`, `protocol.jsonl`, `gui.log`, `tui.log`, `recover.sh`.
 
-`protocol.jsonl` is every protocol message in and out, timestamped. `gui.log` is the GUI process's own log, including focus/Enter routing diagnostics; `debug.log` stays backend-only.
+`protocol.jsonl` is every protocol message in and out, timestamped. `gui.log` / `tui.log` is the frontend's own log, including (GUI) focus/Enter routing diagnostics; `debug.log` stays backend-only.
 
 `prompt.txt` is the vocabulary guidance as it stood at record time, verbatim — absent when the session had none. Guidance lives outside the session (a project's `WHISPER.txt`, a per-app or per-Slack-channel glossary) and gets edited, so without this there is no way to tell later whether a term was mis-transcribed because it was missing from the glossary or in spite of being there. `prompt.py:build_transcription_prompt()` is the single builder behind this file, the `prompt` sent to batch, and the one baked into `recover.sh`; they must not construct it independently or the archive stops describing what was actually sent.
 

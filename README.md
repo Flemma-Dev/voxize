@@ -86,6 +86,17 @@ nix develop /path/to/voxize --command bash -c "cd /path/to/voxize && uv run pyth
 > [!TIP]
 > Use [nix-direnv](https://github.com/nix-community/nix-direnv) to cache the dev shell — avoids the cold-start cost on every hotkey press.
 
+### Terminal client
+
+```sh
+uv run voxize-tui
+```
+
+The same dictation in your terminal, full screen: Enter stops, Enter again
+copies and exits, Esc cancels. The transcript goes to the clipboard
+(`wl-copy`, `xclip` or `xsel`, else OSC 52) and is printed on exit, so
+`voxize-tui | tmux load-buffer -` hands it to tmux.
+
 ## Meeting recorder
 
 Voxize also includes a meeting recorder that captures both your microphone and system audio into a stereo Opus file — left channel mic, right channel system.

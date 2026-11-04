@@ -1416,3 +1416,132 @@ Real-path checks on three new-build sessions:
 `contrib/calibrate-progress-bar.py`, `CLAUDE.md`, `docs/debugging-guide.md`,
 `docs/architecture-decision-headless-backend.md`,
 `docs/architecture-decision-layer-shell-and-dual-frontend.md`.
+
+### 2026-11-04 — Terminal client (voxize-tui): stage 2 of the headless backend
+
+The second frontend on the stdio backend: `uv run voxize-tui`, a Textual
+client. It is a subprocess client of `python -m voxize.backend` exactly as the
+GTK window is; the backend did not change.
+
+**What was built:**
+- The `voxize-tui` entry point (`tui/__main__.py`). It spawns the backend
+  before importing Textual, as `gui/__main__.py` does for GTK.
+- A full-screen card capped at 88x24 and centred, with the GUI's strings, dot
+  tones, dim rules, level zones, progress/stall handling, notices, cancel
+  confirm and vocabulary list. The presentation rules are in `tui/card.py`
+  with no toolkit in it.
+- A clipboard chain in `tui/deliver.py`: `wl-copy` (when `WAYLAND_DISPLAY` is
+  set), then `xclip` / `xsel` (when `DISPLAY` is set), then OSC 52, which
+  cannot confirm delivery and says so in a notice.
+- The transcript on stdout at exit. No trailing newline when stdout is not a
+  terminal (a pasted `\n` would submit the prompt in Claude Code), one when it
+  is. Exit 0 with text, 1 without.
+
+**What moved.** A gi-free `voxize/frontend/` package that both clients use:
+- `state.py`: `ClientState`, moved from `gui/client_state.py`.
+- `session_log.py` (`SessionLog`: buffers log lines until `session`, then
+  writes `gui.log` / `tui.log`), `client.py` (`ClientCore`: hello and version
+  check, sticky frontend failure, backend-lost, close-once) and `pipe.py`
+  (`BackendPipe`: send, line framing, stderr tail, lost report, no event
+  loop). Extracted from `gui/app.py` and `gui/backend_client.py`; the GLib
+  watches stay in the GUI, the asyncio readers are `tui/backend.py`.
+
+The GUI was refactored onto it with no intended behaviour change. Two
+differences are observable. `gui.log` pipe lines are now logged as
+`voxize.frontend.pipe` (was `voxize.gui.backend_client`). And after a GUI-side
+failure, a later window close or signal no longer sends `close` a second time
+to the already-closed pipe (`ClientCore.close` is once-only); the first
+failure still sends the same sequence as before.
+
+**Parity with the GUI** (spec, "Comparison with the GUI"):
+- **Kept:** labels and strings, dot tones, dim rules, level zones,
+  progress/stall/indeterminate, the notices, the cancel confirm with Keep as
+  default and force-close on READY, Ctrl+C copy, the vocabulary list, costs,
+  the timer starting at RECORDING.
+- **Replaced:** the cost tooltip becomes inline text at READY. The height
+  ratchet and 6/10-line caps become a fixed scrolling area that follows the
+  end. Enter at READY becomes copy and exit.
+- **Not in v1:** auto-close, mode switcher / Ctrl+M, Ctrl+O, selection copy,
+  the focus-deferred clipboard write (not needed: the clipboard tools have no
+  focus constraint).
+
+**Deviations from the stage 1 design:**
+- Enter at READY copies and exits. The GUI has auto-close; the TUI has none,
+  so Enter is how the card ends.
+- `textual>=8.2,<9` comes via uv, so there is no `shell.nix` change. Stage 1
+  spec said "and the Nix dev shell".
+- The clipboard falls back past `wl-copy` (xclip/xsel, then OSC 52), instead
+  of failing when there is no Wayland tool.
+- SIGINT is handled alongside SIGTERM and SIGHUP: the backend gets EOF and the
+  app quits, printing nothing.
+- INITIALIZING uses the idle (hollow) dot with "Starting…", as the GUI does
+  for WARMING.
+- Found in the smoke run, not designed: with stdout piped, Textual laid the
+  card out at 80x24 whatever the terminal was. Details below.
+
+**Textual facts that shaped the code:**
+- Textual draws on stderr, so stdout is free for the transcript, and backend
+  stderr must never be echoed (`echo_stderr=False`; it goes to `tui.log`).
+  The GUI echoes it so `VOXIZE_TRACE` stays visible; the TUI cannot.
+- An App-level priority Enter steals Enter from modals, so the card keys
+  (Enter, Esc, q, v) are bindings on `CardScreen`, and Enter on a modal's
+  button presses the button.
+- `App.clipboard` is a read-only property, hence the app's `copier`.
+- `App.on_mount` runs before the default screen is composed.
+- Textual 8.2.8 sizes the screen with `shutil.get_terminal_size()`, which
+  asks fd 1. `voxize-tui | consumer` therefore drew an 80x24 card in the
+  corner of the real terminal, leaving a stale frame outside it. Fix:
+  `deliver.claim_terminal_stdout()` moves a non-tty fd 1 to a private,
+  non-inheritable fd and points fd 1 at stderr when that is a terminal (the
+  backend's `claim_stdout` idea, in reverse); `write_output(fd, text)` writes
+  the transcript there on exit. `isatty` is computed before the claim.
+  Setting `COLUMNS` / `LINES` was rejected: it freezes the size and breaks
+  resizing. A side effect is that a stray write to stdout during the run can
+  no longer reach the pipe.
+
+**Verified, and how:**
+- `uv run pytest -q`: 217 passed on the final code (119 after the GUI
+  refactor, Task 3), ruff and black clean. New tests: `ClientCore`,
+  `SessionLog` and `BackendPipe`; the card model; the clipboard chain and
+  stdout rules; the Textual app with fakes (`run_test`, headless); the same
+  app against a real mock backend for each `VOXIZE_MOCK_OUTCOME`; and
+  `tests/test_tui_main.py`, which runs the real `python -m voxize.tui` under
+  a pty with stdout a pipe and asserts the transcript has no trailing
+  newline, exit 0 and no process left behind. Moving `isatty` after the
+  claim makes that test fail.
+- GUI on a private Xvfb (Task 3): 24 screenshots, old build against new, 22
+  pixel-identical (the two differences are old-harness timing, in the
+  stage 1 entry); a mock dictation autoclosed with rc=0 and no orphaned
+  backend.
+- TUI screenshots (Task 10): 45 SVGs, 15 scenes at 60x12, 88x24 and 200x60.
+  Viewed: recording, transcribing, stalled, ready, cancel confirm. The card is
+  capped at 88 columns and centred at 200x60, and fits at 60x12.
+- tmux smoke run (Task 10, private `tmux -L voxize-test`, mock mode, fake
+  `wl-copy`, 100x30 pane, `voxize-tui | cat > out.txt`): exit 0; stdout was
+  exactly `Fix the typo in the README.` (27 bytes, no trailing newline); the
+  pipe closed 0.32 s after Enter even though the fake `wl-copy` left a 30 s
+  background child, because clipboard tools get stdout `/dev/null`; the fake's
+  stdout was `/dev/null`; killing the tmux session mid-recording left no
+  backend running. Before the fix the pane showed the 80x24 garbage; after,
+  the card was 88 wide and centred in 100x30.
+
+**Not verified:**
+- A real dictation (microphone and API) through the TUI.
+- `wl-copy` against a real Wayland compositor.
+- `xclip` / `xsel` on X11. Their flags are the standard ones
+  (`-selection clipboard`, `--clipboard --input`) but were not checked
+  against installed tools; the sandbox could not reach the Nix store.
+- OSC 52 through tmux into the outer terminal.
+
+**Follow-ups:**
+- nix-meridian needs `textual` and the `voxize-tui` entry point, plus a rev
+  bump.
+- The tmux launcher is the next stage.
+
+**Files changed:** `src/voxize/frontend/` (new: `state.py`, `session_log.py`,
+`client.py`, `pipe.py`), `src/voxize/tui/` (new: `__main__.py`, `app.py`,
+`card.py`, `widgets.py`, `tui.tcss`, `backend.py`, `deliver.py`),
+`src/voxize/gui/app.py`, `src/voxize/gui/backend_client.py`,
+`src/voxize/_trace.py`, `pyproject.toml`, `uv.lock`,
+`scripts/tui_screenshots.py`, `tests/`, `CLAUDE.md`,
+`docs/architecture-decision-headless-backend.md`, `README.md`.

@@ -1,7 +1,7 @@
 # Architecture Decision: A Headless Backend, Driven Over Stdio
 
 **Date**: 2026-11-04
-**Status**: Decided (stage 1 implemented: backend plus GTK client; stage 2, a Textual TUI, is next)
+**Status**: Decided (stage 1: backend plus GTK client; stage 2: Textual terminal client, implemented 2026-11-04)
 **Supersedes**: points 2 ("Only `app.py` and `ui.py` touch GTK") and 3 ("Don't over-engineer the separation") of `docs/architecture-decision-layer-shell-and-dual-frontend.md`
 **Referenced from**: `docs/journal.md`, 2026-11-04
 
@@ -17,7 +17,7 @@ Voxize is a headless backend process, `python -m voxize.backend`, that frontends
 
 The GTK window becomes a subprocess client of that backend. It dogfoods the protocol instead of reaching around it, so any gap in the protocol shows up as a missing feature in the window. The Textual TUI is the second client and the proof that the backend stands alone.
 
-The backend runs on a plain `GLib.MainLoop`. It never imports Gtk, Gdk, Adw, `voxize.gui` or `voxize.tui`. Frontends import only `voxize.protocol`, `voxize.config`, `voxize._trace`, `voxize.clipboard` and `voxize.mode_switcher`. Tests enforce both directions (`tests/test_import_rules.py`).
+The backend runs on a plain `GLib.MainLoop`. It never imports Gtk, Gdk, Adw, `voxize.gui` or `voxize.tui`. Frontends import only `voxize.protocol`, `voxize.config`, `voxize._trace` and `voxize.frontend`, plus the GTK-side `voxize.clipboard` and `voxize.mode_switcher` (GUI only). Tests enforce both directions (`tests/test_import_rules.py`).
 
 ## The dividing rule
 
@@ -56,6 +56,7 @@ The backend runs on a plain `GLib.MainLoop`. It never imports Gtk, Gdk, Adw, `vo
 - **Backend stdout is private.** The backend `dup()`s fd 1 for protocol output and points fd 1 at stderr, so a stray `print` cannot corrupt the stream. Backend stderr is piped to the frontend and written to its log, never `/dev/null`.
 - **`clipboard.py` stays at `voxize/clipboard.py`.** The design had it moving into `gui/`, but the meeting recorder imports it. `voxize._trace` and `voxize.mode_switcher` are likewise allowed frontend imports.
 - **Tests exist now.** `uv run pytest`: presenter unit tests on a fake clock, stdio contract tests that spawn the backend in mock mode (`tests/test_backend_stdio.py`), in-process `Session` tests that cover each `VOXIZE_MOCK_OUTCOME` (`tests/test_session.py`), GUI client, app and context tests, and the import-rule tests. `VOXIZE_MOCK_FAST=1` is a new knob that shrinks the fixed mock delays so those tests are quick.
+- **Stage 2: `voxize-tui`.** The Textual client shares the gi-free `voxize/frontend/` plumbing with the GTK window (client rules, pipe framing, session log) and owns its presentation in `tui/card.py`. Python frontends share client plumbing; domain logic still comes over the protocol, so a non-Python frontend reimplements plumbing only.
 - **Review found three lifecycle bugs, all fixed before merge.** A malformed command used to drop the backend's stdin watch, which left an orphan holding the mic after the frontend exited. A GUI handler exception used to drop the GUI's backend watch. The GUI's own ERROR (protocol mismatch, no `hello`) was overwritten by later backend events; terminal states are now final on the GUI side.
 
 ### GUI parity
