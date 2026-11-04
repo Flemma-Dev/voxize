@@ -1372,12 +1372,25 @@ preview-lost) ran with no traceback and no orphaned backend, and killing the
 backend mid-recording leaves the GUI on an ERROR card. Escape/Enter/Ctrl+M/
 Ctrl+O, motion, and a real dictation still need a real desktop.
 
-**Startup timing.** Not yet measured; it needs a real mic and desktop. Two
-hypotheses, neither assumed: the window appears no later (the GUI spawns the
-backend first and does not wait on it), and the mic may open earlier
-(sounddevice no longer shares a GIL with the GTK import). Old and new, three
-real sessions each, time-to-window and time-to-mic from `VOXIZE_TRACE`,
-medians of three. To be filled in here.
+**Startup timing.** Old (`main`) vs new, three real sessions each,
+interleaved. `VOXIZE_TRACE` with `VOXIZE_TRACE_T0=$EPOCHREALTIME`, so `uv` and
+interpreter start are included in both.
+
+| median (runs) | window presented | mic capturing |
+|---|---|---|
+| old | 345 ms (424 / 320 / 345) | 398 ms (466 / 358 / 398) |
+| new | 382 ms (388 / 382 / 347) | 343 ms (434 / 314 / 343) |
+
+- **Window: +37 ms median.** Within spread: every new run falls inside old's 320–424 ms range. `detect_context` costs 63–95 ms before `start` is sent, the same work at the same point as before.
+- **Mic: −55 ms median.** Also within spread.
+- **The mic's critical path is still `Pa_Initialize`**, which finishes at 300–420 ms in the backend. `start` arrives at 230–295 ms, so waiting for the GUI's context does not delay the mic.
+- **Three runs don't separate either effect from noise.** The honest reading is "no measurable change". Settling either one would take many more runs.
+
+Real-path checks on three new-build sessions:
+- every priming ping ran with `prime=True`, and cleanup read `cached_tokens=1385`
+- the context resolved through Ghostty and tmux to this repo's `WHISPER.txt`
+- `protocol.jsonl` and `gui.log` were written
+- `pipeline_progress: done` was logged from `voxize.backend.presenter`
 
 **Deferred, not fixed:**
 - ~~Stale `text` events after CANCELLED~~ Resolved in the final review:

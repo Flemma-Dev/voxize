@@ -64,12 +64,19 @@ Screenshots of every dictation state, built from the old tree and the new one th
 
 ### Startup timing
 
-**Not yet measured.** Two hypotheses, neither assumed:
+Measured 2026-11-04: old (`main`) and new builds, three real sessions each, interleaved old/new. `VOXIZE_TRACE` with `VOXIZE_TRACE_T0=$EPOCHREALTIME`, so t=0 is the shell launching the command and `uv` plus interpreter start count the same in both.
 
-1. The window appears no later than before. The GUI spawns the backend first and does not wait on it.
-2. The mic may open earlier. The sounddevice import (~2 s via numpy) no longer shares a GIL with the GTK import.
+| | window presented | mic capturing | WARMING |
+|---|---|---|---|
+| old, runs | 424 / 320 / 345 ms | 466 / 358 / 398 ms | 494 / 360 / 399 ms |
+| new, runs | 388 / 382 / 347 ms | 434 / 314 / 343 ms | 435 / 315 / 344 ms |
+| old, median | 345 ms | 398 ms | 399 ms |
+| new, median | 382 ms | 343 ms | 344 ms |
 
-How: old build and new build, three real sessions each, `VOXIZE_TRACE` for time-to-window and time-to-mic, reporting medians of three. Results will be added here and in the journal.
+Neither hypothesis is settled by three runs. The spreads overlap: old's window range (320–424 ms) contains every new run.
+
+1. **Window: no later?** The median is 37 ms later, but within run-to-run spread. The GUI now spends 63–95 ms in `detect_context` (D-Bus plus the tmux query) before it sends `start` and builds the window. The old build did that work at the same point, so the extra cost, if real, is more likely the two processes competing for CPU during import.
+2. **Mic: earlier?** The median is 55 ms earlier, also within spread. The critical path is still PortAudio's `Pa_Initialize`, which finishes at 300–420 ms in the backend. The backend receives `start` at 230–295 ms, so waiting for the GUI's context never delays the mic.
 
 ## Rejected alternatives
 
