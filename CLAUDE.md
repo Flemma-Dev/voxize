@@ -16,6 +16,7 @@ This project expects the [superpowers](https://github.com/obra/superpowers) plug
 nix develop                      # enter dev shell (all system deps)
 uv run python -m voxize          # dictation overlay (bind to a global hotkey)
 uv run python -m voxize.meeting  # meeting recorder (mic + system → stereo WAV)
+uv run python -m voxize.backend  # headless backend (stdio JSON Lines; spawned by the GUI)
 ```
 
 OpenAI API key must be in GNOME Keyring: `secret-tool store --label='OpenAI API Key' service openai key api`
@@ -32,21 +33,28 @@ State machine drives: INITIALIZING -> RECORDING -> TRANSCRIBING -> CLEANING -> R
 2. **Batch transcription** (TRANSCRIBING) — `gpt-transcribe` via `POST /audio/transcriptions`. Accurate, authoritative.
 3. **Cleanup** (CLEANING) — `gpt-5.6-luna` text reformatting. Light touchup of already-clean batch output.
 
-**Threads during recording:**
-1. GTK main thread (UI)
+**Threads during recording (backend process):**
+1. Backend main loop (GLib): protocol I/O, state, callbacks. The GUI process has its own GTK main thread.
 2. sounddevice callback thread (audio capture -> WAV + asyncio queue)
 3. asyncio daemon thread (`voxize-ws`) — WebSocket send/receive (live preview)
 
-Thread bridge: `GLib.idle_add` (worker -> GTK), `call_soon_threadsafe` (GTK -> asyncio).
+Thread bridge (inside the backend): `GLib.idle_add` (worker -> main loop), `call_soon_threadsafe` (main loop -> asyncio).
 
-**Backend modules do NOT import GTK.** Only `app.py` and `ui.py` touch GTK4. Backend modules use `GLib`/`Gio` for thread-safe callbacks and I/O. This separation is a seam for a future GNOME Shell extension frontend.
+**The backend is a separate process.** `python -m voxize.backend` runs on a plain `GLib.MainLoop` and is driven over stdio by `voxize.protocol` JSON Lines (commands on stdin, events on stdout). The GTK window is a subprocess client of it; a Textual TUI is planned as the second client. Only `voxize/gui/` touches GTK4, and frontends import only `protocol`, `config`, `_trace`, `clipboard` and `mode_switcher`. **The dividing rule:** the backend owns domain facts and the estimates derived from them; frontends own presentation and interaction (see `docs/architecture-decision-headless-backend.md`). Tests (`tests/test_import_rules.py`) enforce both directions: no Gtk/Gdk/Adw or `voxize.gui` in the backend, no backend modules in the GUI.
 
 ### Module map
 
 | Module | Role |
 |---|---|
-| `app.py` | GTK Application, orchestrates lifecycle, wires providers |
-| `ui.py` | Dictation window widgets: toolbar strip, transcript card, status row, level/progress strip |
+| `protocol.py` | JSON Lines message types, encode/decode, `PROTOCOL_VERSION` — shared by backend and frontends |
+| `backend/session.py` | Dictation session: orchestrates lifecycle, wires providers, emits protocol events |
+| `backend/presenter.py` | Pipeline progress model, stall detection, transcript stage handoffs, failure fallback, `had_content` |
+| `backend/server.py` | Stdio server: private stdout fd, stdin watch, `protocol.jsonl`, EOF/signal/close lifecycle |
+| `gui/app.py` | GTK Application: protocol client, keys, signals, clipboard |
+| `gui/ui.py` | Dictation window widgets: toolbar strip, transcript card, status row, level/progress strip |
+| `gui/context.py` | Focused-window detection → `cwd` + glossary paths for `start` |
+| `gui/backend_client.py` | Spawns the backend, reads events, sends commands, logs its stderr |
+| `gui/client_state.py` | State mirror: applies events, terminal states are final |
 | `state.py` | State machine (pure logic, no GTK) |
 | `_audio_const.py` | Audio format constants (sample rate, channels, WAV header) — no heavy deps |
 | `audio.py` | `AudioCapture` (sounddevice) + `WavWriter` (crash-safe WAV) + `LevelMeter` (passive RMS) |
@@ -54,7 +62,7 @@ Thread bridge: `GLib.idle_add` (worker -> GTK), `call_soon_threadsafe` (GTK -> a
 | `batch.py` | Batch transcription: `POST /audio/transcriptions` (`gpt-transcribe`, streaming) |
 | `cleanup.py` | GPT-5.6 Luna text cleanup (Responses API, streaming) |
 | `mock.py` | Mock providers for testing without API calls |
-| `prompt.py` | Focused-window detection, WHISPER.txt loading |
+| `prompt.py` | Vocabulary file reading + the single prompt builder |
 | `recover.py` | Generates per-session `recover.sh` for batch re-transcription |
 | `clipboard.py` | Gdk.Clipboard (Wayland-native, best-effort) |
 | `ducking.py` | Per-app volume ducking via `pw-dump` + `wpctl` (snapshot on RECORD, restore on exit) |
@@ -62,7 +70,7 @@ Thread bridge: `GLib.idle_add` (worker -> GTK), `call_soon_threadsafe` (GTK -> a
 | `storage.py` | XDG state directory, session retention (configurable count + age) |
 | `lock.py` | Mic lock via `fcntl.flock()` |
 | `checks.py` | Startup dependency validation |
-| `dictation.css` | The dictation window's only custom CSS (~35 lines); everything else is stock libadwaita |
+| `gui/dictation.css` | The dictation window's only custom CSS (~35 lines); everything else is stock libadwaita |
 | `style.css` | Meeting recorder CSS theme (not loaded by the dictation app — both define `.status-dot`) |
 | `meeting/` | Meeting recorder package — separate Gtk.Application, dual-stream capture (mic + system) to stereo WAV via two `parec` subprocesses. No API calls. Shares `audio.py`/`lock.py`/`storage.py` with the dictation app and owns `style.css`; entry point `python -m voxize.meeting`. |
 
@@ -80,13 +88,14 @@ Thread bridge: `GLib.idle_add` (worker -> GTK), `call_soon_threadsafe` (GTK -> a
 - **WAV placeholder header** — crash-safe; most tools read to EOF when size field is wrong.
 - **Pruning at termination, not startup** — avoids progressive session loss during crash loops.
 - **`finalize_wav()` separate from `stop()`** — signal handlers fix WAV header without risking deadlock on the audio stream.
-- **Clipboard: batch then cleanup** — first clipboard write at batch completion (accurate text), overwritten by cleanup result. No live preview junk in clipboard.
+- **Clipboard: batch then cleanup** — the backend emits `result` events (batch first, then cleaned); the GUI writes the clipboard on each one, so the first write is accurate batch text, overwritten by the cleanup result. No live preview junk in clipboard. The clipboard mechanics stay in `voxize/clipboard.py` (the meeting recorder imports it).
 
 ## Design documents
 
 - `docs/design.md` — **immutable** original specification. Never edit.
 - `docs/journal.md` — living record of implementation decisions and deviations. Append-only, chronological.
 - `docs/architecture-decision-layer-shell-and-dual-frontend.md` — why gtk4-layer-shell was dropped.
+- `docs/architecture-decision-headless-backend.md` — why the backend is a headless stdio process and the GUI is a client of it; the dividing rule.
 - `docs/debugging-guide.md` — VAD pacing experiments, debug.log format, diagnostic patterns.
 
 ## Conventions
@@ -104,6 +113,14 @@ uv run black --check src/
 
 - Only `E501` is globally ignored (Black handles line length).
 - All other suppressions use inline `# noqa: XXXX` with justification.
+
+### Tests
+
+```sh
+uv run pytest
+```
+
+Presenter unit tests (fake clock), backend contract tests (spawn `python -m voxize.backend` with `VOXIZE_MOCK=1`; `VOXIZE_MOCK_FAST=1` shrinks the fixed mock delays), and the import-rule tests.
 
 ### Running ad-hoc NixOS tools
 
@@ -124,7 +141,9 @@ Libadwaita uses CSS custom properties (`--name` / `var(--name)`), not `@define-c
 
 ## Session data
 
-`~/.local/state/voxize/<ISO-timestamp>/` — `audio.wav`, `live_transcript.txt`, `transcription.txt`, `cleaned.txt`, `prompt.txt`, `ws_events.jsonl`, `batch_events.jsonl`, `cleanup_events.jsonl`, `debug.log`, `recover.sh`.
+`~/.local/state/voxize/<ISO-timestamp>/` — `audio.wav`, `live_transcript.txt`, `transcription.txt`, `cleaned.txt`, `prompt.txt`, `ws_events.jsonl`, `batch_events.jsonl`, `cleanup_events.jsonl`, `debug.log`, `protocol.jsonl`, `gui.log`, `recover.sh`.
+
+`protocol.jsonl` is every protocol message in and out, timestamped. `gui.log` is the GUI process's own log, including focus/Enter routing diagnostics; `debug.log` stays backend-only.
 
 `prompt.txt` is the vocabulary guidance as it stood at record time, verbatim — absent when the session had none. Guidance lives outside the session (a project's `WHISPER.txt`, a per-app or per-Slack-channel glossary) and gets edited, so without this there is no way to tell later whether a term was mis-transcribed because it was missing from the glossary or in spite of being there. `prompt.py:build_transcription_prompt()` is the single builder behind this file, the `prompt` sent to batch, and the one baked into `recover.sh`; they must not construct it independently or the archive stops describing what was actually sent.
 

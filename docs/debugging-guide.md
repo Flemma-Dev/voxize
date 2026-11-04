@@ -8,12 +8,14 @@ Voxize uses **three-phase transcription**: a throwaway live preview (realtime WS
 
 **State machine:** `INITIALIZING → RECORDING → TRANSCRIBING → CLEANING → READY` (+ CANCELLED, ERROR)
 
-**Threads during recording:**
+**Two processes.** The GTK window (`python -m voxize`) spawns the headless backend (`python -m voxize.backend`) and talks to it over stdio JSON Lines. Everything below about threads, `debug.log` and the session files is the backend; the GUI process has its own GTK main thread and writes `gui.log`.
+
+**Threads during recording (backend process):**
 
 ```
-GTK main thread          sounddevice callback thread       asyncio thread (voxize-ws)
+Backend main loop        sounddevice callback thread       asyncio thread (voxize-ws)
 ─────────────────        ──────────────────────────        ─────────────────────────
-UI rendering             Fires every 40ms                  WebSocket send/receive
+Protocol I/O (stdio)     Fires every 40ms                  WebSocket send/receive
 State transitions        Writes PCM to WAV                 send_loop: queue → WS
 GLib.idle_add callbacks  Posts chunks to asyncio queue      receive_loop: WS → GLib.idle_add
                          via call_soon_threadsafe           (live preview only — throwaway)
@@ -47,8 +49,12 @@ Phase 3 (CLEANING):
 - `batch.py` — Batch transcription: POST /audio/transcriptions (gpt-transcribe, streaming)
 - `cleanup.py` — Text cleanup: GPT-5.6 Luna (Responses API, streaming)
 - `audio.py` — Microphone capture, WAV writer, sounddevice callback
-- `app.py` — Orchestration, state transitions, provider lifecycle
-- `ui.py` — GTK4 widgets, state-driven updates
+- `backend/session.py` — Orchestration, state transitions, provider lifecycle (was `app.py`)
+- `backend/presenter.py` — Pipeline progress model, stall detection, transcript stage handoffs (was part of `ui.py`)
+- `backend/server.py` — Stdio server: protocol I/O, `protocol.jsonl`, EOF/signal/close lifecycle
+- `protocol.py` — JSON Lines message types shared with frontends
+- `gui/app.py` — GTK application: protocol client, keys, signals
+- `gui/ui.py` — GTK4 widgets rendering protocol events
 - `state.py` — Pure state machine (no GTK)
 
 ## 2. Session Directory Structure
@@ -65,7 +71,9 @@ Each recording session creates a directory under `$XDG_STATE_HOME/voxize/` (typi
 ├── ws_events.jsonl        # Every WS event from live preview (OpenAI Realtime API)
 ├── batch_events.jsonl     # Every event from batch transcription API
 ├── cleanup_events.jsonl   # Every event from cleanup API (Responses API)
-├── debug.log              # Trace-level log from all threads
+├── debug.log              # Trace-level log from all backend threads
+├── protocol.jsonl         # Every protocol message in and out (frontend <-> backend)
+├── gui.log                # GUI-side log (absent for other frontends and for mock runs)
 └── recover.sh             # Standalone batch re-transcription script
 ```
 
@@ -79,7 +87,11 @@ Each recording session creates a directory under `$XDG_STATE_HOME/voxize/` (typi
 
 **`batch_events.jsonl`** logs every event from the batch transcription API (request, `transcript.text.delta`, `transcript.text.done` with usage). This is the key file for diagnosing batch accuracy issues.
 
-**`debug.log`** has trace-level logging from all threads with millisecond timestamps and thread names. This is the primary debugging tool.
+**`debug.log`** has trace-level logging from all threads with millisecond timestamps and thread names. This is the primary debugging tool. Progress-bar lines start with `pipeline_progress:` and come from logger `voxize.backend.presenter`; `contrib/calibrate-progress-bar.py` reads them.
+
+**`protocol.jsonl`** is every message the backend sent and received, timestamped, one JSON object per line. Use it to tell a backend problem (the event never went out) from a GUI problem (it went out and the window ignored it). Messages before `session` are buffered and written once the directory exists.
+
+**`gui.log`** is the GUI process's own log: state mirror transitions, backend lost/stderr, and keyboard routing (focus-widget changes, every Enter with the focused and default widgets, `activate-default`, focus/default on entering READY). If Enter or focus misbehaves, look here, not in `debug.log`.
 
 ## 3. The OpenAI Realtime API and VAD (live preview only)
 
@@ -244,7 +256,7 @@ In the three-phase architecture, the live preview is throwaway, so there is no d
 2. `_begin_transcribing` (idle callback): grabs audio + transcription references, nulls them, spawns `voxize-stop` thread
 3. `voxize-stop` thread: calls `audio.stop()` (fast — finalizes WAV), then `transcription.stop()` (cancels WS immediately, no drain)
 4. Saves `live_transcript.txt` and logs WAV size
-5. Posts `_start_batch` back to GTK thread via `GLib.idle_add`
+5. Posts `_start_batch` back to the main loop via `GLib.idle_add`
 6. `_start_batch`: creates `BatchTranscription`, starts streaming from `audio.wav`
 
 **Key difference from the old architecture:** the old `stop()` blocked for up to 15 seconds draining the WS (send remaining chunks, commit, wait for trailing events). The new `stop()` just cancels — it takes milliseconds. The live transcript accumulated in `transcribe.py` is saved for debugging but not used by the pipeline.
@@ -278,7 +290,7 @@ In the three-phase architecture, the live preview is throwaway, so there is no d
 
 **Root cause (historical, now fixed):** `transcription.stop()` blocks for up to ~15s (send drain + receive drain + thread join). If called on the GTK main thread, the UI freezes.
 
-**Current architecture:** `_begin_cleanup()` spawns a `voxize-stop` background thread that calls `audio.stop()` then `transcription.stop()`. The GTK thread stays responsive. The CLEANING state shows "Finishing..." with a spinner.
+**Current architecture:** `_begin_cleanup()` spawns a `voxize-stop` background thread that calls `audio.stop()` then `transcription.stop()`. The main loop stays responsive. The CLEANING state shows "Finishing..." with a spinner.
 
 ### WebSocket error during recording (degraded mode)
 
@@ -331,7 +343,7 @@ HH:MM:SS.mmm ThreadName     module.name message
 ```
 
 Thread names:
-- `MainThread` — GTK main thread
+- `MainThread` — backend main loop (GLib); the GTK main thread belongs to the GUI process and logs to `gui.log`
 - `voxize-ws` — asyncio/WebSocket thread (live preview)
 - `Dummy-1` — sounddevice callback thread (Python names portaudio threads "Dummy-N")
 - `voxize-stop` — background thread for stopping audio + WS, triggers batch
@@ -512,7 +524,7 @@ The batch API has a 25 MB file limit. At 24kHz/16-bit/mono (48 KB/s), this allow
 
 ### GLib.idle_add
 
-All UI updates from background threads go through `GLib.idle_add(callback, *args)`. This marshals the call to the GTK main thread. The callback runs on the next main loop iteration.
+All UI updates from background threads go through `GLib.idle_add(callback, *args)`. This marshals the call to the main loop thread (the backend's GLib loop; the GUI process has its own GTK loop fed by the protocol client). The callback runs on the next main loop iteration.
 
 **Caution:** `GLib.idle_add` is fire-and-forget. Multiple calls queue up. Callbacks may arrive after the state has changed (stale callbacks). Always guard with state checks or flags.
 
@@ -527,7 +539,7 @@ self._loop.call_soon_threadsafe(self._audio_queue.put_nowait, chunk)
 
 ### Provider reference nulling
 
-When stopping or tearing down, `app.py` grabs references to providers and nulls the instance variables on the GTK thread:
+When stopping or tearing down, `Session` (`backend/session.py`) grabs references to providers and nulls the instance variables on the main-loop thread:
 ```python
 audio = self._audio
 self._audio = None
@@ -535,7 +547,7 @@ transcription = self._transcription
 self._transcription = None
 ```
 
-Then passes the local references to a background thread. This prevents races where a callback on the GTK thread accesses a half-torn-down provider.
+Then passes the local references to a background thread. This prevents races where a callback on the main-loop thread accesses a half-torn-down provider.
 
 ## 12. Historical Pacing Values and Results
 

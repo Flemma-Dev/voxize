@@ -1276,3 +1276,128 @@ level: focus-widget changes, every Enter keypress with the focused and default
 widgets, `activate-default` emissions, and the focus/default on entering
 READY (`ui.describe_widget`). The next failing session will show which of
 those links broke.
+
+### 2026-11-04 — Headless backend: the GTK window becomes a stdio client
+
+Voxize is now two processes. `python -m voxize.backend` is a GTK-free session
+on a plain `GLib.MainLoop`, driven over stdio with JSON Lines; the GTK window
+spawns it and renders its events. Decision record:
+`docs/architecture-decision-headless-backend.md`. It replaces point 3 of the
+March layer-shell ADR (no protocol yet), which now carries a pointer.
+
+**What moved where:**
+- `app.py` -> `backend/session.py` (orchestration, no GTK) plus a thin
+  `gui/app.py` (protocol client, keys, signals, clipboard).
+- The logic in `ui.py` (progress model, stall detection, live -> batch ->
+  cleaned handoffs, failure fallback, "had content") -> `backend/presenter.py`
+  with an injected clock. `ui.py` -> `gui/ui.py`, now only widgets.
+- `dictation.css` -> `gui/dictation.css`.
+- `prompt.detect_prompt` -> `gui/context.py`. The backend receives a `cwd` and
+  glossary paths in `start` and reads the files; `prompt.py` keeps
+  `build_transcription_prompt()` as the single builder.
+- `checks.exit_on_failure` is gone; check failures are reported as state
+  ERROR.
+- New: `protocol.py`, `backend/server.py` (stdio, `protocol.jsonl`),
+  `gui/backend_client.py`, `gui/client_state.py`, and the first tests
+  (`uv run pytest`).
+
+**The protocol in one paragraph.** One JSON object per line, UTF-8, with a
+`type`; unknown fields ignored, unknown types logged and dropped.
+`PROTOCOL_VERSION = 1`. Commands (stdin): `start {cwd, glossaries}`, `stop`,
+`cancel`, `close {trash_if_empty}`; one that does not apply to the current
+state is logged and ignored. Events (stdout): `hello` first, then `context`,
+`session`, `state {state, error}`, `level` (25 Hz), `text {stage, op, text}`,
+`preview_lost`, `progress` (at most 20 Hz, `null` = no estimate), `stalled`,
+`result {stage, text}` (what to deliver), `no_speech`, `failure`, `costs`.
+At startup the backend dups fd 1 to a private fd and points fd 1 at stderr so
+a stray print cannot corrupt the stream. Stdin EOF without `close` is a close,
+so a dead frontend never leaves an orphan holding the mic. Every message is
+also appended to `protocol.jsonl` in the session folder.
+
+**The dividing rule.** The backend owns domain facts and the estimates derived
+from them; frontends own how those are drawn, worded and interacted with. The
+backend knows nothing about windows, terminals or focus. Status labels, all
+message strings, which actions each state offers, the cancel confirmation, the
+auto-close countdown, the timer, dBFS -> bar mapping, clipboard mechanics and
+context detection stay in the frontend. Import rules are tested both ways: the
+backend never imports Gtk/Gdk/Adw or `voxize.gui`; the GUI imports no backend
+module, only `protocol`, `config`, `_trace`, `clipboard` and `mode_switcher`.
+
+**Deviations from the design spec:**
+- `clipboard.py` stays at `voxize/clipboard.py`. The meeting recorder imports
+  it, so it cannot move into `gui/`.
+- Frontends may also import `voxize._trace` and `voxize.mode_switcher`.
+- The "mic lock is free after EOF" contract test became "the backend exits and
+  the session ends CANCELLED": mock mode takes no lock. Lock release rides the
+  same `close()` -> CANCELLED -> teardown path and is checked on a real
+  dictation.
+- `VOXIZE_MOCK_FAST=1` is a new test knob (shrinks the fixed mock delays).
+- Progress reaches the bar on a 50 ms tick, not on every delta (at most 50 ms
+  of lag, the same cadence as the old wait tick).
+
+**Behaviour changes, deliberate:**
+- Startup check failures (missing API key or tool) now show in the ERROR card.
+  They used to print to stderr and exit before any window, invisible from a
+  hotkey.
+- The Ctrl+M trash rule uses a sticky "ever had content" in the presenter. The
+  old `_had_first_text` flag reset on TRANSCRIBING.
+- The GUI's own diagnostics (focus and Enter routing, the instrumentation
+  added in the previous entry) now go to `gui.log`, not `debug.log`.
+  `pipeline_progress:` lines keep their text but come from logger
+  `voxize.backend.presenter`.
+
+**Found in review and fixed:**
+- A malformed command dropped the backend's stdin watch. With the frontend
+  gone the backend never saw EOF, so an orphan could hold the mic. Handler
+  errors are now logged and the watch survives; EOF always exits; `start` is
+  validated.
+- A GUI handler exception dropped the GUI's backend watch the same way. Event
+  and lost handlers are now guarded, and stderr is drained before the lost
+  report so the last stderr line reaches the ERROR card.
+- The GUI's own ERROR (protocol mismatch, no `hello` within 5 s) was
+  overwritten by later backend events (a queued CANCELLED closed the window).
+  A GUI-side failure now sticks, and terminal states are final in the client
+  state.
+
+**GUI parity.** Screenshots of every state through the mock providers on
+Xvfb, old build (merge-base) against new: 22 of 24 pixel-identical. The two
+differences are timing in the old harness, not the rewire. `state-07b`: the
+old GUI's own TTFB-wait animation pushed its bar 3 px past the value the
+script set (the presenter owns that animation now). `state-09`: the position
+of the pulse block depends on how many 100 ms ticks ran before the capture;
+old against old differed across runs, new against new was identical. Nine
+mock flows (ok, short, stall, no-speech, batch-fail, cleanup-fail, error, two
+preview-lost) ran with no traceback and no orphaned backend, and killing the
+backend mid-recording leaves the GUI on an ERROR card. Escape/Enter/Ctrl+M/
+Ctrl+O, motion, and a real dictation still need a real desktop.
+
+**Startup timing.** Not yet measured; it needs a real mic and desktop. Two
+hypotheses, neither assumed: the window appears no later (the GUI spawns the
+backend first and does not wait on it), and the mic may open earlier
+(sounddevice no longer shares a GIL with the GTK import). Old and new, three
+real sessions each, time-to-window and time-to-mic from `VOXIZE_TRACE`,
+medians of three. To be filled in here.
+
+**Deferred, not fixed:**
+- Stale `text` events are possible after CANCELLED (no state gate in the
+  begin-transcribing and delta handlers, inherited from `app.py`); they now
+  reach the protocol and flip `had_content`.
+- The vocabulary icon now appears with the backend's `context` event, a few
+  frames after the window is presented. Check on a real display.
+- The packaged (Nix-wrapped) build must resolve `voxize` in the child
+  (`sys.executable -m voxize.backend`); verify in nix-meridian.
+- The real D-Bus focused-window path of `gui/context.py` was not exercised
+  in the sandbox.
+- A GUI-side failure before `session` leaves no `gui.log`.
+
+**Files changed:** `src/voxize/protocol.py`, `src/voxize/backend/` (new:
+`session.py`, `presenter.py`, `server.py`, `stdio.py`, `__main__.py`),
+`src/voxize/gui/` (new package: `app.py`, `ui.py`, `dictation.css`,
+`context.py`, `backend_client.py`, `client_state.py`, `__main__.py`),
+`src/voxize/__main__.py`, `src/voxize/prompt.py`, `src/voxize/checks.py`,
+`src/voxize/config.py`, `src/voxize/mock.py`, `src/voxize/state.py`,
+`src/voxize/_trace.py`, `uv.lock`,
+`pyproject.toml`, `scripts/generate_screenshots.py`, `tests/`,
+`contrib/calibrate-progress-bar.py`, `CLAUDE.md`, `docs/debugging-guide.md`,
+`docs/architecture-decision-headless-backend.md`,
+`docs/architecture-decision-layer-shell-and-dual-frontend.md`.

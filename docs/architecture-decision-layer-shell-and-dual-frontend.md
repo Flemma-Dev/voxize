@@ -1,5 +1,10 @@
 # Architecture Decision: Layer Shell, GNOME Shell, and Dual Frontend
 
+> **Superseded in part (2026-11-04):** point 3 of "What this means for
+> implementation" — no JSON Lines protocol now — is replaced by
+> [the headless backend decision](architecture-decision-headless-backend.md).
+> The layer-shell findings stand.
+
 **Date**: 2026-03-27 (Phase 0)
 **Status**: Decided
 **Referenced from**: `docs/journal.md`, Session 1

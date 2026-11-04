@@ -3,12 +3,12 @@
 
 Reads debug.log and live_transcript.txt from every dictation session in
 ~/.local/state/voxize/ and fits the duration models used by the unified
-pipeline progress bar in src/voxize/ui.py.
+pipeline progress bar in src/voxize/backend/presenter.py.
 
 Usage:
     python contrib/calibrate-progress-bar.py
 
-The output is a block of Python constants you can paste into ui.py to
+The output is a block of Python constants you can paste into presenter.py to
 replace the existing values.  Re-run after extended usage to recalibrate.
 """
 
