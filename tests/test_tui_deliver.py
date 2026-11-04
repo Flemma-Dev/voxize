@@ -201,8 +201,9 @@ def test_claim_terminal_stdout_keeps_the_terminal_size_when_piped():
             [sys.executable, "-c", CLAIM_CHILD],
             stdout=subprocess.PIPE,
             stderr=slave,
-            # The pytest run puts COLUMNS=80 in the process environment, and
-            # shutil honours it over the tty; the child must ask the tty.
+            # Passing env= gives the child a fresh environment without
+            # COLUMNS/LINES (pytest's own process has COLUMNS=80 at the C
+            # level); Python's shutil honours those variables over the tty.
             env={k: v for k, v in os.environ.items() if k not in ("COLUMNS", "LINES")},
         )
         piped, _ = proc.communicate(timeout=20)
