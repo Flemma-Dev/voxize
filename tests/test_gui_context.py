@@ -1,3 +1,5 @@
+import os
+
 from voxize.gui import context
 
 
@@ -10,7 +12,7 @@ def test_slack_title_gives_channel_then_app_glossary(tmp_path):
         str(tmp_path / "Slack.txt"),
     ]
     # Created empty so the user can find and fill them, as before.
-    assert all((tmp_path / p).exists() for p in paths)
+    assert all(os.path.exists(p) for p in paths)
 
 
 def test_app_without_extractor_gets_app_glossary_only(tmp_path):

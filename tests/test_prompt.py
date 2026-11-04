@@ -37,3 +37,11 @@ def test_sources_feed_the_single_prompt_builder(tmp_path):
     assert (
         build_transcription_prompt(load_sources(str(tmp_path), [str(g)])) == "One\nTwo"
     )
+
+
+def test_undecodable_glossary_is_skipped_not_raised(tmp_path):
+    bad = tmp_path / "bad.txt"
+    bad.write_bytes(b"\xff\xfe")
+    good = tmp_path / "good.txt"
+    good.write_text("Good")
+    assert [s.content for s in load_sources(None, [str(bad), str(good)])] == ["Good"]

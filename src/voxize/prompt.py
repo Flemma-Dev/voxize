@@ -126,7 +126,7 @@ def _read_glossary(path: str) -> PromptSource | None:
     try:
         with open(path) as f:
             content = f.read().strip()
-    except OSError:
+    except Exception:
         logger.debug("prompt: failed to load glossary %s", path, exc_info=True)
         return None
     if not content:
