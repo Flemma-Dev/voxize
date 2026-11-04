@@ -4,6 +4,9 @@ Mock mode (env vars):
     VOXIZE_MOCK=1                  Use mock providers (no mic, no API)
     VOXIZE_ERROR=<ms>              Simulate WebSocket error after <ms>
     VOXIZE_STOP=<ms>               Auto-stop recording after <ms>
+    VOXIZE_MOCK_OUTCOME=<name>     ok | no-speech | batch-fail | cleanup-fail | error
+    VOXIZE_MOCK_TTFB=<ms>          Mock batch wait before first token (stall: 8000)
+    VOXIZE_MOCK_SHORT=1            Short dictation, no prediction — the bar pulses
     VOXIZE_TRACE=1                 Print startup phase timings to stderr
 
 Example:

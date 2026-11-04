@@ -1154,3 +1154,110 @@ the most delicate code in `ui.py`. Do it at a real display, not blind.
 **Files changed:** `src/voxize/style.css` (rewrite), `src/voxize/ui.py`,
 `src/voxize/app.py`, `shell.nix`, `scripts/generate_screenshots.py`,
 `docs/debugging-guide.md`.
+
+## 2026-11-03 — "3a": the dictation window goes stock libadwaita (replaces BREATH)
+
+BREATH's transparent RGBA window, 28px glow bleed, halo keyframes, serif
+transcript, 7-dot meter and two-bar rail are gone. The dictation window is
+now one `Adw.ApplicationWindow` (460px, non-resizable, stock shadow): a
+`.toolbar` strip (mode menu, guidance, folder, close) above one `.card`
+holding the transcript (system font, 15px), an inline notice, the status /
+action row, and a 2px strip on the card's bottom edge — a `Gtk.LevelBar`
+while capturing, the stock `progressbar.osd` while working. The design
+spec, CSS and PNGs came from the designer's "3a" handoff; this entry
+records what the build settled that the handoff could not.
+
+**CSS is split by app.** `dictation.css` (~35 lines) is loaded only by the
+dictation app; `style.css` is now the meeting recorder's alone. Both define
+`.status-dot` — an 8px disc here, a `●` label there — so sharing a display
+would paint a red disc behind the meeting's glyph. The screenshot harness
+swaps providers per shot for the same reason.
+
+**What stock libadwaita 1.9 decided** (checked against its stylesheet):
+- `.toolbar` flattens `image-button`, `image-text-button` and
+  `arrow-button` only — enough for the strip, not for plain text buttons.
+- `.dimmed` on a `Gtk.MenuButton` lands on the outer `menubutton` node and
+  `:checked` on the inner `button`; GTK CSS has no `:has()`, so the
+  guidance icon is undimmed in code while its popover is open.
+- `button.destructive-action` is a 15% tint with a red icon, not a solid
+  fill; `.opaque` is neutral grey. The circular Stop button is therefore
+  tinted, unlike the handoff PNG. Kept stock per the spec's rule.
+- `Adw.Toast` always draws its dismiss `×`. The handoff PNG has none; no
+  stock way to remove it, so it stays.
+- `Gtk.LevelBar` ships default offsets low/high/full that paint warning
+  and success colours; they are removed and zones are a class on the bar
+  overriding `--accent-bg-color` (stock `block:not(.empty)` paints with it).
+- `Gtk.LinkButton` carries button padding that indents filenames in the
+  guidance popover; a link `Gtk.Label` (`<a href>`) is used instead.
+- `Adw.ApplicationWindow` requests 360x200 by default; the 200px height
+  floor is removed with `set_size_request(460, -1)`.
+
+**Scrollbar trap.** A present stock scrollbar gives `GtkScrolledWindow` a
+~58px minimum height, so a one-line transcript sat at two lines. The
+vertical policy is `EXTERNAL` until the text exceeds the line cap, then
+`AUTOMATIC` (stock auto-hiding scrollbar).
+
+**Behaviour changes, all from the handoff's decisions:**
+- Batch / cleanup failures keep an inline notice at READY (BREATH revealed
+  its banner and the READY transition hid it in the same tick). Batch
+  failure shows the live preview — or "No live preview." with Copy
+  insensitive when there was none; cleanup failure restores the full batch
+  transcript so screen and clipboard agree. The raw error is the notice's
+  tooltip.
+- A WS error during WARMING now shows the notice (it was dropped silently);
+  the timer keeps counting after a WS error (it used to freeze).
+- The level meter is raw RMS at all times; VAD drives nothing on screen.
+- "Still working…" after 3s without progress; `pulse()` when L < 50.
+- Ctrl+C copies only real transcript text; Escape with a strip popover
+  open closes the popover instead of cancelling the dictation.
+- Cancel asks first once there is audio to lose (RECORDING, TRANSCRIBING,
+  CLEANING): an `Adw.AlertDialog` "Discard this dictation?" with Keep as the
+  focused, default and close response, so Enter or Escape never discard.
+  Escape opens the same dialog. INITIALIZING/WARMING still cancel at once.
+  At the usual ~150px window height libadwaita shows the dialog as its own
+  modal window attached to ours rather than inside it, so nothing resizes.
+  If READY arrives while it is up, the dialog closes and a late Discard is
+  ignored. `force_close()` did not reliably emit "closed" for the separate-
+  window case (probed), so the reference is cleared by hand.
+- Auto-close is back to the 2026-04-21 design: counts while focused, stops
+  on blur, restarts from the full duration on refocus. BREATH had quietly
+  made blur, the pointer entering the window and Copy cancel it for the
+  rest of the session (not journalled), so hovering the window killed it.
+
+**Other visible changes, all from the handoff spec:** the hollow `○` dot
+for INITIALIZING/WARMING is now a filled grey `idle` dot; the halo, the
+silence/speech cues (breathing halo, label brightening, shimmering dots)
+and the outlined "not armed" level dots are gone; the transcript no longer
+dims when the window loses focus; the progress bar no longer changes colour
+at the batch → cleanup handoff and has no "behind" bar; the ERROR message
+replaces the transcript instead of sitting in a banner; Copy is insensitive
+(Enter → Close) for "No speech detected."
+
+**Self-review fixes before the first commit:** the upload can finish before
+`start_pipeline()` runs (it waits on the WS teardown, up to ~5s), which left
+the bar at 0 and tripped "Still working…" on a healthy run — the arm now
+starts the TTFB wait from when the upload really ended; `start_pipeline()`
+is ignored outside TRANSCRIBING/CLEANING (a fast empty batch could reach
+READY first and leak a pulse timer); cleanup tokens count as progress when
+the batch text was too short to predict; the mode menu is never rebuilt
+while open (choosing Meeting ends the dictation from inside its own click).
+
+**Mock mode** now runs WARMING (1.5s), a simulated level meter, and a mock
+batch pass through the real callbacks so the progress bar arms. New knobs:
+`VOXIZE_MOCK_OUTCOME` (ok | no-speech | batch-fail | cleanup-fail | error),
+`VOXIZE_MOCK_TTFB` (stall), `VOXIZE_MOCK_SHORT` (pulse). `VOXIZE_STOP` still
+counts from RECORDING; `VOXIZE_ERROR` counts from start so it can hit WARMING.
+
+`source-serif` is dropped from `shell.nix`. `ibm-plex` stays: the meeting
+recorder's `.rename-original` still names IBM Plex Mono.
+
+**Not yet verified on a real display:** Mutter centring and growth of the
+Adw window (Xvfb renders `solid-csd` at 450px wide), Enter reaching the
+default widget while the read-only TextView has focus, and the live mock
+flows end to end.
+
+**Files changed:** `src/voxize/ui.py` (rewrite), `src/voxize/dictation.css`
+(new), `src/voxize/style.css` (meeting-only), `src/voxize/app.py`,
+`src/voxize/mock.py`, `src/voxize/__main__.py`,
+`scripts/generate_screenshots.py`, `shell.nix`, `CLAUDE.md`,
+`docs/debugging-guide.md`.

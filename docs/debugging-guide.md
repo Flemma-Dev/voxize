@@ -626,6 +626,19 @@ rebuild cycles each.
     be dragged at all. Wrap the row in a `Gtk.WindowHandle`; buttons inside
     still receive their clicks (verify with a real click, see below).
 
+### 3a notes (stock libadwaita window)
+
+Items 1 and 5 above describe the BREATH transparent window and no longer
+apply to the dictation window. Two more:
+
+13. **A present stock scrollbar sets a ~58px floor on `GtkScrolledWindow`.**
+    With `set_max_content_height(34)` the scroller still allocated 58px, so
+    a one-line transcript showed as two. Use `PolicyType.EXTERNAL` while the
+    content fits and switch to `AUTOMATIC` only when it overflows.
+14. **libadwaita 1.9's own `.caption` uses `line-height: 140%`**, so item 2's
+    "no `line-height`" is out of date at least for labels. The TextView
+    still sizes lines by measurement.
+
 ### Verifying UI behaviour headlessly
 
 Screenshots are rendered by `scripts/generate_screenshots.py`

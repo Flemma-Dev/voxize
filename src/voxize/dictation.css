@@ -1,0 +1,51 @@
+/* Voxize dictation window ("3a") — the complete custom stylesheet.
+ *
+ * Everything not listed here is stock libadwaita: .card, .toolbar, .flat,
+ * .circular, .suggested-action, .destructive-action, .heading, .numeric,
+ * .caption, .dimmed, .warning, .osd, toasts and popovers. Loaded only by the
+ * dictation app (app.py), never by the meeting recorder, whose windows keep
+ * style.css — both use a .status-dot class and must not see each other's.
+ */
+
+/* Status dot — an 8px disc. Semantic colours, so the recording dot is the
+ * same red as the Stop button beside it and both follow high contrast. */
+.status-dot {
+  min-width: 8px;
+  min-height: 8px;
+  border-radius: 99px;
+}
+.status-dot.idle      { background-color: color-mix(in srgb, var(--window-fg-color) 30%, transparent); }
+.status-dot.recording,
+.status-dot.error     { background-color: var(--destructive-bg-color); }
+.status-dot.working   { background-color: var(--accent-bg-color); }
+.status-dot.ready     { background-color: var(--success-bg-color); }
+
+/* Top-strip icons: dimmed until hovered. Unscoped to the node type because
+ * a MenuButton carries the class on its outer `menubutton` node, not on the
+ * inner `button`. While a popover is open, ui.py drops .dimmed in code —
+ * GTK CSS has no :has() to see the inner button's :checked state. */
+.toolbar .dimmed:hover,
+.toolbar .dimmed:focus-within { opacity: 1; }
+
+/* Bottom strip: the LevelBar takes the 2px square shape of stock
+ * progressbar.osd so the meter and the progress bar look identical.
+ * Stock blocks are 8px pills; the stock empty block is a 15% tint. */
+levelbar.strip > trough > block {
+  min-height: 2px;
+  border-radius: 0;
+}
+levelbar.strip > trough > block.empty { background: none; }
+
+/* Level zones: a class on the LevelBar overrides the accent colour that
+ * stock `block:not(.empty)` paints with. No class means "good" (accent).
+ * Thresholds live in ui.py (-40.2 / -12 / -3 dBFS). */
+levelbar.strip.zone-quiet { --accent-bg-color: color-mix(in srgb, var(--window-fg-color) 35%, transparent); }
+levelbar.strip.zone-hot   { --accent-bg-color: var(--warning-bg-color); }
+levelbar.strip.zone-clip  { --accent-bg-color: var(--error-bg-color); }
+
+/* Transcript — system font at 15px. TextView carries .view and its text
+ * node uses --view-bg-color; clearing the variable lets the card show. */
+textview.transcript {
+  --view-bg-color: transparent;
+  font-size: 15px;
+}

@@ -4,6 +4,7 @@
 Usage:
     uv run python scripts/generate_screenshots.py           # README shots
     uv run python scripts/generate_screenshots.py --all     # every state
+    uv run python scripts/generate_screenshots.py --all --out /tmp/shots
 
 Requires a display (Wayland or X11). Use xvfb-run for headless.
 Outputs PNGs to assets/ with stable filenames.
@@ -35,10 +36,17 @@ from voxize import mode_switcher  # noqa: E402
 from voxize.meeting.sessions import list_meeting_sessions  # noqa: E402
 from voxize.prompt import PromptSource  # noqa: E402
 from voxize.state import State, StateMachine  # noqa: E402
-from voxize.ui import OverlayWindow  # noqa: E402
+from voxize.ui import OverlayWindow, _format_timer  # noqa: E402
 
-ASSETS = _ROOT / "assets"
 ALL_STATES = "--all" in sys.argv
+# --out DIR renders somewhere other than the README's assets/ folder.
+if "--out" in sys.argv:
+    _i = sys.argv.index("--out") + 1
+    if _i >= len(sys.argv):
+        sys.exit("--out needs a directory")
+    ASSETS = Path(sys.argv[_i]).resolve()
+else:
+    ASSETS = _ROOT / "assets"
 
 _LIVE_TEXT = (
     "So I need you to refactor the authentication middleware "
@@ -126,7 +134,7 @@ def _capture(window, filename, native=None):
     viewport = Graphene.Rect()
     viewport.init(0, 0, w * _SCALE, h * _SCALE)
     texture = renderer.render_texture(scaled, viewport)
-    ASSETS.mkdir(exist_ok=True)
+    ASSETS.mkdir(parents=True, exist_ok=True)
     path = ASSETS / filename
     texture.save_to_png(str(path))
     print(f"  saved {path.name} ({w * _SCALE}x{h * _SCALE})")
@@ -139,12 +147,14 @@ class _Meter:
 
 
 def _mk(app, level=-25.0):
-    """Build a fresh window + OverlayWindow pair."""
-    win = Gtk.ApplicationWindow(application=app)
+    """Build a fresh window + OverlayWindow pair, configured as app.py does."""
+    app.use_css("dictation")
+    win = Adw.ApplicationWindow(application=app)
     # Must match app.py: a resizable window keeps whatever size it was
     # mapped at and ignores the transcript's grown size request.
     win.set_resizable(False)
-    win.set_default_size(516, -1)
+    win.set_default_size(460, -1)
+    win.set_size_request(460, -1)
     machine = StateMachine()
     ui = OverlayWindow(
         win, machine, autoclose_seconds=0, on_switch_to_meeting=lambda: None
@@ -157,8 +167,32 @@ def _mk(app, level=-25.0):
 def _freeze_timer(ui, seconds):
     ui._stop_timer()
     ui._timer_seconds = seconds
-    m, s = divmod(seconds, 60)
-    ui._timer_label.set_text(f"{m:02d}:{s:02d}")
+    ui._timer_label.set_text(_format_timer(seconds))
+
+
+def _show_countdown(ui, seconds):
+    """What a focused READY shows; the harness window may not be active."""
+    ui._autoclose_remaining = seconds
+    ui._update_autoclose_label()
+
+
+def _to_recording(machine, ui, text, seconds):
+    machine.transition(State.WARMING)
+    machine.transition(State.RECORDING)
+    if text:
+        ui.append_text(text)
+    ui._tick_meter()
+    _freeze_timer(ui, seconds)
+
+
+def _to_ready(machine, ui, seconds=14):
+    """RECORDING → TRANSCRIBING → CLEANING with the real text handoffs."""
+    _to_recording(machine, ui, _LIVE_TEXT, seconds)
+    machine.transition(State.TRANSCRIBING)
+    ui.start_pipeline(len(_LIVE_TEXT) * 3)
+    ui.append_text(_BATCH_TEXT)
+    machine.transition(State.CLEANING)
+    ui.show_transcript_for_cleanup(_BATCH_TEXT)
 
 
 # ── Screenshot app ──
@@ -170,15 +204,37 @@ class _App(Adw.Application):
         self._queue = []
         self._current = None
         self._extra = None
+        self._css = {}
+        self._active_css = None
+
+    def use_css(self, name):
+        """Install exactly one app stylesheet, as each real app does.
+
+        The dictation window loads dictation.css and the meeting recorder
+        loads style.css (+ the mode switcher's). Both define .status-dot,
+        so having both on the display would show neither app as it ships.
+        """
+        if name == self._active_css:
+            return
+        display = Gdk.Display.get_default()
+        for provider, _priority in self._css.get(self._active_css, []):
+            Gtk.StyleContext.remove_provider_for_display(display, provider)
+        if name not in self._css:
+            css = Gtk.CssProvider()
+            filename = "dictation.css" if name == "dictation" else "style.css"
+            css.load_from_string((_ROOT / "src" / "voxize" / filename).read_text())
+            providers = [(css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)]
+            if name == "meeting":
+                switcher = Gtk.CssProvider()
+                switcher.load_from_string(mode_switcher._CSS)
+                providers.append((switcher, Gtk.STYLE_PROVIDER_PRIORITY_USER))
+            self._css[name] = providers
+        for provider, priority in self._css[name]:
+            Gtk.StyleContext.add_provider_for_display(display, provider, priority)
+        self._active_css = name
 
     def do_activate(self):
         Adw.StyleManager.get_default().set_color_scheme(Adw.ColorScheme.FORCE_DARK)
-        display = Gdk.Display.get_default()
-        css = Gtk.CssProvider()
-        css.load_from_string((_ROOT / "src" / "voxize" / "style.css").read_text())
-        Gtk.StyleContext.add_provider_for_display(
-            display, css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
-        )
 
         self._queue = [
             ("dictation-recording.png", self._recording),
@@ -187,26 +243,38 @@ class _App(Adw.Application):
         ]
         if ALL_STATES:
             self._queue = [
-                ("state-00-initializing.png", self._initializing),
-                ("state-01-warming.png", self._warming),
+                ("state-01-initializing.png", self._initializing),
+                ("state-02-warming.png", self._warming),
                 ("dictation-recording.png", self._recording),
-                ("state-02b-silence.png", self._silence),
-                ("state-02c-level-low.png", self._level_low),
-                ("state-02d-level-hot.png", self._level_hot),
-                ("state-02e-level-clip.png", self._level_clip),
-                ("state-03-working-first.png", self._working_first),
-                ("state-03b-working-second.png", self._working_second),
+                ("state-04-recording-quiet.png", self._level_quiet),
+                ("state-05-recording-loud.png", self._level_hot),
+                ("state-05b-recording-clip.png", self._level_clip),
+                ("state-06-recording-preview-error.png", self._preview_error),
+                ("state-07-working.png", self._working),
+                ("state-07b-working-cleanup.png", self._working_cleanup),
+                ("state-08-working-stalled.png", self._working_stalled),
+                ("state-09-working-no-prediction.png", self._working_pulse),
                 ("dictation-ready.png", self._ready),
-                ("state-04b-copied.png", self._copied),
-                ("state-05-guidance.png", self._guidance),
-                ("state-06-overflow-error.png", self._overflow_error),
-                ("state-07-meeting-recording.png", self._meeting_recording),
+                ("state-11-ready-copied.png", self._copied),
+                ("state-12-ready-no-speech.png", self._no_speech),
+                ("state-13-ready-batch-failed.png", self._batch_failed),
+                ("state-14-ready-cleanup-failed.png", self._cleanup_failed),
+                ("state-15-error.png", self._error),
+                ("state-16-mode-menu.png", self._mode_menu),
+                ("state-17-guidance.png", self._guidance),
+                ("state-18-long-text.png", self._long_text),
+                ("state-19-meeting-recording.png", self._meeting_recording),
                 ("meeting-welcome.png", self._meeting_welcome),
             ]
         self._next()
 
     def _next(self):
         if self._current is not None:
+            # Stop the shot's meter/stall/pulse timers with its window.
+            ui = getattr(self, "ui", None)
+            if ui is not None:
+                ui.destroy()
+                self.ui = None
             self._current.close()
             self._current = None
         if not self._queue:
@@ -253,102 +321,86 @@ class _App(Adw.Application):
     def _initializing(self):
         """What the compositor centres — the window is presented in this
         state, before the mic is up."""
-        win, _machine, ui = _mk(self, level=-70.0)
-        _freeze_timer(ui, 0)
+        win, _machine, _ui = _mk(self, level=-70.0)
         return win
 
     def _warming(self):
         win, machine, ui = _mk(self, level=-70.0)
         machine.transition(State.WARMING)
+        ui._tick_meter()
         _freeze_timer(ui, 0)
         return win
 
     def _recording(self):
         win, machine, ui = _mk(self, level=-19.0)
-        machine.transition(State.WARMING)
-        machine.transition(State.RECORDING)
-        ui.append_text(_LIVE_TEXT)
-        ui.on_speech(True)
-        ui._tick_meter()
-        _freeze_timer(ui, 8)
+        _to_recording(machine, ui, _LIVE_TEXT, 8)
         return win
 
-    def _silence(self):
-        win, machine, ui = _mk(self, level=-52.0)
-        machine.transition(State.WARMING)
-        machine.transition(State.RECORDING)
-        ui.append_text(
-            "…and update the integration tests plus the API "
-            "documentation while you're in there"
-        )
-        ui.on_speech(False)
-        ui._tick_meter()
-        _freeze_timer(ui, 21)
-        return win
+    def _level_quiet(self):
+        # -46 dBFS -> fraction 0.233, under-driven.
+        return self._level_at(-46.0, 12)
 
     def _level_hot(self):
         # -8 dBFS -> fraction 0.867, the "hot" band.
-        return self._level_at(-8.0, "You're getting a bit loud for the mic now")
+        return self._level_at(-8.0, 21)
 
     def _level_clip(self):
         # -1 dBFS -> fraction 0.983, past the clip threshold.
-        return self._level_at(-1.0, "THIS IS FAR TOO LOUD FOR THE MICROPHONE")
+        return self._level_at(-1.0, 22)
 
-    def _level_low(self):
-        # -46 dBFS -> fraction 0.233, under-driven.
-        return self._level_at(-46.0, "barely audible, mic gain is too low")
-
-    def _level_at(self, dbfs, text):
+    def _level_at(self, dbfs, seconds):
         win, machine, ui = _mk(self, level=dbfs)
-        machine.transition(State.WARMING)
-        machine.transition(State.RECORDING)
-        ui.append_text(text)
-        ui.on_speech(True)
-        ui._tick_meter()
-        _freeze_timer(ui, 12)
+        _to_recording(machine, ui, _LIVE_TEXT, seconds)
         return win
 
-    def _working_first(self):
+    def _preview_error(self):
+        win, machine, ui = _mk(self, level=-25.0)
+        _to_recording(machine, ui, _LIVE_TEXT, 31)
+        ui.show_live_preview_error("WebSocket rejected (HTTP 503)")
+        return win
+
+    def _working(self):
         win, machine, ui = _mk(self)
-        machine.transition(State.WARMING)
-        machine.transition(State.RECORDING)
-        ui.append_text(_LIVE_TEXT)
-        _freeze_timer(ui, 14)
+        _to_recording(machine, ui, _LIVE_TEXT, 14)
         machine.transition(State.TRANSCRIBING)
         ui.start_pipeline(len(_LIVE_TEXT) * 3)
         ui._rail_set(0.31)
         return win
 
-    def _working_second(self):
+    def _working_cleanup(self):
         win, machine, ui = _mk(self)
-        machine.transition(State.WARMING)
-        machine.transition(State.RECORDING)
-        ui.append_text(_LIVE_TEXT)
-        _freeze_timer(ui, 14)
-        machine.transition(State.TRANSCRIBING)
-        ui.start_pipeline(len(_LIVE_TEXT) * 3)
-        ui.append_text(_BATCH_TEXT)
-        machine.transition(State.CLEANING)
-        ui.show_transcript_for_cleanup(_BATCH_TEXT)
-        ui.append_text(_BATCH_TEXT)
+        _to_ready(machine, ui)
         ui.on_batch_complete(len(_BATCH_TEXT))
         ui._rail_set(0.78)
         return win
 
+    def _working_stalled(self):
+        win, machine, ui = _mk(self)
+        _to_recording(machine, ui, _LIVE_TEXT, 14)
+        machine.transition(State.TRANSCRIBING)
+        ui.start_pipeline(len(_LIVE_TEXT) * 3)
+        ui._rail_set(0.52)
+        ui._stop_wait()
+        # Pretend the bar has been flat for longer than the stall window.
+        ui._last_progress_us = GLib.get_monotonic_time() - 10_000_000
+        ui._tick_stall()
+        return win
+
+    def _working_pulse(self):
+        win, machine, ui = _mk(self)
+        _to_recording(machine, ui, "Fix the typo", 3)
+        machine.transition(State.TRANSCRIBING)
+        ui.start_pipeline(len("Fix the typo"))
+        return win
+
     def _ready(self):
         win, machine, ui = _mk(self)
-        machine.transition(State.WARMING)
-        machine.transition(State.RECORDING)
-        ui.append_text("placeholder")
-        _freeze_timer(ui, 14)
-        machine.transition(State.TRANSCRIBING)
-        ui.append_text("swap")
-        machine.transition(State.CLEANING)
-        ui.show_transcript_for_cleanup("placeholder")
+        _to_ready(machine, ui)
         ui.append_text(_CLEANED_TEXT)
+        ui.finish_pipeline()
         machine.transition(State.READY)
         ui.show_session_costs(0.0007, 0.0031, 0.0005)
-        _freeze_timer(ui, 14)
+        _show_countdown(ui, 28)
         return win
 
     def _copied(self):
@@ -356,14 +408,47 @@ class _App(Adw.Application):
         GLib.timeout_add(250, lambda: (self.ui.copy_to_clipboard(), False)[1])
         return win
 
+    def _no_speech(self):
+        win, machine, ui = _mk(self)
+        _to_recording(machine, ui, "", 4)
+        machine.transition(State.TRANSCRIBING)
+        ui.show_no_speech()
+        machine.transition(State.READY)
+        _show_countdown(ui, 28)
+        return win
+
+    def _batch_failed(self):
+        win, machine, ui = _mk(self)
+        _to_recording(machine, ui, _LIVE_TEXT, 14)
+        machine.transition(State.TRANSCRIBING)
+        ui.show_batch_failed("Batch transcription failed: Connection reset by peer")
+        machine.transition(State.READY)
+        _show_countdown(ui, 28)
+        return win
+
+    def _cleanup_failed(self):
+        win, machine, ui = _mk(self)
+        _to_ready(machine, ui)
+        ui.append_text("Refactor the auth")
+        ui.show_cleanup_failed("Cleanup failed: Request timed out.", _BATCH_TEXT)
+        machine.transition(State.READY)
+        _show_countdown(ui, 28)
+        return win
+
+    def _error(self):
+        win, machine, _ui = _mk(self)
+        machine.transition(State.ERROR, error="Another Voxize instance is recording")
+        return win
+
+    def _mode_menu(self):
+        win, machine, ui = _mk(self, level=-19.0)
+        _to_recording(machine, ui, _LIVE_TEXT, 8)
+        self._extra = (ui._mode_btn.get_popover(), "state-16b-mode-menu-popover.png")
+        return win
+
     def _guidance(self):
         win, machine, ui = _mk(self, level=-19.0)
-        machine.transition(State.WARMING)
-        machine.transition(State.RECORDING)
-        ui.append_text(_LIVE_TEXT)
-        ui.on_speech(True)
-        ui._tick_meter()
-        _freeze_timer(ui, 8)
+        _to_recording(machine, ui, _LIVE_TEXT, 8)
         ui.show_prompt_context(
             [
                 PromptSource(
@@ -378,30 +463,27 @@ class _App(Adw.Application):
             ]
         )
         # _shoot() pops this once the toplevel is mapped.
-        self._extra = (ui._guidance_popover, "state-05b-guidance-popover.png")
+        self._extra = (ui._guidance_popover, "state-17b-guidance-popover.png")
         return win
 
-    def _overflow_error(self):
-        win, machine, ui = _mk(self, level=-19.0)
-        machine.transition(State.WARMING)
-        machine.transition(State.RECORDING)
-        ui.append_text(_LONG_TEXT)
-        ui.on_speech(True)
-        ui._tick_meter()
-        _freeze_timer(ui, 47)
-        ui._error_label.set_text("Live preview disconnected — still recording")
-        ui._error_revealer.set_reveal_child(True)
+    def _long_text(self):
+        win, machine, ui = _mk(self)
+        _to_ready(machine, ui)
+        ui.append_text(" ".join([_CLEANED_TEXT, _LONG_TEXT, _CLEANED_TEXT]))
+        ui.finish_pipeline()
+        machine.transition(State.READY)
+        _show_countdown(ui, 28)
         return win
 
     def _meeting_recording(self):
-        """Meeting recorder — shares style.css but has no .card ancestor.
+        """Meeting recorder — loads style.css, not dictation.css.
 
-        Here to catch the class of regression where a rule scoped to the
-        dictation card (or to `window`) silently strips this window's
-        palette or chrome.
+        Here to catch the class of regression where a dictation rule leaks
+        into this window, or a shared rule is deleted from under it.
         """
         from voxize.meeting.ui import MeetingWindow
 
+        self.use_css("meeting")
         win = Gtk.ApplicationWindow(application=self)
         win.set_default_size(400, 240)
         mui = MeetingWindow(win, on_stop=lambda: None)
@@ -415,7 +497,8 @@ class _App(Adw.Application):
 
     def _meeting_welcome(self):
         """The meeting session list — a README asset, and the other window
-        that shares style.css without a .card ancestor."""
+        that loads style.css."""
+        self.use_css("meeting")
         win = Gtk.ApplicationWindow(application=self)
         win.set_title("Voxize · Meeting")
         win.set_default_size(400, 350)
@@ -484,7 +567,7 @@ class _App(Adw.Application):
 
 
 def main():
-    ASSETS.mkdir(exist_ok=True)
+    ASSETS.mkdir(parents=True, exist_ok=True)
     _seed_meetings()
     print("Generating screenshots...")
     _App().run([])

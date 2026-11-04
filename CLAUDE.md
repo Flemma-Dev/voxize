@@ -46,7 +46,7 @@ Thread bridge: `GLib.idle_add` (worker -> GTK), `call_soon_threadsafe` (GTK -> a
 | Module | Role |
 |---|---|
 | `app.py` | GTK Application, orchestrates lifecycle, wires providers |
-| `ui.py` | Widgets, CSS loading, text area, header bar |
+| `ui.py` | Dictation window widgets: toolbar strip, transcript card, status row, level/progress strip |
 | `state.py` | State machine (pure logic, no GTK) |
 | `_audio_const.py` | Audio format constants (sample rate, channels, WAV header) — no heavy deps |
 | `audio.py` | `AudioCapture` (sounddevice) + `WavWriter` (crash-safe WAV) + `LevelMeter` (passive RMS) |
@@ -62,8 +62,9 @@ Thread bridge: `GLib.idle_add` (worker -> GTK), `call_soon_threadsafe` (GTK -> a
 | `storage.py` | XDG state directory, session retention (configurable count + age) |
 | `lock.py` | Mic lock via `fcntl.flock()` |
 | `checks.py` | Startup dependency validation |
-| `style.css` | GTK4/libadwaita CSS theme |
-| `meeting/` | Meeting recorder package — separate Gtk.Application, dual-stream capture (mic + system) to stereo WAV via two `parec` subprocesses. No API calls. Shares `audio.py`/`lock.py`/`storage.py`/`style.css` with the dictation app; entry point `python -m voxize.meeting`. |
+| `dictation.css` | The dictation window's only custom CSS (~35 lines); everything else is stock libadwaita |
+| `style.css` | Meeting recorder CSS theme (not loaded by the dictation app — both define `.status-dot`) |
+| `meeting/` | Meeting recorder package — separate Gtk.Application, dual-stream capture (mic + system) to stereo WAV via two `parec` subprocesses. No API calls. Shares `audio.py`/`lock.py`/`storage.py` with the dictation app and owns `style.css`; entry point `python -m voxize.meeting`. |
 
 ## Key technical decisions
 
@@ -73,7 +74,7 @@ Thread bridge: `GLib.idle_add` (worker -> GTK), `call_soon_threadsafe` (GTK -> a
 - **Vocabulary guidance is two-layer, both required** — `prompt` on batch fixes phonetically distinct errors ("Superbase" → Supabase, reliable). It does **not** reliably fix homophones ("Loop" → Luup, 2/3 at best). The cleanup model's `<vocabulary-guidance>` block is the backstop for that class and must stay. Prose context in `WHISPER.txt` measurably helps the hard cases over a bare `Glossary:` line.
 - **GPT-5.6 Luna for cleanup** — batch transcript is already clean, cleanup is light touchup. Luna handles the explicit rules-based prompt well.
 - **Warmup pings are billable and prime the prompt cache** — during RECORDING the app pings every 45s to keep the TLS socket warm. The *first* ping carries the full cleanup developer message so OpenAI caches the ~1400-token prefix before the user stops talking (measured: cleanup goes from `cached=0` to `cached=1385`). Later pings send a 7-token request — re-sending the payload would cost roughly a cleanup call each time for no extra benefit. Both the ping and `Cleanup._run` build that message via `cleanup.build_cache_prefix_input()`; a byte of divergence silently drops the cache to zero, so they must never construct it independently. **This is a latency trade, not a cost saving.** The first ping fires immediately on entering RECORDING (not at 45s), so every session primes. Priming cannot reduce total spend — you pay for the prefix twice, once as the ping writes it and again as cleanup reads it cached. Measured on a real 12.8s session: pings $0.0003 + cleanup $0.0001 = $0.0004, against ~$0.00034 for an unprimed cleanup alone. Net **+$0.00006/session, ~$0.02/month**. What it buys is moving prefill off the post-stop critical path, and that TTFT gain is still within run-to-run noise.
-- **WS failure is non-fatal** — during RECORDING, WS errors show a banner but audio continues. User can still stop and get batch transcription. Only mic failure is fatal.
+- **WS failure is non-fatal** — during WARMING or RECORDING, WS errors show an inline notice but audio continues. User can still stop and get batch transcription. Only mic failure is fatal.
 - **Fast startup** — sounddevice (~2s via numpy) and the openai SDK (~300ms) are both deferred to the bootstrap background thread. The window is visible within ~300ms; audio capture starts once sounddevice loads. Audio format constants live in `_audio_const.py` so that `batch.py` can reference them without pulling in sounddevice. Chunks queue, burst-drain when WS ready. If burst corrupts server_vad, live preview is garbled but batch fixes everything.
 - **Thread bridge over gbulb** — asyncio in daemon thread + `GLib.idle_add`. Simpler, no extra dependency.
 - **WAV placeholder header** — crash-safe; most tools read to EOF when size field is wrong.
@@ -135,4 +136,4 @@ Retention is bucketed: each app prunes only its own bucket at close. Buckets are
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `VOXIZE_AUTOCLOSE` | `30` | Seconds of focused READY state before overlay auto-closes. Countdown resets on blur and restarts on refocus. `0` to disable. |
+| `VOXIZE_AUTOCLOSE` | `30` | Seconds of focused READY state before the window auto-closes. Counts only while focused: blur stops it, refocus restarts it from the full duration. `0` to disable. |

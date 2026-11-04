@@ -9,6 +9,11 @@ Environment variables:
     VOXIZE_MOCK=1          Use mock transcription (no mic, no API)
     VOXIZE_ERROR=<ms>      Simulate WebSocket error after <ms>
     VOXIZE_STOP=<ms>       Auto-stop recording after <ms>
+    VOXIZE_MOCK_OUTCOME=   ok (default) | no-speech | batch-fail |
+                           cleanup-fail | error (mock only)
+    VOXIZE_MOCK_TTFB=<ms>  Mock batch time-to-first-token (default 1200;
+                           raise past ~5000 to see "Still working…")
+    VOXIZE_MOCK_SHORT=1    Short dictation (< 50 chars): no prediction, pulse
     VOXIZE_AUTOCLOSE=<s>   Overrides [ui] autoclose_seconds from voxize.toml
                            (0 disables the auto-close timer)
 """
@@ -41,7 +46,14 @@ from voxize.checks import get_api_key  # noqa: E402
 from voxize.cleanup import Cleanup  # noqa: E402
 from voxize.ducking import VolumeDucker  # noqa: E402
 from voxize.lock import MicLock, MicLockError  # noqa: E402
-from voxize.mock import MockCleanup, MockTranscription  # noqa: E402
+from voxize.mock import (  # noqa: E402
+    SHORT_TRANSCRIPT,
+    MockBatch,
+    MockCleanup,
+    MockLevelMeter,
+    MockTranscription,
+    default_transcript,
+)
 from voxize.prompt import (  # noqa: E402
     PromptSource,
     detect_prompt,
@@ -59,6 +71,9 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _MOCK = bool(os.environ.get("VOXIZE_MOCK"))
+_MOCK_OUTCOME = os.environ.get("VOXIZE_MOCK_OUTCOME", "ok")
+_MOCK_SHORT = bool(os.environ.get("VOXIZE_MOCK_SHORT"))
+_MOCK_WARMING_MS = 1500
 
 # Connection pool keepalive for the shared OpenAI client. Client-side
 # upper bound; the server may idle-close sooner, which is why we also
@@ -132,6 +147,11 @@ class VoxizeApp(Gtk.Application):
 
         # Mock transcription (only in mock mode)
         self._mock_transcription: MockTranscription | None = None
+        # VOXIZE_STOP counts from RECORDING, as it did before mock mode
+        # gained a WARMING phase; VOXIZE_ERROR counts from start, so it
+        # can land in WARMING.
+        self._mock_stop_ms: int | None = None
+        self._mock_preview_lost = False
 
         # Batch transcript (passed from TRANSCRIBING to CLEANING)
         self._batch_transcript: str = ""
@@ -173,10 +193,11 @@ class VoxizeApp(Gtk.Application):
             _trace(f"detect_prompt done (prompts={len(self._prompts)})")
             logger.debug("do_activate: prompts=%d", len(self._prompts))
 
-        # Load CSS theme
+        # Load CSS theme — dictation.css only. style.css belongs to the
+        # meeting recorder; both define a .status-dot that must not mix.
         display = Gdk.Display.get_default()
         css = Gtk.CssProvider()
-        css.load_from_string((Path(__file__).parent / "style.css").read_text())
+        css.load_from_string((Path(__file__).parent / "dictation.css").read_text())
         Gtk.StyleContext.add_provider_for_display(
             display,
             css,
@@ -184,10 +205,14 @@ class VoxizeApp(Gtk.Application):
         )
         _trace("CSS loaded")
 
-        # Window — RGBA for glow bleed (28px transparent margin around card)
-        win = Gtk.ApplicationWindow(application=self)
+        # Window — stock libadwaita window and shadow. Non-resizable, or the
+        # card cannot grow past the size it was mapped at. The size request
+        # also replaces Adw's default 360x200, whose 200px height floor
+        # would pad the short warming layout.
+        win = Adw.ApplicationWindow(application=self)
         win.set_resizable(False)
-        win.set_default_size(516, -1)  # 460 card + 2x28 glow bleed
+        win.set_default_size(460, -1)
+        win.set_size_request(460, -1)
         win.connect("close-request", self._on_close_request)
 
         # Escape key. CAPTURE, not the default BUBBLE: the read-only TextView
@@ -532,8 +557,14 @@ class VoxizeApp(Gtk.Application):
 
     def _initialize_mock(self) -> bool:
         """Mock mode: skip mic/lock/WebSocket, use mock transcription."""
-        logger.debug("_initialize_mock: starting mock mode")
-        self._machine.transition(State.RECORDING)
+        logger.debug("_initialize_mock: starting mock mode outcome=%s", _MOCK_OUTCOME)
+        if _MOCK_OUTCOME == "error":
+            self._machine.transition(
+                State.ERROR, error="Another Voxize instance is recording"
+            )
+            return False
+        self._ui.set_level_meter(MockLevelMeter())
+        self._machine.transition(State.WARMING)
 
         # Schedule simulated error if requested
         error_ms = os.environ.get("VOXIZE_ERROR")
@@ -541,11 +572,10 @@ class VoxizeApp(Gtk.Application):
             logger.debug("_initialize_mock: scheduling error after %sms", error_ms)
             GLib.timeout_add(int(error_ms), self._mock_error)
 
-        # Schedule auto-stop if requested
+        # Auto-stop is scheduled on entering RECORDING (see _on_state_change)
         stop_ms = os.environ.get("VOXIZE_STOP")
         if stop_ms:
-            logger.debug("_initialize_mock: scheduling auto-stop after %sms", stop_ms)
-            GLib.timeout_add(int(stop_ms), self._mock_stop)
+            self._mock_stop_ms = int(stop_ms)
 
         return False
 
@@ -554,7 +584,12 @@ class VoxizeApp(Gtk.Application):
         logger.debug(
             "_mock_error: state=%s", self._machine.state if self._machine else None
         )
-        if self._machine and self._machine.state == State.RECORDING:
+        if self._machine and self._machine.state in (State.WARMING, State.RECORDING):
+            # The real error path cancels the WS; the mock equivalent is to
+            # stop (or never start) the mock live preview.
+            self._mock_preview_lost = True
+            if self._mock_transcription:
+                self._mock_transcription.cancel()
             self._on_ws_error("Simulated: WebSocket connection lost")
         return False
 
@@ -575,16 +610,19 @@ class VoxizeApp(Gtk.Application):
         Audio capture continues (WAV is the safety net). Error banner is
         shown. The user can still speak, stop, and get batch transcription.
 
+        During WARMING the same applies; the notice carries into RECORDING.
+        Before this, a WARMING failure was dropped without a word.
+
         During INITIALIZING (before audio started): fatal, transition to ERROR.
         """
         current = self._machine.state if self._machine else None
         logger.debug("_on_ws_error: state=%s msg=%s", current, message)
-        if self._machine and self._machine.state == State.RECORDING:
-            # Non-fatal — keep audio, show banner
+        if self._machine and self._machine.state in (State.WARMING, State.RECORDING):
+            # Non-fatal — keep audio, show the inline notice
             if self._transcription:
                 self._transcription.cancel()
                 self._transcription = None
-            self._ui.show_error_banner(message)
+            self._ui.show_live_preview_error(message)
         elif self._machine and self._machine.state == State.INITIALIZING:
             self._teardown_async()
             self._machine.transition(State.ERROR, error=message)
@@ -614,9 +652,9 @@ class VoxizeApp(Gtk.Application):
             self._warmup_primed = False
             self._batch_transcript = ""
             if _MOCK:
-                # Mock flow doesn't need real audio — transition straight
-                # to RECORDING so existing mock tests behave identically.
-                GLib.idle_add(self._mock_warming_to_recording)
+                # Mock flow doesn't need real audio — hold WARMING briefly so
+                # it can be seen, then move on to RECORDING.
+                GLib.timeout_add(_MOCK_WARMING_MS, self._mock_warming_to_recording)
             else:
                 self._start_warming_detector()
 
@@ -626,8 +664,14 @@ class VoxizeApp(Gtk.Application):
 
         if new == State.RECORDING:
             if _MOCK:
-                self._mock_transcription = MockTranscription()
-                self._mock_transcription.start(on_delta=self._ui.append_text)
+                if not self._mock_preview_lost:
+                    self._mock_transcription = MockTranscription(
+                        **({"text": SHORT_TRANSCRIPT} if _MOCK_SHORT else {})
+                    )
+                    self._mock_transcription.start(on_delta=self._on_live_delta)
+                if self._mock_stop_ms is not None:
+                    logger.debug("mock: auto-stop in %dms", self._mock_stop_ms)
+                    GLib.timeout_add(self._mock_stop_ms, self._mock_stop)
             else:
                 # Warm the shared client's HTTP pool so batch's first call
                 # lands on an established TLS socket. Recurring pings keep
@@ -866,8 +910,7 @@ class VoxizeApp(Gtk.Application):
 
         if _MOCK:
             self._release_lock()
-            # In mock mode, skip batch — go straight to cleanup
-            self._on_batch_done(mock_transcript)
+            self._start_mock_batch(mock_transcript)
             return False
 
         # Release mic lock immediately — recording is done
@@ -979,6 +1022,28 @@ class VoxizeApp(Gtk.Application):
         # Step 4: hand live-preview usage back to GTK.
         GLib.idle_add(self._set_live_usage, live_usage)
 
+    def _start_mock_batch(self, live_transcript: str) -> None:
+        """Mock mode: run the batch phase through the real callbacks."""
+        self._set_live_len(len(live_transcript))
+        if _MOCK_OUTCOME == "no-speech":
+            text = ""
+        elif self._mock_preview_lost:
+            # The real batch transcribes the audio, not the preview.
+            text = default_transcript(_MOCK_SHORT)
+        else:
+            text = live_transcript
+        self._batch = MockBatch(
+            ttfb_ms=int(os.environ.get("VOXIZE_MOCK_TTFB", "1200")),
+            fail=_MOCK_OUTCOME == "batch-fail",
+        )
+        self._batch.start(
+            text,
+            on_delta=self._on_batch_delta,
+            on_complete=self._on_batch_done,
+            on_error=self._on_batch_error,
+            on_upload_progress=self._ui.set_upload_progress,
+        )
+
     def _set_live_usage(self, live_usage) -> bool:
         """GTK thread: store live-preview usage once WS teardown settles."""
         logger.debug("_set_live_usage: live_usage=%s", live_usage)
@@ -1006,7 +1071,7 @@ class VoxizeApp(Gtk.Application):
             audio_path = os.path.join(session_dir, "audio.wav")
         if not os.path.exists(audio_path):
             logger.error("_start_batch: no audio file found")
-            self._ui.show_error_banner("Audio file not found")
+            self._ui.show_batch_failed("Audio file not found")
             self._machine.transition(State.READY)
             self._show_session_costs()
             return False
@@ -1053,8 +1118,7 @@ class VoxizeApp(Gtk.Application):
             )
 
         if not transcript.strip():
-            self._ui.clear_text()
-            self._ui.append_text("No speech detected.")
+            self._ui.show_no_speech()
             self._machine.transition(State.READY)
             self._show_session_costs()
             return
@@ -1069,7 +1133,7 @@ class VoxizeApp(Gtk.Application):
         self._batch_usage = self._batch.usage if self._batch else None
         self._batch = None
         if self._machine and self._machine.state == State.TRANSCRIBING:
-            self._ui.show_error_banner(message)
+            self._ui.show_batch_failed(message)
             self._machine.transition(State.READY)
             self._show_session_costs()
 
@@ -1093,11 +1157,15 @@ class VoxizeApp(Gtk.Application):
         self._ui.show_transcript_for_cleanup(transcript)
 
         if _MOCK:
-            self._cleanup = MockCleanup()
+            self._cleanup = MockCleanup(
+                **({"text": SHORT_TRANSCRIPT} if _MOCK_SHORT else {}),
+                fail=_MOCK_OUTCOME == "cleanup-fail",
+            )
             self._cleanup.start(
                 transcript=transcript,
                 on_delta=self._on_cleanup_delta,
                 on_complete=self._on_cleanup_done,
+                on_error=self._on_cleanup_error,
             )
         else:
             self._cleanup = Cleanup(
@@ -1141,7 +1209,9 @@ class VoxizeApp(Gtk.Application):
         self._cleanup_usage = self._cleanup.usage if self._cleanup else None
         self._cleanup = None
         if self._machine and self._machine.state == State.CLEANING:
-            self._ui.show_error_banner(message)
+            # Screen falls back to the full batch transcript, which is what
+            # the clipboard already holds.
+            self._ui.show_cleanup_failed(message, self._batch_transcript)
             self._machine.transition(State.READY)
             self._show_session_costs()
 
@@ -1342,6 +1412,11 @@ class VoxizeApp(Gtk.Application):
                 return True
         if keyval != Gdk.KEY_Escape:
             return False
+        # This controller runs in CAPTURE on the window, ahead of any open
+        # popover or in-window dialog. Escape there means "close it" (for
+        # the cancel dialog: Keep), not "cancel".
+        if self._ui is not None and self._ui.overlay_open():
+            return False
         s = self._machine.state if self._machine else None
         logger.debug("_on_key: Escape pressed, state=%s", s)
         if s in (
@@ -1351,7 +1426,8 @@ class VoxizeApp(Gtk.Application):
             State.TRANSCRIBING,
             State.CLEANING,
         ):
-            self._machine.transition(State.CANCELLED)
+            # Asks first once audio has been recorded; Escape never discards.
+            self._ui.request_cancel()
         elif s in (State.READY, State.ERROR, None):
             win.close()
         return True

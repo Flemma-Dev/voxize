@@ -10,11 +10,9 @@ let
     portaudio
     libsecret # gi.repository.Secret (keyring access)
 
-    # Typography for the overlay. The transcript is the product, so the
-    # serif is a hard dependency, not a nicety — without Source Serif 4
-    # the text falls back to DejaVu Serif and the design reads wrong.
-    source-serif # transcript (OFL)
-    ibm-plex # micro-labels in the guidance popover
+    # The dictation window uses the system UI font throughout. IBM Plex
+    # Mono is still named by the meeting recorder (.rename-original).
+    ibm-plex
   ];
 
   devDeps = with pkgs; [

@@ -1,14 +1,20 @@
 """Mock providers for UI development.
 
 These emit predefined text on timers, simulating the real OpenAI Realtime
-transcription deltas and GPT-5.6 Luna cleanup streaming.
+transcription deltas, gpt-transcribe batch streaming (with upload progress)
+and GPT-5.6 Luna cleanup streaming, plus a level meter for the UI to poll.
 """
 
 import logging
+import math
+import time
 
 from gi.repository import GLib
 
 logger = logging.getLogger(__name__)
+
+# Short enough (< 50 chars) that the UI has no prediction and pulses.
+SHORT_TRANSCRIPT = "Fix the typo in the README."
 
 _TRANSCRIPT = (
     "So I've been thinking about this project and how it should work. "
@@ -51,10 +57,29 @@ _CLEANED = (
 )
 
 
+class MockLevelMeter:
+    """Speech-like RMS level for the UI meter, in dBFS.
+
+    A slow 8 s swell under a faster syllable ripple, so a few seconds of
+    recording sweeps every zone: quiet, good, hot and (briefly) clip.
+    """
+
+    def __init__(self) -> None:
+        self._t0 = time.monotonic()
+
+    @property
+    def level_dbfs(self) -> float:
+        t = time.monotonic() - self._t0
+        swell = 0.5 + 0.5 * math.sin(2 * math.pi * t / 8 - math.pi / 2)
+        syllable = 0.75 + 0.25 * math.sin(2 * math.pi * t * 3)
+        return -58.0 + 57.0 * swell * syllable
+
+
 class MockTranscription:
     """Emits transcript text word-by-word at ~4 words/sec."""
 
-    def __init__(self) -> None:
+    def __init__(self, text: str = _TRANSCRIPT) -> None:
+        self._text = text
         self._source: int | None = None
         self._words: list[str] = []
         self._pos = 0
@@ -64,10 +89,10 @@ class MockTranscription:
         logger.debug(
             "MockTranscription.start: delay_ms=%d words=%d",
             delay_ms,
-            len(_TRANSCRIPT.split()),
+            len(self._text.split()),
         )
         self._on_delta = on_delta
-        self._words = _TRANSCRIPT.split()
+        self._words = self._text.split()
         self._pos = 0
         # Simulate connection/thinking delay before first word
         self._source = GLib.timeout_add(delay_ms, self._begin)
@@ -108,15 +133,100 @@ class MockTranscription:
         return True
 
 
+class MockBatch:
+    """Simulates batch transcription: upload progress, TTFB, then streaming.
+
+    Returns the live transcript as the authoritative text. ``ttfb_ms`` sets
+    the wait before the first token (raise it to see the stall label);
+    ``fail`` errors out halfway through the stream.
+    """
+
+    def __init__(self, ttfb_ms: int = 1200, fail: bool = False) -> None:
+        self._ttfb_ms = ttfb_ms
+        self._fail = fail
+        self._source: int | None = None
+        self._words: list[str] = []
+        self._pos = 0
+        self._upload = 0.0
+        self._on_delta = None
+        self._on_complete = None
+        self._on_error = None
+        self._on_upload_progress = None
+
+    @property
+    def usage(self):
+        return None
+
+    def start(
+        self, text, on_delta, on_complete, on_error, on_upload_progress=None
+    ) -> None:
+        logger.debug(
+            "MockBatch.start: text_len=%d ttfb_ms=%d fail=%s",
+            len(text),
+            self._ttfb_ms,
+            self._fail,
+        )
+        self._words = text.split()
+        self._pos = 0
+        self._upload = 0.0
+        self._on_delta = on_delta
+        self._on_complete = on_complete
+        self._on_error = on_error
+        self._on_upload_progress = on_upload_progress
+        self._source = GLib.timeout_add(20, self._tick_upload)
+
+    def cancel(self) -> None:
+        logger.debug("MockBatch.cancel: pos=%d/%d", self._pos, len(self._words))
+        if self._source is not None:
+            GLib.source_remove(self._source)
+            self._source = None
+
+    def _tick_upload(self) -> bool:
+        self._upload = min(1.0, self._upload + 0.2)
+        if self._on_upload_progress:
+            self._on_upload_progress(self._upload)
+        if self._upload < 1.0:
+            return True
+        self._source = GLib.timeout_add(self._ttfb_ms, self._begin)
+        return False
+
+    def _begin(self) -> bool:
+        if not self._words:
+            self._source = None
+            self._on_complete("")
+            return False
+        self._source = GLib.timeout_add(40, self._tick)
+        return False
+
+    def _tick(self) -> bool:
+        if self._fail and self._pos >= len(self._words) // 2:
+            self._source = None
+            self._on_error(
+                "Batch transcription failed: simulated (VOXIZE_MOCK_OUTCOME)"
+            )
+            return False
+        if self._pos >= len(self._words):
+            self._source = None
+            self._on_complete(" ".join(self._words))
+            return False
+        sep = " " if self._pos > 0 else ""
+        self._on_delta(sep + self._words[self._pos])
+        self._pos += 1
+        return True
+
+
 class MockCleanup:
     """Emits cleaned text word-by-word at ~16 words/sec (simulates fast API streaming)."""
 
-    def __init__(self) -> None:
+    def __init__(self, text: str = _CLEANED, fail: bool = False) -> None:
+        self._text = text
+        self._fail = fail
         self._source: int | None = None
         self._words: list[str] = []
         self._pos = 0
         self._on_delta = None
         self._on_complete = None
+        self._on_error = None
 
     def start(
         self,
@@ -130,11 +240,12 @@ class MockCleanup:
             "MockCleanup.start: transcript_len=%d delay_ms=%d words=%d",
             len(transcript),
             delay_ms,
-            len(_CLEANED.split()),
+            len(self._text.split()),
         )
         self._on_delta = on_delta
         self._on_complete = on_complete
-        self._words = _CLEANED.split()
+        self._on_error = on_error
+        self._words = self._text.split()
         self._pos = 0
         # Simulate API thinking time before first token
         self._source = GLib.timeout_add(delay_ms, self._begin)
@@ -155,6 +266,10 @@ class MockCleanup:
         return False  # one-shot
 
     def _tick(self) -> bool:
+        if self._fail and self._on_error and self._pos >= len(self._words) // 3:
+            self._source = None
+            self._on_error("Cleanup failed: simulated (VOXIZE_MOCK_OUTCOME)")
+            return False
         if self._pos >= len(self._words):
             logger.debug("MockCleanup._tick: all %d words emitted", len(self._words))
             self._source = (
@@ -171,3 +286,8 @@ class MockCleanup:
         self._on_delta(sep + self._words[self._pos])
         self._pos += 1
         return True
+
+
+def default_transcript(short: bool = False) -> str:
+    """The text a mock session "said" — what the batch pass transcribes."""
+    return SHORT_TRANSCRIPT if short else _TRANSCRIPT
