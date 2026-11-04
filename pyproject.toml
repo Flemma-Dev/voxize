@@ -13,6 +13,7 @@ dependencies = [
 
 [project.scripts]
 voxize = "voxize.gui.__main__:main"
+voxize-tui = "voxize.tui.__main__:main"
 voxize-meet = "voxize.meeting.__main__:main"
 
 [dependency-groups]

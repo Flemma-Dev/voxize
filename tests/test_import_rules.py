@@ -61,3 +61,30 @@ def test_old_in_process_modules_are_gone():
     assert "voxize.ui" not in mods
     assert importlib.util.find_spec("voxize.app") is None
     assert importlib.util.find_spec("voxize.ui") is None
+
+
+def test_tui_imports_no_gi_no_gui_and_no_backend_module():
+    mods = modules_after(
+        "import voxize.tui.app, voxize.tui.backend, voxize.tui.deliver"
+    )
+    assert "textual.app" in mods  # sanity: it really is the Textual app
+    assert _gi(mods) == []
+    assert _backend(mods) == []
+    assert not [m for m in mods if m.startswith("voxize.gui")]
+    assert "voxize.clipboard" not in mods
+    assert "voxize.mode_switcher" not in mods
+
+
+def test_gui_does_not_import_the_tui():
+    mods = modules_after("import voxize.gui.app")
+    assert not [m for m in mods if m.startswith("voxize.tui")]
+
+
+def test_voxize_tui_entry_point_is_declared():
+    import tomllib
+    from pathlib import Path
+
+    project = tomllib.loads(
+        (Path(__file__).resolve().parent.parent / "pyproject.toml").read_text()
+    )["project"]
+    assert project["scripts"]["voxize-tui"] == "voxize.tui.__main__:main"
