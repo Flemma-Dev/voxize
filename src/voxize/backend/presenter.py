@@ -376,3 +376,44 @@ class Pipeline:
     def _mark_progress(self) -> None:
         """Something moved: the rail, or (no estimate) a real event."""
         self._last_progress_us = self._clock()
+
+
+class Transcript:
+    """Which transcript is current, and what stands in when a phase fails.
+
+    Stages run live → batch → cleaned. The first text of a stage replaces
+    what is on screen; later text of the same stage appends.
+
+    ``had_content`` decides whether ``close(trash_if_empty=True)`` trashes
+    the session. Unlike the old window's flag, it never resets: the old
+    flag dropped back to False on entering TRANSCRIBING, so switching to
+    the meeting recorder before the first batch token trashed a session
+    that had live text and audio.
+    """
+
+    def __init__(self) -> None:
+        self.stage: str | None = None
+        self.live_text = ""
+        self.had_content = False
+
+    def add(self, stage: str, text: str) -> str:
+        """Record streamed text; return the op the frontend should apply."""
+        op = "append" if stage == self.stage else "replace"
+        self.stage = stage
+        if stage == "live":
+            self.live_text += text
+        self.had_content = True
+        return op
+
+    def replace(self, stage: str, text: str) -> None:
+        """Record a whole-text replace (cleanup hand-off, failure fallback)."""
+        self.stage = stage
+        if text:
+            self.had_content = True
+
+    def mark_no_speech(self) -> None:
+        self.had_content = True
+
+    def batch_fallback(self) -> str | None:
+        """What stands when batch fails: the live preview, if it said anything."""
+        return self.live_text if self.live_text.strip() else None
