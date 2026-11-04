@@ -1,6 +1,7 @@
 """VoxizeTui driven headless (Textual run_test) with a fake backend and clipboard."""
 
 import asyncio
+import signal
 
 import pytest
 from textual.widgets import ProgressBar, Static
@@ -8,7 +9,7 @@ from tui_fakes import FakeClipboard, FakeTransport
 
 from voxize.protocol import PROTOCOL_VERSION, State
 from voxize.tui import card as c
-from voxize.tui.app import VoxizeTui
+from voxize.tui.app import CardScreen, ConfirmCancel, Vocabulary, VoxizeTui
 from voxize.tui.widgets import LevelBar
 
 
@@ -305,3 +306,201 @@ def test_card_fills_small_terminals_and_is_capped_and_centred(size):
         assert text(app, "status") == "Listening"
 
     run(app, scenario, size)
+
+
+def test_enter_while_recording_sends_stop():
+    app, transport, _ = make()
+
+    async def scenario(pilot):
+        await feed(app, pilot, *RECORDING)
+        await pilot.press("enter")
+        assert transport.types()[-1] == "stop"
+
+    run(app, scenario)
+
+
+def test_escape_before_recording_cancels_at_once():
+    app, transport, _ = make()
+
+    async def scenario(pilot):
+        await feed(app, pilot, HELLO, st("WARMING"))
+        await pilot.press("escape")
+        assert transport.types()[-1] == "cancel"
+        assert isinstance(app.screen, CardScreen)
+
+    run(app, scenario)
+
+
+@pytest.mark.parametrize("key", ["escape", "ctrl+q"])
+def test_cancel_from_recording_asks_and_keep_is_the_default(key):
+    app, transport, _ = make()
+
+    async def scenario(pilot):
+        await feed(app, pilot, *RECORDING)
+        await pilot.press(key)
+        assert isinstance(app.screen, ConfirmCancel)
+        await pilot.press("enter")  # Keep has focus
+        assert isinstance(app.screen, CardScreen)
+        await pilot.press(key)
+        await pilot.press("escape")  # Escape in the dialog means Keep
+        assert isinstance(app.screen, CardScreen)
+        assert "cancel" not in transport.types()
+
+    run(app, scenario)
+
+
+def test_ctrl_q_inside_the_dialog_does_nothing():
+    app, transport, _ = make()
+
+    async def scenario(pilot):
+        await feed(app, pilot, *RECORDING)
+        await pilot.press("escape", "ctrl+q")
+        assert isinstance(app.screen, ConfirmCancel)
+        assert "cancel" not in transport.types()
+
+    run(app, scenario)
+
+
+def test_discard_cancels_and_cancelled_exits_with_nothing():
+    app, transport, _ = make()
+
+    async def scenario(pilot):
+        await feed(app, pilot, *RECORDING)
+        await pilot.press("escape")
+        await pilot.click("#discard")
+        await pilot.pause()
+        assert transport.types()[-1] == "cancel"
+        await feed(app, pilot, st("CANCELLED"))
+        await pilot.pause()
+
+    run(app, scenario)
+    assert app.return_value is None
+    assert transport.types()[-1] == "close"
+
+
+def test_ready_force_closes_the_dialog_without_cancelling():
+    app, transport, _ = make()
+
+    async def scenario(pilot):
+        await feed(app, pilot, *RECORDING, st("TRANSCRIBING"))
+        await pilot.press("escape")
+        assert isinstance(app.screen, ConfirmCancel)
+        await feed(app, pilot, st("TRANSCRIBING"), st("CLEANING"))
+        assert isinstance(app.screen, ConfirmCancel)  # still a question
+        await feed(app, pilot, st("READY"))
+        await pilot.pause()
+        assert isinstance(app.screen, CardScreen)
+        assert "cancel" not in transport.types()
+
+    run(app, scenario)
+
+
+def test_enter_at_ready_copies_and_exits_with_the_transcript():
+    app, transport, copier = make()
+
+    async def scenario(pilot):
+        await feed(app, pilot, *ready_with("Fix it."))
+        await pilot.press("enter")
+        await pilot.pause()
+
+    run(app, scenario)
+    assert app.return_value == "Fix it."
+    assert copier.copies == ["Fix it.", "Fix it.", "Fix it."]
+    assert transport.sent[-1] == ("close", {"trash_if_empty": False})
+    assert transport.stdin_closed
+
+
+def test_q_is_ignored_in_flight_and_exits_at_ready():
+    app, transport, copier = make()
+
+    async def scenario(pilot):
+        await feed(app, pilot, *RECORDING)
+        await pilot.press("q")
+        assert app.is_running and "close" not in transport.types()
+        await feed(app, pilot, *ready_with("Fix it.")[3:])
+        await pilot.press("q")
+        await pilot.pause()
+
+    run(app, scenario)
+    assert app.return_value == "Fix it."
+    assert len(copier.copies) == 2  # the two results; q does not copy
+
+
+def test_ctrl_c_at_ready_copies_and_stays():
+    app, _, copier = make()
+
+    async def scenario(pilot):
+        await feed(app, pilot, *ready_with("Fix it."))
+        await pilot.press("ctrl+c")
+        await pilot.pause()
+        assert copier.copies[-1] == "Fix it." and len(copier.copies) == 3
+        assert app.is_running
+
+    run(app, scenario)
+
+
+def test_enter_at_ready_with_nothing_to_deliver_exits_with_nothing():
+    app, _, copier = make()
+
+    async def scenario(pilot):
+        await feed(
+            app, pilot, *RECORDING, st("TRANSCRIBING"), ev("no_speech"), st("READY")
+        )
+        assert text(app, "transcript") == c.NO_SPEECH
+        await pilot.press("enter")
+        await pilot.pause()
+
+    run(app, scenario)
+    assert app.return_value is None
+    assert copier.copies == []
+
+
+def test_enter_at_error_exits():
+    app, _, _ = make()
+
+    async def scenario(pilot):
+        await feed(app, pilot, HELLO, st("ERROR", error="boom"))
+        await pilot.press("enter")
+        await pilot.pause()
+
+    run(app, scenario)
+    assert app.return_value is None
+
+
+def test_vocabulary_opens_and_closes():
+    app, _, _ = make()
+
+    async def scenario(pilot):
+        await feed(app, pilot, ev("context", sources=SOURCES), *RECORDING)
+        await pilot.press("v")
+        assert isinstance(app.screen, Vocabulary)
+        paths = [str(s.content) for s in app.screen.query(".vocab-path")]
+        assert paths == ["/work/WHISPER.txt"]
+        await pilot.press("escape")
+        assert isinstance(app.screen, CardScreen)
+
+    run(app, scenario)
+
+
+def test_v_without_sources_does_nothing():
+    app, _, _ = make()
+
+    async def scenario(pilot):
+        await feed(app, pilot, *RECORDING)
+        await pilot.press("v")
+        assert isinstance(app.screen, CardScreen)
+
+    run(app, scenario)
+
+
+def test_a_signal_hangs_up_without_close_and_prints_nothing():
+    app, transport, _ = make()
+
+    async def scenario(pilot):
+        await feed(app, pilot, *RECORDING)
+        app._on_signal(signal.SIGTERM)
+        await pilot.pause()
+
+    run(app, scenario)
+    assert app.return_value is None
+    assert transport.stdin_closed and "close" not in transport.types()

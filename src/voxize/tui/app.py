@@ -4,22 +4,31 @@ The card, keys and clipboard live here. Everything else (audio, the three
 transcription phases, progress estimation, costs) runs in the backend
 process spawned by voxize.tui.__main__ and arrives as protocol events
 (voxize.protocol). The card's rules and strings are in voxize.tui.card.
+
+Differences from the GTK window (voxize/gui/app.py): Enter at READY copies
+and exits, and there is no auto-close, meeting switch or folder key.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import signal
 from collections.abc import Callable
+from typing import ClassVar
 
 from textual.app import App, ComposeResult
+from textual.binding import Binding, BindingType
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.css.query import NoMatches
-from textual.screen import Screen
+from textual.screen import ModalScreen, Screen
 from textual.timer import Timer
+from textual.widgets import Button, Static
 
 from voxize.frontend.client import HELLO_TIMEOUT_S, ClientCore, Transport
 from voxize.frontend.session_log import SessionLog
 from voxize.protocol import State
-from voxize.tui.card import Card
+from voxize.tui.card import CONFIRM_CANCEL, IN_FLIGHT, Card
 from voxize.tui.deliver import Clipboard
 from voxize.tui.widgets import CardView
 
@@ -27,9 +36,68 @@ logger = logging.getLogger(__name__)
 
 # Builds the transport once the app's event loop runs: (on_event, on_lost).
 TransportFactory = Callable[[Callable[[dict], None], Callable[[str], None]], Transport]
+_DONE = (State.READY, State.ERROR)
+
+
+class ConfirmCancel(ModalScreen[bool]):
+    """Discard this dictation? Keep is focused, and Escape means Keep."""
+
+    BINDINGS: ClassVar[list[BindingType]] = [Binding("escape", "keep", show=False)]
+
+    def compose(self) -> ComposeResult:
+        with Vertical():
+            yield Static("Discard this dictation?", id="confirm-title", markup=False)
+            yield Static("The audio stays in the session folder.", markup=False)
+            with Horizontal(id="confirm-buttons"):
+                yield Button("Keep", id="keep")
+                yield Button("Discard", id="discard", variant="error")
+
+    def on_mount(self) -> None:
+        self.query_one("#keep", Button).focus()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        self.dismiss(event.button.id == "discard")
+
+    def action_keep(self) -> None:
+        self.dismiss(False)
+
+
+class Vocabulary(ModalScreen[None]):
+    """The vocabulary the backend loaded for this session (``context``)."""
+
+    BINDINGS: ClassVar[list[BindingType]] = [
+        Binding("escape", "close", show=False),
+        Binding("v", "close", show=False),
+        Binding("q", "close", show=False),
+    ]
+
+    def __init__(self, sources: list[dict]) -> None:
+        super().__init__()
+        self._sources = sources
+
+    def compose(self) -> ComposeResult:
+        with VerticalScroll():
+            yield Static("Vocabulary in use", id="vocab-title", markup=False)
+            for source in self._sources:
+                yield Static(source["path"], classes="vocab-path", markup=False)
+                yield Static(
+                    source["content"].strip(), classes="vocab-content", markup=False
+                )
+
+    def action_close(self) -> None:
+        self.dismiss(None)
 
 
 class CardScreen(Screen):
+    # On the card, not the app: a modal on top shadows these, so Enter on a
+    # modal's button presses the button.
+    BINDINGS: ClassVar[list[BindingType]] = [
+        Binding("enter", "app.primary", show=False),
+        Binding("escape", "app.cancel_or_exit", show=False),
+        Binding("q", "app.exit_if_done", show=False),
+        Binding("v", "app.vocabulary", show=False),
+    ]
+
     def __init__(self, card: Card) -> None:
         super().__init__()
         self._card = card
@@ -43,6 +111,12 @@ class VoxizeTui(App[str | None]):
 
     CSS_PATH = "tui.tcss"
     ENABLE_COMMAND_PALETTE = False
+    BINDINGS: ClassVar[list[BindingType]] = [
+        # Textual's own ctrl+q quits and its ctrl+c only nags. Neither may
+        # skip the cancel confirm, and ctrl+c copies, as in the GUI.
+        Binding("ctrl+q", "ctrl_q", show=False, priority=True),
+        Binding("ctrl+c", "copy", show=False, priority=True, system=True),
+    ]
 
     def __init__(
         self,
@@ -68,6 +142,8 @@ class VoxizeTui(App[str | None]):
         self._install_signals = install_signals
         self._card_screen: CardScreen | None = None
         self._timer: Timer | None = None
+        self._confirm: ConfirmCancel | None = None
+        self._leaving = False
         self.core.state.on_change(self._on_state_change)
 
     def get_default_screen(self) -> Screen:
@@ -80,6 +156,10 @@ class VoxizeTui(App[str | None]):
         )
         self.core.send("start", cwd=self._cwd, glossaries=[])
         self.set_timer(self._hello_timeout_s, self.core.check_hello)
+        if self._install_signals:
+            loop = asyncio.get_running_loop()
+            for sig in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
+                loop.add_signal_handler(sig, self._on_signal, sig)
 
     # ── Backend events ──
 
@@ -131,6 +211,12 @@ class VoxizeTui(App[str | None]):
             self._start_timer()
         else:
             self._stop_timer()
+        # Past cancelling (READY, ERROR, CANCELLED) the question no longer
+        # applies; the backend would ignore a late cancel anyway.
+        if new not in CONFIRM_CANCEL:
+            self._close_confirm()
+        if new == State.CANCELLED:
+            self.run_worker(self._leave(), group="leave", exit_on_error=False)
         self._render()
 
     def _render(self) -> None:
@@ -157,10 +243,90 @@ class VoxizeTui(App[str | None]):
         self.card.tick()
         self._render()
 
-    # ── Clipboard ──
+    # ── Keys ──
+
+    async def action_primary(self) -> None:
+        """Enter: stop while capturing; copy and exit at READY; exit at ERROR."""
+        s = self.core.state.state
+        if s in (State.WARMING, State.RECORDING):
+            self.core.send("stop")
+        elif s == State.READY:
+            text = self.card.deliverable
+            if text:
+                await self._copy(text)
+            await self._leave()
+        elif s == State.ERROR:
+            await self._leave()
+
+    async def action_cancel_or_exit(self) -> None:
+        """Escape: cancel in flight (asking first from RECORDING on); exit when done."""
+        s = self.core.state.state
+        if s in CONFIRM_CANCEL:
+            self._ask_cancel()
+        elif s in IN_FLIGHT:
+            self.core.send("cancel")
+        elif s in _DONE:
+            await self._leave()
+
+    async def action_exit_if_done(self) -> None:
+        """q: exit at READY or ERROR; ignored while a dictation is in flight."""
+        if self.core.state.state in _DONE:
+            await self._leave()
+
+    async def action_ctrl_q(self) -> None:
+        """Ctrl+Q behaves as Escape on the card; inside a modal it does nothing."""
+        if isinstance(self.screen, ModalScreen):
+            return
+        await self.action_cancel_or_exit()
+
+    async def action_copy(self) -> None:
+        if self.core.state.state == State.READY and (text := self.card.deliverable):
+            await self._copy(text)
+
+    def action_vocabulary(self) -> None:
+        if self.card.vocab_visible:
+            self.push_screen(Vocabulary(self.card.sources))
+
+    def _ask_cancel(self) -> None:
+        if self._confirm is not None:
+            return
+        self._confirm = ConfirmCancel()
+
+        def answered(discard: bool | None) -> None:
+            self._confirm = None
+            if discard:
+                self.core.send("cancel")
+
+        self.push_screen(self._confirm, answered)
+
+    def _close_confirm(self) -> None:
+        confirm = self._confirm
+        if confirm is not None and self.screen is confirm:
+            confirm.dismiss(False)
+
+    # ── Clipboard and leaving ──
 
     async def _copy(self, text: str) -> None:
         await self.copier.copy(text)
         if self.copier.unavailable and not self.card.clipboard_notice:
             self.card.set_clipboard_unavailable()
             self._render()
+
+    async def _leave(self) -> None:
+        if self._leaving:
+            return
+        self._leaving = True
+        # exit() would cancel a copy still running; let it finish first.
+        await self.copier.settle()
+        self.core.close(trash_if_empty=False)
+        self.exit(self.card.deliverable)
+
+    def _on_signal(self, sig: int) -> None:
+        """SIGTERM/SIGHUP/SIGINT: hand the backend EOF and quit, printing nothing.
+
+        The backend treats stdin EOF as cancel + close: it finalizes the WAV,
+        releases the mic lock and restores ducked volumes itself.
+        """
+        logger.info("Signal %s received, shutting down", sig)
+        self.core.hang_up()
+        self.exit(None)
