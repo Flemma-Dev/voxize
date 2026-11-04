@@ -39,4 +39,7 @@ class ClientState:
         self._state = new
         logger.debug("state: %s -> %s", old.name, new.name)
         for cb in list(self._listeners):
-            cb(self, old, new)
+            try:
+                cb(self, old, new)
+            except Exception:
+                logger.exception("state listener failed")
