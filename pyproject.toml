@@ -58,3 +58,5 @@ line-length = 88
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+# Nothing here uses anyio; its pytest plugin emits a PytestRemovedIn10Warning.
+addopts = "-p no:anyio"
