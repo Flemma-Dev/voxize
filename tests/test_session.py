@@ -1,3 +1,5 @@
+import time
+
 import pytest
 from helpers import Recorder, run_until
 
@@ -197,6 +199,27 @@ def test_cancel_while_recording(make):
     assert exits == []
     s.close(trash_if_empty=False)
     assert exits == [True]
+
+
+def test_stop_then_cancel_before_the_idle_runs_emits_nothing_after_cancelled(
+    make, monkeypatch
+):
+    s, rec, _ = make(short=True, stop_ms=60000)
+    started = []
+    monkeypatch.setattr(s, "_start_mock_batch", lambda *_a: started.append(1))
+    s.start(None, [])
+    run_until(lambda: rec.of("text"), what="live text")
+    s.stop()  # queues _begin_transcribing on the main loop...
+    s.cancel()  # ...which has not run yet
+    assert rec.states()[-2:] == ["TRANSCRIBING", "CANCELLED"]
+    n = len(rec.events)
+    until = time.monotonic() + 0.3
+    run_until(lambda: time.monotonic() > until, what="the queued idle to run")
+    assert started == []  # the stale idle did not begin a batch
+    # Deltas already queued behind the cancel are dropped too.
+    s._on_batch_delta("late")
+    s._on_cleanup_delta("late")
+    assert rec.events[n:] == []
 
 
 def test_close_cancels_in_flight_and_exits_once(make):

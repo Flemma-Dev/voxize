@@ -150,7 +150,6 @@ class Session:
 
         # Batch transcript (passed from TRANSCRIBING to CLEANING)
         self._batch_transcript: str = ""
-        self._live_len: int = 0
 
         # Session cost tracking (three phases + the billable warmup pings)
         self._live_usage: dict[str, int] | None = None
@@ -450,7 +449,7 @@ class Session:
 
         # Audio import + capture + openai all happen in the bootstrap
         # thread. The sounddevice import (~2s via numpy) must never
-        # block the GTK main loop.
+        # block the main loop.
         self._bootstrap_done.clear()
         self._bootstrap_cancelled = False
         threading.Thread(
@@ -480,7 +479,7 @@ class Session:
             self._warming_timer_id = None
 
     def _mock_warming_to_recording(self) -> bool:
-        """GTK idle: skip the audio-detection wait in mock mode."""
+        """Main-loop idle: skip the audio-detection wait in mock mode."""
         if self._machine and self._machine.state == State.WARMING:
             self._machine.transition(State.RECORDING)
         return False
@@ -524,8 +523,8 @@ class Session:
 
         The sounddevice import (~2s via numpy on cold cache) and the
         openai SDK import (~300ms) both run here so neither blocks the
-        GTK main loop. Audio capture starts first; the window is
-        already visible in INITIALIZING state by this point.
+        main loop. Audio capture starts first; the frontend is
+        already showing INITIALIZING by this point.
 
         Respects ``self._bootstrap_cancelled`` at checkpoints so
         Escape-during-startup doesn't leave a half-wired client behind.
@@ -647,13 +646,13 @@ class Session:
         except Exception:
             logger.exception("bootstrap: failed to start transcription WS")
 
-        # Schedule warmup on the GTK thread if we're still RECORDING.
+        # Schedule warmup on the main loop if we're still RECORDING.
         GLib.idle_add(self._kick_warmup_after_bootstrap)
         self._bootstrap_done.set()
         _trace("bootstrap: complete")
 
     def _kick_warmup_after_bootstrap(self) -> bool:
-        """GTK thread: start warmup pings once bootstrap has produced a client."""
+        """Main loop: start warmup pings once bootstrap has produced a client."""
         if self._machine and self._machine.state == State.RECORDING:
             self._start_warmup()
         return False
@@ -826,7 +825,6 @@ class Session:
     def _set_live_len(self, live_len: int) -> bool:
         """Main loop: arm the pipeline estimate once the live length is known."""
         logger.debug("_set_live_len: live_len=%d", live_len)
-        self._live_len = live_len
         # Arrives via idle after the WS teardown; a fast empty batch can
         # already have reached READY.
         if self._machine.state in _WORKING:
@@ -862,10 +860,11 @@ class Session:
         return False  # one-shot idle
 
     def _on_batch_delta(self, text: str) -> None:
-        if (
-            self._transcript.stage != "batch"
-            and self._machine.state == State.TRANSCRIBING
-        ):
+        if self._machine.state != State.TRANSCRIBING:
+            # Cancelled (or failed) while a delta was already queued.
+            logger.debug("_on_batch_delta: dropped in %s", self._machine.state.name)
+            return
+        if self._transcript.stage != "batch":
             self._pipeline.batch_first_delta()
         self._emit_text("batch", text)
         self._pipeline.delta(text, "batch")
@@ -961,10 +960,10 @@ class Session:
         return False  # one-shot idle
 
     def _on_cleanup_delta(self, text: str) -> None:
-        if (
-            self._transcript.stage != "cleaned"
-            and self._machine.state == State.CLEANING
-        ):
+        if self._machine.state != State.CLEANING:
+            logger.debug("_on_cleanup_delta: dropped in %s", self._machine.state.name)
+            return
+        if self._transcript.stage != "cleaned":
             self._pipeline.cleanup_first_delta()
         self._emit_text("cleaned", text)
         self._pipeline.delta(text, "cleaned")
@@ -1200,6 +1199,11 @@ class Session:
     def _begin_transcribing(self) -> bool:
         """Stop recording, cancel WS, start batch transcription."""
         logger.debug("_begin_transcribing: mock=%s", self._mock is not None)
+        if self._machine.state != State.TRANSCRIBING:
+            # Cancelled between the transition and this idle: the CANCELLED
+            # teardown already owns audio, transcription and the lock.
+            logger.debug("_begin_transcribing: skipped in %s", self._machine.state.name)
+            return False
 
         # Short-circuit any bootstrap still importing openai or opening
         # the WS — we no longer need the live preview, batch does the
@@ -1323,11 +1327,11 @@ class Session:
             except Exception:
                 logger.exception("Failed to save live_transcript.txt")
 
-        # Step 4: hand live-preview usage back to GTK.
+        # Step 4: hand live-preview usage back to the main loop.
         GLib.idle_add(self._set_live_usage, live_usage)
 
     def _set_live_usage(self, live_usage) -> bool:
-        """GTK thread: store live-preview usage once WS teardown settles."""
+        """Main loop: store live-preview usage once WS teardown settles."""
         logger.debug("_set_live_usage: live_usage=%s", live_usage)
         self._live_usage = live_usage
         return False
@@ -1340,7 +1344,7 @@ class Session:
             self._transcription is not None,
             self._lock is not None,
         )
-        # Grab references and null them on GTK thread to prevent races
+        # Grab references and null them on the main loop to prevent races
         audio = self._audio
         self._audio = None
         transcription = self._transcription
