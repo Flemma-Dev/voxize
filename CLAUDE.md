@@ -62,7 +62,7 @@ Thread bridge (inside the backend): `GLib.idle_add` (worker -> main loop), `call
 | `frontend/pipe.py` | `BackendPipe`: send, line framing, stderr tail, lost report — no event loop |
 | `frontend/session_log.py` | `SessionLog`: buffers frontend log lines until `session`, then `gui.log` / `tui.log` |
 | `tui/__main__.py` | TUI entry point: spawns the backend before importing Textual, prints the transcript on exit |
-| `tui/app.py` | Textual app: protocol client, keys, cancel confirm, vocabulary, clipboard, signals |
+| `tui/app.py` | Textual app: protocol client, keys, cancel confirm, vocabulary, costs, clipboard, signals |
 | `tui/card.py` | Pure presentation model of the card (the GUI's strings and rules, no toolkit) |
 | `tui/widgets.py` / `tui/tui.tcss` | Card widgets and styles (full screen, capped at 88×24) |
 | `tui/backend.py` | `BackendPipe` on asyncio readers; backend stderr to `tui.log` only |

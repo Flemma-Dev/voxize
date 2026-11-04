@@ -81,6 +81,7 @@ class Card:
         self.stalled = False
         self.sources: list[dict] = []
         self.cost: float | None = None
+        self.cost_parts: list[tuple[str, float]] = []
         self._had_first_text = False
         self._preview_error: str | None = None
         self._failure: tuple[str, str, str | None] | None = None
@@ -94,6 +95,10 @@ class Card:
     @property
     def vocab_visible(self) -> bool:
         return bool(self.sources) and self.state != State.ERROR
+
+    @property
+    def costs_visible(self) -> bool:
+        return self.state == State.READY and self.cost is not None
 
     @property
     def deliverable(self) -> str | None:
@@ -115,6 +120,8 @@ class Card:
             keys = [("enter", "exit"), ("q", "exit")]
         else:
             keys = []
+        if self.costs_visible:
+            keys.append(("$", "costs"))
         if self.vocab_visible:
             keys.append(("v", "vocabulary"))
         return keys
@@ -238,7 +245,12 @@ class Card:
     def on_costs(
         self, live: float | None, batch: float | None, cleanup: float | None
     ) -> None:
-        known = [cost for cost in (live, batch, cleanup) if cost is not None]
+        self.cost_parts = [
+            (label, cost)
+            for label, cost in (("Live", live), ("Batch", batch), ("Cleanup", cleanup))
+            if cost is not None
+        ]
+        known = [cost for _, cost in self.cost_parts]
         self.cost = sum(known) if known else None
 
     def set_clipboard_unavailable(self) -> None:

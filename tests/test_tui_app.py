@@ -9,7 +9,7 @@ from tui_fakes import FakeClipboard, FakeTransport
 
 from voxize.protocol import PROTOCOL_VERSION, State
 from voxize.tui import card as c
-from voxize.tui.app import CardScreen, ConfirmCancel, Vocabulary, VoxizeTui
+from voxize.tui.app import CardScreen, ConfirmCancel, Costs, Vocabulary, VoxizeTui
 from voxize.tui.widgets import LevelBar
 
 
@@ -166,7 +166,8 @@ def test_ready_shows_text_costs_and_keys():
         assert text(app, "cost") == "$0.0004" and shown(app, "cost")
         assert text(app, "vocab") == "≡ 1"
         assert (
-            text(app, "keys") == "enter copy & exit · ^c copy · q exit · v vocabulary"
+            text(app, "keys")
+            == "enter copy & exit · ^c copy · q exit · $ costs · v vocabulary"
         )
         assert not shown(app, "level") and not shown(app, "progress")
 
@@ -491,6 +492,85 @@ def test_v_without_sources_does_nothing():
         assert isinstance(app.screen, CardScreen)
 
     run(app, scenario)
+
+
+def test_dollar_opens_the_cost_breakdown_at_ready_and_escape_closes_it():
+    app, _, _ = make()
+
+    async def scenario(pilot):
+        await feed(app, pilot, *ready_with("Fix it."))
+        await feed(
+            app,
+            pilot,
+            ev("costs", live=0.0001, batch=0.0002, cleanup=None, total=0.0003),
+        )
+        await pilot.press("$")
+        assert isinstance(app.screen, Costs)
+        assert str(app.screen.query_one("#costs-title").content) == "Session cost"
+        labels = [str(s.content) for s in app.screen.query(".cost-label")]
+        values = [str(s.content) for s in app.screen.query(".cost-value")]
+        assert labels == ["Live", "Batch", "Total"]
+        assert values == ["$0.0001", "$0.0002", "$0.0003"]
+        await pilot.press("escape")
+        assert isinstance(app.screen, CardScreen)
+        await pilot.press("$")
+        assert isinstance(app.screen, Costs)
+        await pilot.press("$")
+        assert isinstance(app.screen, CardScreen)
+        await pilot.press("$")
+        await pilot.press("q")
+        assert isinstance(app.screen, CardScreen)
+
+    run(app, scenario)
+
+
+def test_dollar_shows_all_three_parts():
+    app, _, _ = make()
+
+    async def scenario(pilot):
+        await feed(
+            app,
+            pilot,
+            *ready_with("Fix it."),
+            ev("costs", live=0.0001, batch=0.0002, cleanup=0.0001, total=0.0004),
+        )
+        await pilot.press("$")
+        labels = [str(s.content) for s in app.screen.query(".cost-label")]
+        values = [str(s.content) for s in app.screen.query(".cost-value")]
+        assert labels == ["Live", "Batch", "Cleanup", "Total"]
+        assert values == ["$0.0001", "$0.0002", "$0.0001", "$0.0004"]
+
+    run(app, scenario)
+
+
+def test_dollar_before_ready_or_without_costs_does_nothing():
+    app, _, _ = make()
+
+    async def scenario(pilot):
+        await feed(
+            app,
+            pilot,
+            *RECORDING,
+            ev("costs", live=0.0001, batch=None, cleanup=None, total=0.0001),
+        )
+        await pilot.press("$")
+        assert isinstance(app.screen, CardScreen)
+
+    run(app, scenario)
+
+    app, _, _ = make()
+
+    async def scenario_none(pilot):
+        await feed(
+            app,
+            pilot,
+            *ready_with("Fix it."),
+            ev("costs", live=None, batch=None, cleanup=None, total=None),
+        )
+        await pilot.press("$")
+        assert isinstance(app.screen, CardScreen)
+
+    run(app, scenario_none)
 
 
 def test_a_signal_hangs_up_without_close_and_prints_nothing():

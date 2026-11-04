@@ -88,6 +88,32 @@ class Vocabulary(ModalScreen[None]):
         self.dismiss(None)
 
 
+class Costs(ModalScreen[None]):
+    """What this session cost, per phase, and in total."""
+
+    BINDINGS: ClassVar[list[BindingType]] = [
+        Binding("escape", "close", show=False),
+        Binding("dollar_sign", "close", show=False),
+        Binding("q", "close", show=False),
+    ]
+
+    def __init__(self, parts: list[tuple[str, float]]) -> None:
+        super().__init__()
+        self._parts = parts
+
+    def compose(self) -> ComposeResult:
+        rows = [*self._parts, ("Total", sum(cost for _, cost in self._parts))]
+        with Vertical():
+            yield Static("Session cost", id="costs-title", markup=False)
+            for label, cost in rows:
+                with Horizontal(classes="cost-row"):
+                    yield Static(label, classes="cost-label", markup=False)
+                    yield Static(f"${cost:.4f}", classes="cost-value", markup=False)
+
+    def action_close(self) -> None:
+        self.dismiss(None)
+
+
 class CardScreen(Screen):
     # On the card, not the app: a modal on top shadows these, so Enter on a
     # modal's button presses the button.
@@ -95,6 +121,7 @@ class CardScreen(Screen):
         Binding("enter", "app.primary", show=False),
         Binding("escape", "app.cancel_or_exit", show=False),
         Binding("q", "app.exit_if_done", show=False),
+        Binding("dollar_sign", "app.costs", show=False),
         Binding("v", "app.vocabulary", show=False),
     ]
 
@@ -287,6 +314,10 @@ class VoxizeTui(App[str | None]):
     def action_vocabulary(self) -> None:
         if self.card.vocab_visible:
             self.push_screen(Vocabulary(self.card.sources))
+
+    def action_costs(self) -> None:
+        if self.card.costs_visible:
+            self.push_screen(Costs(self.card.cost_parts))
 
     def _ask_cancel(self) -> None:
         if self._confirm is not None:

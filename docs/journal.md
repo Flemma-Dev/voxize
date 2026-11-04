@@ -1458,7 +1458,8 @@ failure still sends the same sequence as before.
   progress/stall/indeterminate, the notices, the cancel confirm with Keep as
   default and force-close on READY, Ctrl+C copy, the vocabulary list, costs,
   the timer starting at RECORDING.
-- **Replaced:** the cost tooltip becomes inline text at READY. The height
+- **Replaced:** the cost tooltip becomes the total at READY, the breakdown
+  behind `$`. The height
   ratchet and 6/10-line caps become a fixed scrolling area that follows the
   end. Enter at READY becomes copy and exit.
 - **Not in v1:** auto-close, mode switcher / Ctrl+M, Ctrl+O, selection copy,

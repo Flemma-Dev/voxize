@@ -222,6 +222,44 @@ def test_costs_sum_the_known_parts():
     assert card.cost is None
 
 
+def test_cost_parts_keep_the_known_ones_in_order():
+    card = Card()
+    card.on_costs(0.0001, None, 0.0003)
+    assert card.cost_parts == [("Live", 0.0001), ("Cleanup", 0.0003)]
+    card.on_costs(0.0001, 0.0002, 0.0003)
+    assert [label for label, _ in card.cost_parts] == ["Live", "Batch", "Cleanup"]
+    card.on_costs(None, None, None)
+    assert card.cost_parts == []
+
+
+def test_costs_are_visible_only_at_ready_with_a_cost():
+    card = recording()
+    card.on_costs(0.0001, 0.0002, 0.0001)
+    assert not card.costs_visible
+    walk(card, State.TRANSCRIBING, State.CLEANING)
+    assert not card.costs_visible
+    card.on_state(State.READY)
+    assert card.costs_visible
+    card.on_costs(None, None, None)
+    assert not card.costs_visible
+
+
+def test_costs_key_follows_the_ready_keys_and_precedes_vocabulary():
+    card = recording()
+    card.on_text("live", "replace", "Fix it.")
+    card.on_context([{"path": "/w/WHISPER.txt", "content": "Luup"}])
+    card.on_costs(0.0001, 0.0002, 0.0001)
+    assert ("$", "costs") not in card.keys
+    walk(card, State.TRANSCRIBING, State.CLEANING, State.READY)
+    assert card.keys == [
+        ("enter", "copy & exit"),
+        ("^c", "copy"),
+        ("q", "exit"),
+        ("$", "costs"),
+        ("v", "vocabulary"),
+    ]
+
+
 def test_vocabulary_key_is_offered_when_sources_were_loaded():
     card = recording()
     card.on_context([{"path": "/w/WHISPER.txt", "content": "Luup"}])

@@ -39,7 +39,7 @@ LevelBar.zone-clip { color: $error; }
 
 #keys { height: 1; color: $text-muted; }
 
-ConfirmCancel, Vocabulary { align: center middle; }
+ConfirmCancel, Vocabulary, Costs { align: center middle; }
 ConfirmCancel > Vertical {
     width: 46;
     max-width: 100%;
@@ -63,3 +63,16 @@ Vocabulary > VerticalScroll {
 #vocab-title { text-style: bold; }
 .vocab-path { text-style: bold; margin-top: 1; }
 .vocab-content { color: $text-muted; }
+Costs > Vertical {
+    width: 32;
+    max-width: 100%;
+    height: auto;
+    border: round $accent;
+    background: $surface;
+    padding: 0 1;
+}
+#costs-title { text-style: bold; margin-bottom: 1; }
+.cost-row { height: 1; }
+.cost-label { width: 1fr; }
+.cost-value { width: auto; text-align: right; }
+.cost-row:last-of-type { text-style: bold; }
