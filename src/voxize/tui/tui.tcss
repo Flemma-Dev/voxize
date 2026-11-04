@@ -1,0 +1,65 @@
+/* Voxize terminal card. Full screen; capped and centred on big terminals. */
+
+Screen {
+    align: center middle;
+}
+
+CardView {
+    width: 100%;
+    height: 100%;
+    max-width: 88;
+    max-height: 24;
+    padding: 0 1;
+}
+
+#header { height: 1; }
+#dot { width: 2; }
+#dot.tone-idle { color: $text-muted; }
+#dot.tone-recording { color: $error; }
+#dot.tone-working { color: $warning; }
+#dot.tone-ready { color: $success; }
+#dot.tone-error { color: $error; }
+#status { width: 1fr; text-style: bold; }
+#vocab, #cost, #timer { width: auto; margin-left: 2; }
+#vocab, #cost { color: $text-muted; }
+#timer.-dim { color: $text-muted; }
+
+#rule { margin: 0; }
+#scroll { height: 1fr; min-height: 1; }
+#transcript.-dimmed { color: $text-muted; }
+#notice { height: auto; color: $warning; }
+
+LevelBar { height: 1; color: $accent; }
+LevelBar.zone-quiet { color: $text-muted; }
+LevelBar.zone-hot { color: $warning; }
+LevelBar.zone-clip { color: $error; }
+
+#progress { width: 100%; height: 1; }
+#progress Bar { width: 1fr; }
+
+#keys { height: 1; color: $text-muted; }
+
+ConfirmCancel, Vocabulary { align: center middle; }
+ConfirmCancel > Vertical {
+    width: 46;
+    max-width: 100%;
+    height: auto;
+    border: round $error;
+    background: $surface;
+    padding: 0 1;
+}
+#confirm-title { text-style: bold; }
+#confirm-buttons { height: auto; align-horizontal: right; margin-top: 1; }
+#confirm-buttons Button { margin-left: 1; }
+Vocabulary > VerticalScroll {
+    width: 80;
+    max-width: 100%;
+    height: auto;
+    max-height: 90%;
+    border: round $accent;
+    background: $surface;
+    padding: 0 1;
+}
+#vocab-title { text-style: bold; }
+.vocab-path { text-style: bold; margin-top: 1; }
+.vocab-content { color: $text-muted; }

@@ -8,6 +8,7 @@ dependencies = [
     "sounddevice>=0.4",
     "websockets>=13.0",
     "openai>=1.0",
+    "textual>=8.2,<9",
 ]
 
 [project.scripts]
