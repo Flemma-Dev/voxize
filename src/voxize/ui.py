@@ -106,6 +106,20 @@ def _level_zone(fraction: float) -> str | None:
     return "zone-quiet"
 
 
+def describe_widget(widget: Gtk.Widget | None) -> str:
+    """Short, log-friendly name for a widget: type, label and CSS classes."""
+    if widget is None:
+        return "None"
+    label = widget.get_label() if hasattr(widget, "get_label") else None
+    classes = ".".join(widget.get_css_classes())
+    return (
+        f"{type(widget).__name__}"
+        + (f"({label!r})" if label else "")
+        + (f".{classes}" if classes else "")
+        + ("" if widget.get_mapped() else "[unmapped]")
+    )
+
+
 def _format_timer(seconds: int) -> str:
     """``mm:ss`` up to 59:59, then ``h:mm:ss``."""
     h, rem = divmod(seconds, 3600)
@@ -205,6 +219,20 @@ class OverlayWindow:
         self._window.set_content(self._toast_overlay)
 
         self._window.connect("notify::is-active", self._on_active_changed)
+        # Diagnostics for keyboard routing (Enter → default widget). Debug
+        # level, so they only reach the session's debug.log.
+        self._window.connect(
+            "notify::focus-widget",
+            lambda w, _p: logger.debug("focus: %s", describe_widget(w.get_focus())),
+        )
+        self._window.connect(
+            "activate-default",
+            lambda w: logger.debug(
+                "activate-default: focus=%s default=%s",
+                describe_widget(w.get_focus()),
+                describe_widget(w.get_default_widget()),
+            ),
+        )
 
         self._build_strip(outer)
 
@@ -1034,6 +1062,12 @@ class OverlayWindow:
             self._show_buttons(self._close_btn, self._copy_btn)
             self._window.set_default_widget(
                 self._copy_btn if self._copyable else self._close_btn
+            )
+            logger.debug(
+                "ready: default=%s focus=%s active=%s",
+                describe_widget(self._window.get_default_widget()),
+                describe_widget(self._window.get_focus()),
+                self._window.is_active(),
             )
             # At ready the text is a finished artefact being proof-read
             # before paste; forcing a scroll through a 9-line result is

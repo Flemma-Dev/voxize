@@ -1261,3 +1261,18 @@ flows end to end.
 `src/voxize/mock.py`, `src/voxize/__main__.py`,
 `scripts/generate_screenshots.py`, `shell.nix`, `CLAUDE.md`,
 `docs/debugging-guide.md`.
+
+### 2026-11-04 — Enter at READY: unreproduced report, diagnostics added
+
+Report: at READY, Enter did nothing instead of activating Copy (the default
+widget). Not reproduced. Under Xvfb with real XTest key events, Enter reaches
+the window and activates Copy for both 3a and BREATH (`v0.1.0`), whether Stop
+was pressed by Enter or by mouse, with auto-close running, guidance shown and
+a long transcript. A real Wayland session afterwards also worked: focus on the
+TextView, `activate-default` fired, Copy ran.
+
+Rather than guess a fix, `debug.log` now records keyboard routing at debug
+level: focus-widget changes, every Enter keypress with the focused and default
+widgets, `activate-default` emissions, and the focus/default on entering
+READY (`ui.describe_widget`). The next failing session will show which of
+those links broke.

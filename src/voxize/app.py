@@ -63,7 +63,7 @@ from voxize.recover import write_recover_script  # noqa: E402
 from voxize.state import State, StateMachine  # noqa: E402
 from voxize.storage import create_session_dir, prune_sessions  # noqa: E402
 from voxize.transcribe import RealtimeTranscription  # noqa: E402
-from voxize.ui import OverlayWindow  # noqa: E402
+from voxize.ui import OverlayWindow, describe_widget  # noqa: E402
 
 if TYPE_CHECKING:
     from openai import OpenAI
@@ -1410,6 +1410,16 @@ class VoxizeApp(Gtk.Application):
             if keyval == Gdk.KEY_m and self._ui._on_switch_to_meeting is not None:
                 self._switch_to_meeting()
                 return True
+        if keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter, Gdk.KEY_ISO_Enter):
+            # Diagnostics only: where Enter lands decides whether the
+            # window's default widget (Stop / Copy / Close) is activated.
+            logger.debug(
+                "_on_key: %s state=%s focus=%s default=%s",
+                Gdk.keyval_name(keyval),
+                self._machine.state.name if self._machine else None,
+                describe_widget(win.get_focus()),
+                describe_widget(win.get_default_widget()),
+            )
         if keyval != Gdk.KEY_Escape:
             return False
         # This controller runs in CAPTURE on the window, ahead of any open
