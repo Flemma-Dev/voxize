@@ -105,9 +105,7 @@ def generate_title(
 
     client = OpenAI(api_key=api_key)
 
-    user_message = (
-        f"Meeting date: {meeting_date}\n" f"\n" f"Transcript:\n" f"{transcript}"
-    )
+    user_message = f"Meeting date: {meeting_date}\n\nTranscript:\n{transcript}"
 
     logger.debug(
         "generate_title: calling %s, transcript_len=%d",

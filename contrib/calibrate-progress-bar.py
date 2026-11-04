@@ -139,16 +139,13 @@ def main() -> None:
         n = len(x)
         x_mean = sum(x) / n
         y_mean = sum(y) / n
-        ss_xy = sum(
-            (xi - x_mean) * (yi - y_mean) for xi, yi in zip(x, y, strict=True)
-        )
+        ss_xy = sum((xi - x_mean) * (yi - y_mean) for xi, yi in zip(x, y, strict=True))
         ss_xx = sum((xi - x_mean) ** 2 for xi in x)
         slope = ss_xy / ss_xx if ss_xx else 0
         intercept = y_mean - slope * x_mean
         ss_tot = sum((yi - y_mean) ** 2 for yi in y)
         ss_res = sum(
-            (yi - (intercept + slope * xi)) ** 2
-            for xi, yi in zip(x, y, strict=True)
+            (yi - (intercept + slope * xi)) ** 2 for xi, yi in zip(x, y, strict=True)
         )
         r2 = 1 - ss_res / ss_tot if ss_tot else 0
         return intercept, slope, r2
