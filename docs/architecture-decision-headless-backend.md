@@ -2,7 +2,7 @@
 
 **Date**: 2026-11-04
 **Status**: Decided (stage 1 implemented: backend plus GTK client; stage 2, a Textual TUI, is next)
-**Supersedes**: point 3 ("Don't over-engineer the separation") of `docs/architecture-decision-layer-shell-and-dual-frontend.md`
+**Supersedes**: points 2 ("Only `app.py` and `ui.py` touch GTK") and 3 ("Don't over-engineer the separation") of `docs/architecture-decision-layer-shell-and-dual-frontend.md`
 **Referenced from**: `docs/journal.md`, 2026-11-04
 
 ## Context
@@ -55,7 +55,7 @@ The backend runs on a plain `GLib.MainLoop`. It never imports Gtk, Gdk, Adw, `vo
 - **Ctrl+M trash rule changed.** "Trash the session if no text was ever produced" now uses a sticky `had_content` in the presenter. The old `_had_first_text` flag reset on TRANSCRIBING, so it did not mean "ever had content". A frontend sends `close {trash_if_empty: true}`; the backend decides.
 - **Backend stdout is private.** The backend `dup()`s fd 1 for protocol output and points fd 1 at stderr, so a stray `print` cannot corrupt the stream. Backend stderr is piped to the frontend and written to its log, never `/dev/null`.
 - **`clipboard.py` stays at `voxize/clipboard.py`.** The design had it moving into `gui/`, but the meeting recorder imports it. `voxize._trace` and `voxize.mode_switcher` are likewise allowed frontend imports.
-- **Tests exist now.** `uv run pytest`: presenter unit tests on a fake clock, contract tests that spawn the backend in mock mode for every `VOXIZE_MOCK_OUTCOME`, and the import-rule tests. `VOXIZE_MOCK_FAST=1` is a new knob that shrinks the fixed mock delays so those tests are quick.
+- **Tests exist now.** `uv run pytest`: presenter unit tests on a fake clock, stdio contract tests that spawn the backend in mock mode (`tests/test_backend_stdio.py`), in-process `Session` tests that cover each `VOXIZE_MOCK_OUTCOME` (`tests/test_session.py`), GUI client, app and context tests, and the import-rule tests. `VOXIZE_MOCK_FAST=1` is a new knob that shrinks the fixed mock delays so those tests are quick.
 - **Review found three lifecycle bugs, all fixed before merge.** A malformed command used to drop the backend's stdin watch, which left an orphan holding the mic after the frontend exited. A GUI handler exception used to drop the GUI's backend watch. The GUI's own ERROR (protocol mismatch, no `hello`) was overwritten by later backend events; terminal states are now final on the GUI side.
 
 ### GUI parity

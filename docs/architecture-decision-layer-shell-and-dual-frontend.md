@@ -1,7 +1,8 @@
 # Architecture Decision: Layer Shell, GNOME Shell, and Dual Frontend
 
-> **Superseded in part (2026-11-04):** point 3 of "What this means for
-> implementation" — no JSON Lines protocol now — is replaced by
+> **Superseded in part (2026-11-04):** points 2 and 3 of "What this means for
+> implementation" — only `app.py` and `ui.py` touch GTK, and no JSON Lines
+> protocol now — are replaced by
 > [the headless backend decision](architecture-decision-headless-backend.md).
 > The layer-shell findings stand.
 

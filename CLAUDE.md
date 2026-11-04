@@ -49,6 +49,7 @@ Thread bridge (inside the backend): `GLib.idle_add` (worker -> main loop), `call
 | `protocol.py` | JSON Lines message types, encode/decode, `PROTOCOL_VERSION` — shared by backend and frontends |
 | `backend/session.py` | Dictation session: orchestrates lifecycle, wires providers, emits protocol events |
 | `backend/presenter.py` | Pipeline progress model, stall detection, transcript stage handoffs, failure fallback, `had_content` |
+| `backend/stdio.py` | `claim_stdout()`: moves the real stdout to a private fd for protocol lines and points fd 1 at stderr |
 | `backend/server.py` | Stdio server: private stdout fd, stdin watch, `protocol.jsonl`, EOF/signal/close lifecycle |
 | `gui/app.py` | GTK Application: protocol client, keys, signals, clipboard |
 | `gui/ui.py` | Dictation window widgets: toolbar strip, transcript card, status row, level/progress strip |
@@ -64,7 +65,8 @@ Thread bridge (inside the backend): `GLib.idle_add` (worker -> main loop), `call
 | `mock.py` | Mock providers for testing without API calls |
 | `prompt.py` | Vocabulary file reading + the single prompt builder |
 | `recover.py` | Generates per-session `recover.sh` for batch re-transcription |
-| `clipboard.py` | Gdk.Clipboard (Wayland-native, best-effort) |
+| `clipboard.py` | Gdk.Clipboard (Wayland-native, best-effort); GUI-side, also imported by the meeting recorder |
+| `mode_switcher.py` | Dictate / Meeting pill toggle, shared by the dictation window and the meeting welcome screen (GTK, frontend-side) |
 | `ducking.py` | Per-app volume ducking via `pw-dump` + `wpctl` (snapshot on RECORD, restore on exit) |
 | `config.py` | User config loaded once from `$XDG_CONFIG_HOME/voxize/voxize.toml` (frozen dataclass, synchronous reads) |
 | `storage.py` | XDG state directory, session retention (configurable count + age) |
@@ -120,7 +122,7 @@ uv run black --check src/
 uv run pytest
 ```
 
-Presenter unit tests (fake clock), backend contract tests (spawn `python -m voxize.backend` with `VOXIZE_MOCK=1`; `VOXIZE_MOCK_FAST=1` shrinks the fixed mock delays), and the import-rule tests.
+Presenter unit tests (fake clock); stdio contract tests that spawn `python -m voxize.backend` with `VOXIZE_MOCK=1` (`VOXIZE_MOCK_FAST=1` shrinks the fixed mock delays); in-process `Session` tests that cover each `VOXIZE_MOCK_OUTCOME`; GUI client, app and context tests; and the import-rule tests.
 
 ### Running ad-hoc NixOS tools
 
