@@ -169,3 +169,4 @@ Retention is bucketed: each app prunes only its own bucket at close. Buckets are
 | Variable | Default | Purpose |
 |---|---|---|
 | `VOXIZE_AUTOCLOSE` | `30` | Seconds of focused READY state before the window auto-closes. Counts only while focused: blur stops it, refocus restarts it from the full duration. `0` to disable. |
+| `VOXIZE_TUI_BACKGROUND` | unset | `voxize-tui` only: a background colour (e.g. `#100b06`) for a theme derived from textual-dark; surface follows by textual-dark's own step, so dialogs stay in the tint. Unset or not a colour: plain textual-dark. |

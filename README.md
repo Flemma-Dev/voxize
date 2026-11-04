@@ -102,10 +102,7 @@ nix develop /path/to/voxize --command bash -c "cd /path/to/voxize && uv run pyth
 uv run voxize-tui
 ```
 
-The same dictation, full screen in whatever terminal, tmux pane or popup it
-runs in (capped at 88×24 and centred on big screens). Both clients drive the
-same headless backend, so the three phases, vocabulary, costs and session logs
-are identical.
+The same dictation, full screen in whatever terminal, tmux pane or popup it runs in (capped at 88×24 and centred on big screens). Both clients drive the same headless backend, so the three phases, vocabulary, costs and session logs are identical.
 
 | Key | Does |
 |---|---|
@@ -116,15 +113,13 @@ are identical.
 | `v` | The vocabulary in use (`WHISPER.txt`, glossaries) |
 | `q` | Exit, at Ready or Error |
 
-The transcript goes to the clipboard (`wl-copy`, `xclip` or `xsel`, else
-OSC 52) and is printed to stdout on exit — without a trailing newline when
-piped — so other tools can take it from there:
+The transcript goes to the clipboard (`wl-copy`, `xclip` or `xsel`, else OSC 52) and is printed to stdout on exit — without a trailing newline when piped — so other tools can take it from there:
 
 ```sh
 voxize-tui | tmux load-buffer -    # then paste into any pane
 ```
 
-Vocabulary comes from the `WHISPER.txt` in the directory you launch it from.
+Vocabulary comes from the `WHISPER.txt` in the directory you launch it from. Set `VOXIZE_TUI_BACKGROUND=#100b06` (any colour) to tint the card, for example to match a tmux floating pane.
 
 ## Meeting recorder
 

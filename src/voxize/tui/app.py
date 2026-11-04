@@ -12,6 +12,7 @@ and exits, and there is no auto-close, meeting switch or folder key.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import logging
 import signal
 from collections.abc import Callable
@@ -19,9 +20,11 @@ from typing import ClassVar
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding, BindingType
+from textual.color import Color, ColorParseError
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.css.query import NoMatches
 from textual.screen import ModalScreen, Screen
+from textual.theme import BUILTIN_THEMES, Theme
 from textual.timer import Timer
 from textual.widgets import Button, Static
 
@@ -37,6 +40,34 @@ logger = logging.getLogger(__name__)
 # Builds the transport once the app's event loop runs: (on_event, on_lost).
 TransportFactory = Callable[[Callable[[dict], None], Callable[[str], None]], Transport]
 _DONE = (State.READY, State.ERROR)
+
+BACKGROUND_ENV = "VOXIZE_TUI_BACKGROUND"
+TINTED_THEME = "voxize-tinted"
+# textual-dark leaves surface (dialogs) at Textual's #1e1e1e whatever the
+# background is; a tinted theme keeps the same step above its background.
+_SURFACE_STEP = (12, 12, 12)  # #121212 -> #1e1e1e
+
+
+def tinted_theme(background: str) -> Theme | None:
+    """textual-dark with ``background`` (any Textual colour) swapped in.
+
+    Surface follows the background by textual-dark's own step, and panel and
+    the muted text are derived from those, so the card and its dialogs stay
+    in the tint. None when ``background`` is not a colour.
+    """
+    try:
+        bg = Color.parse(background)
+    except ColorParseError:
+        return None
+    surface = Color(
+        *(min(255, c + step) for c, step in zip(bg.rgb, _SURFACE_STEP, strict=True))
+    )
+    return dataclasses.replace(
+        BUILTIN_THEMES["textual-dark"],
+        name=TINTED_THEME,
+        background=bg.hex,
+        surface=surface.hex,
+    )
 
 
 class ConfirmCancel(ModalScreen[bool]):
@@ -153,9 +184,19 @@ class VoxizeTui(App[str | None]):
         copier: Clipboard | None = None,
         hello_timeout_s: float = HELLO_TIMEOUT_S,
         install_signals: bool = True,
+        background: str | None = None,
     ) -> None:
         super().__init__()
         self.session_log = SessionLog("tui.log")
+        self._theme: Theme | None = None
+        if background:
+            self._theme = tinted_theme(background)
+            if self._theme is None:
+                logger.warning(
+                    "%s=%r is not a colour; using the default theme",
+                    BACKGROUND_ENV,
+                    background,
+                )
         self.core = ClientCore(client_noun="this terminal client")
         self.card = Card()
         # Not "clipboard": that is Textual's own read-only App property.
@@ -179,6 +220,9 @@ class VoxizeTui(App[str | None]):
         return self._card_screen
 
     def on_mount(self) -> None:
+        if self._theme is not None:
+            self.register_theme(self._theme)
+            self.theme = self._theme.name
         self.core.transport = self._make_transport(
             self.on_backend_event, self.core.backend_lost
         )

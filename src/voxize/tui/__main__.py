@@ -26,7 +26,10 @@ BACKEND = subprocess.Popen(
 )
 _trace.trace("backend spawned")
 
-from voxize.tui.app import VoxizeTui  # noqa: E402 — after the backend spawn
+from voxize.tui.app import (  # noqa: E402 — after the backend spawn
+    BACKGROUND_ENV,
+    VoxizeTui,
+)
 from voxize.tui.backend import AsyncBackendClient  # noqa: E402
 from voxize.tui.deliver import (  # noqa: E402
     claim_terminal_stdout,
@@ -43,6 +46,8 @@ def main() -> None:
     app = VoxizeTui(
         lambda on_event, on_lost: AsyncBackendClient(BACKEND, on_event, on_lost),
         cwd=cwd,
+        # e.g. #100b06 — a tint for a tmux floating pane; unset keeps textual-dark.
+        background=os.environ.get(BACKGROUND_ENV),
     )
     # Decided before claiming: final_output wants the original stdout's kind.
     isatty = sys.stdout.isatty()

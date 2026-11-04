@@ -4,6 +4,8 @@ import asyncio
 import signal
 
 import pytest
+from textual.color import Color
+from textual.containers import Vertical
 from textual.widgets import ProgressBar, Static
 from tui_fakes import FakeClipboard, FakeTransport
 
@@ -683,3 +685,42 @@ def test_a_failing_copy_is_logged_and_does_not_crash(caplog):
         r.name == "voxize.tui.app" and "copy failed" in r.getMessage()
         for r in caplog.records
     )
+
+
+def test_a_background_tints_the_card_and_its_dialogs():
+    app, _, _ = make(background="#100b06")
+
+    async def scenario(pilot):
+        await feed(app, pilot, *RECORDING)
+        variables = app.get_css_variables()
+        assert variables["background"].lower() == "#100b06"
+        # textual-dark's own step from background to surface (#121212 -> #1e1e1e).
+        assert variables["surface"].lower() == "#1c1712"
+        assert app.screen.styles.background == Color.parse("#100b06")
+        await pilot.press("escape")
+        assert isinstance(app.screen, ConfirmCancel)
+        dialog = app.screen.query_one(Vertical)
+        assert dialog.styles.background == Color.parse("#1c1712")
+
+    run(app, scenario)
+
+
+def test_without_a_background_the_theme_is_textual_dark():
+    app, _, _ = make()
+
+    async def scenario(pilot):
+        assert app.theme == "textual-dark"
+        assert app.get_css_variables()["surface"].lower() == "#1e1e1e"
+
+    run(app, scenario)
+
+
+def test_an_unparseable_background_is_logged_and_ignored(caplog):
+    app, _, _ = make(background="amberish")
+
+    async def scenario(pilot):
+        assert app.theme == "textual-dark"
+
+    with caplog.at_level("WARNING", logger="voxize.tui.app"):
+        run(app, scenario)
+    assert "VOXIZE_TUI_BACKGROUND='amberish'" in caplog.text
