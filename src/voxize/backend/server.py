@@ -36,6 +36,10 @@ class ProtocolLog:
 
     Messages before the session folder exists are buffered and written once
     the ``session`` event names it. Best-effort: never raises.
+
+    The file is opened with ``backslashreplace`` for the same reason as the
+    protocol stream: a surrogate-escaped path (``os.fsdecode`` of a non-UTF-8
+    directory name) is written as a ``\\udcXX`` JSON escape and round-trips.
     """
 
     def __init__(self) -> None:
@@ -48,11 +52,12 @@ class ProtocolLog:
                 os.path.join(session_dir, "protocol.jsonl"),
                 "a",
                 encoding="utf-8",
+                errors="backslashreplace",
                 buffering=1,
             )
             for record in self._pending or []:
                 self._f.write(record)
-        except OSError:
+        except (OSError, ValueError):
             logger.debug("protocol log: attach failed", exc_info=True)
             self._f = None
         self._pending = None

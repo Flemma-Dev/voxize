@@ -10,6 +10,7 @@ import time
 from helpers import MOCK_ENV
 
 from voxize import protocol
+from voxize.backend.server import ProtocolLog
 
 
 class Backend:
@@ -241,3 +242,20 @@ def test_protocol_jsonl_lands_in_the_session_dir(monkeypatch, tmp_path):
         ("out", "no_speech"),
     ]
     assert all(isinstance(r["t"], float) for r in records)
+
+
+def test_protocol_log_attach_survives_surrogate_escaped_paths(tmp_path):
+    # A cwd from a non-UTF-8 directory name arrives as os.fsdecode()'d str with
+    # a lone surrogate, buffered before the `session` event names the folder.
+    cwd = os.fsdecode(b"/tmp/caf\xe9")
+    log = ProtocolLog()
+    log.write("in", {"type": "start", "cwd": cwd})
+    log.attach(str(tmp_path))
+    log.write("out", {"type": "context", "path": cwd})
+    log.close()
+    lines = (tmp_path / "protocol.jsonl").read_text().splitlines()
+    records = [json.loads(line) for line in lines]
+    assert len(records) == 2
+    for r in records:
+        path = r["msg"].get("cwd") or r["msg"]["path"]
+        assert os.fsencode(path) == b"/tmp/caf\xe9"
