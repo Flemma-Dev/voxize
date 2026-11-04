@@ -1000,8 +1000,8 @@ class OverlayWindow:
             self._stop_meter()
             self._hide_notice()
             self._guidance_btn.set_visible(False)
-            # _had_first_text stays as it was: app._switch_to_meeting reads
-            # it to decide whether an empty session folder is trashed.
+            # Whether an empty session folder is trashed on Ctrl+M is the
+            # backend's call (its own had_content), not this window's.
             self._set_text(machine.error_message, copyable=False, dimmed=False)
             self._close_btn.remove_css_class("flat")
             self._close_btn.add_css_class("suggested-action")
@@ -1099,6 +1099,10 @@ class OverlayWindow:
 
     def window_active(self) -> bool:
         return self._window.is_active()
+
+    def close(self) -> None:
+        """Close the window, as its own close button does."""
+        self._window.close()
 
     def set_session_dir(self, path: str) -> None:
         """Store the session directory path for the folder button."""

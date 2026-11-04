@@ -2,6 +2,7 @@ import os
 import subprocess
 import sys
 
+import pytest
 from helpers import MOCK_ENV, Recorder, run_until
 
 from voxize.gui.backend_client import BackendClient
@@ -112,6 +113,21 @@ def test_a_failing_handler_does_not_stop_later_events_or_the_lost_report():
     proc.kill()
     run_until(lambda: lost, what="on_lost after a raise")
     assert len(lost) == 1
+
+
+@pytest.mark.parametrize("terminal", [State.READY, State.CANCELLED, State.ERROR])
+def test_terminal_states_are_sticky(terminal):
+    seen = []
+    cs = ClientState()
+    cs.apply(State.WARMING)
+    cs.apply(terminal, error="first")
+    cs.on_change(lambda m, old, new: seen.append(new))
+    for later in (State.WARMING, State.RECORDING, State.CANCELLED, State.ERROR):
+        cs.apply(later, error="later")
+    assert cs.state == terminal
+    assert seen == []
+    if terminal == State.ERROR:
+        assert cs.error_message == "first"
 
 
 def test_a_failing_listener_does_not_stop_the_others():

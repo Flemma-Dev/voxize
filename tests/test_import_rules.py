@@ -1,3 +1,4 @@
+import importlib.util
 import json
 import subprocess
 import sys
@@ -42,3 +43,5 @@ def test_old_in_process_modules_are_gone():
     mods = modules_after("import voxize.gui.app, voxize.gui.ui")
     assert "voxize.app" not in mods
     assert "voxize.ui" not in mods
+    assert importlib.util.find_spec("voxize.app") is None
+    assert importlib.util.find_spec("voxize.ui") is None

@@ -50,6 +50,23 @@ _IN_FLIGHT = (
     State.CLEANING,
 )
 _LOG_FORMAT = "%(asctime)s.%(msecs)03d %(threadName)-14s %(name)s %(message)s"
+_LOG_BUFFER_RECORDS = 10_000
+
+
+class _LogBuffer(logging.handlers.MemoryHandler):
+    """Holds GUI log lines until gui.log exists, keeping only the newest.
+
+    A stock MemoryHandler never clears its buffer while it has no target,
+    so a session that never names a folder (mock mode, or an error before
+    the session starts) would grow it without bound.
+    """
+
+    def shouldFlush(self, record: logging.LogRecord) -> bool:
+        if self.target is None:
+            if len(self.buffer) > self.capacity:
+                del self.buffer[0]
+            return False
+        return super().shouldFlush(record)
 
 
 def _autoclose_seconds() -> int:
@@ -75,11 +92,14 @@ class VoxizeApp(Gtk.Application):
         self._ui: OverlayWindow | None = None
         self._hello = False
         self._closed = False
+        # Set once the GUI has decided the backend is unusable; every later
+        # backend event is dropped so nothing replaces the error card.
+        self._failed = False
         self._trash_if_empty = False
         # GUI log lines wait in memory until the backend names the session
         # folder, then go to gui.log there (see _attach_log).
-        self._log_buffer = logging.handlers.MemoryHandler(
-            capacity=100_000, flushLevel=logging.CRITICAL + 1
+        self._log_buffer = _LogBuffer(
+            capacity=_LOG_BUFFER_RECORDS, flushLevel=logging.CRITICAL + 1
         )
         self._log_buffer.setLevel(logging.DEBUG)
         logging.getLogger("voxize").addHandler(self._log_buffer)
@@ -166,6 +186,9 @@ class VoxizeApp(Gtk.Application):
 
     def _on_event(self, msg: dict) -> None:
         kind = msg["type"]
+        if self._failed:
+            logger.debug("_on_event: %s ignored, backend already failed", kind)
+            return
         ui = self._ui
         if kind == "hello":
             self._hello = True
@@ -211,6 +234,7 @@ class VoxizeApp(Gtk.Application):
     def _fail(self, message: str) -> None:
         """The GUI's one self-decided transition: the backend can't be used."""
         logger.warning("_fail: %s", message)
+        self._failed = True
         if self._state.state not in _TERMINAL:
             self._state.apply(State.ERROR, error=message)
         if self._client is not None:
@@ -265,7 +289,7 @@ class VoxizeApp(Gtk.Application):
             logger.exception("failed to spawn meeting welcome")
         self._trash_if_empty = True
         if self._ui is not None:
-            self._ui._window.close()
+            self._ui.close()
 
     # ── Window events ──
 
@@ -303,13 +327,7 @@ class VoxizeApp(Gtk.Application):
             return False
         s = self._state.state
         logger.debug("_on_key: Escape pressed, state=%s", s)
-        if s in (
-            State.INITIALIZING,
-            State.WARMING,
-            State.RECORDING,
-            State.TRANSCRIBING,
-            State.CLEANING,
-        ):
+        if s in _IN_FLIGHT:
             # Asks first once audio has been recorded; Escape never discards.
             self._ui.request_cancel()
         elif s in (State.READY, State.ERROR):
