@@ -125,6 +125,45 @@ def test_level_bar_follows_the_zone():
     run(app, scenario)
 
 
+def test_level_bar_draws_filled_then_hollow_parallelograms():
+    app, _, _ = make()
+
+    async def scenario(pilot):
+        await feed(app, pilot, *RECORDING, ev("level", dbfs=-30.0))  # half
+        bar = app.screen.query_one(LevelBar)
+        width = bar.size.width
+        filled = round(0.5 * width)
+        drawn = bar.render()
+        assert drawn.plain == "▰" * filled + "▱" * (width - filled)
+        # Only the hollow track is dimmed; the filled part takes the zone colour.
+        assert [str(span.style) for span in drawn.spans] == ["dim"]
+
+    run(app, scenario)
+
+
+def test_every_level_zone_has_its_own_colour():
+    # In textual-dark, $accent and $warning are the same amber: a good level
+    # must not look like a hot one.
+    app, _, _ = make()
+    colours = {}
+
+    async def scenario(pilot):
+        await feed(app, pilot, *RECORDING)
+        bar = app.screen.query_one(LevelBar)
+        for zone, dbfs in (
+            ("quiet", -50.0),
+            ("good", -25.0),
+            ("hot", -8.0),
+            ("clip", -1.0),
+        ):
+            await feed(app, pilot, ev("level", dbfs=dbfs))
+            assert bar.has_class(f"zone-{zone}")
+            colours[zone] = bar.styles.color
+
+    run(app, scenario)
+    assert len(set(colours.values())) == 4, colours
+
+
 def test_working_dims_and_shows_progress():
     app, _, _ = make()
 

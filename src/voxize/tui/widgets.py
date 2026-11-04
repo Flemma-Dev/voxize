@@ -17,14 +17,18 @@ _ZONES = ("quiet", "good", "hot", "clip")
 
 
 class LevelBar(Widget):
-    """Mic level as a row of blocks; the colour comes from a zone-* class."""
+    """Mic level as filled then hollow parallelograms.
+
+    The filled part takes the colour of the zone-* class; the hollow track
+    is dimmed.
+    """
 
     fraction: reactive[float] = reactive(0.0)
 
     def render(self) -> Text:
         width = self.size.width
         filled = round(self.fraction * width)
-        return Text("▮" * filled) + Text("░" * (width - filled), style="dim")
+        return Text("▰" * filled) + Text("▱" * (width - filled), style="dim")
 
 
 class CardView(Vertical):

@@ -1484,6 +1484,11 @@ failure still sends the same sequence as before.
   the review: copy-worker exceptions are logged to `tui.log` instead of being
   swallowed, and clipboard/stdout text is encoded with `errors="replace"` so a
   lone surrogate cannot raise mid-write.
+- Found on first use: the level meter's dimmed `░` track rendered as a
+  stipple, so the meter now draws `▰` filled and `▱` hollow (the hollow track
+  dimmed). And a good level looked exactly like a hot one: in Textual's default
+  dark theme `$accent` and `$warning` are the same amber (`#ffa62b`). The good
+  zone now uses `$primary`, Textual's blue, matching the GUI's blue accent.
 - Found in the smoke run, not designed: with stdout piped, Textual laid the
   card out at 80x24 whatever the terminal was. Details below.
 

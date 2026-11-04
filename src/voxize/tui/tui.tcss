@@ -29,7 +29,7 @@ CardView {
 #transcript.-dimmed { color: $text-muted; }
 #notice { height: auto; color: $warning; }
 
-LevelBar { height: 1; color: $accent; }
+LevelBar { height: 1; color: $primary; }  /* good; $accent is the same amber as $warning */
 LevelBar.zone-quiet { color: $text-muted; }
 LevelBar.zone-hot { color: $warning; }
 LevelBar.zone-clip { color: $error; }
