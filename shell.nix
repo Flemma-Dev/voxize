@@ -20,6 +20,7 @@ let
     pkg-config # build-time
     wl-clipboard # manual testing (wl-copy)
     dotool # key/mouse simulation
+    librsvg # rsvg-convert: scripts/tui_screenshots.py --hero (SVG -> PNG)
   ];
 in
 

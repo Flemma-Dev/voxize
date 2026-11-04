@@ -1,20 +1,30 @@
 # Voxize
 
-Voice-to-text overlay for Linux — built for devs who talk to AI.
+Voice-to-text for Linux — a desktop overlay and a terminal client, built for devs who talk to AI.
 
-<img src="assets/dictation-ready.png" alt="Voxize — clean text ready to paste" width="520">
+<table>
+<tr>
+<td><img src="assets/dictation-ready.png" alt="Voxize desktop overlay — clean text ready to paste" width="420"></td>
+<td><img src="assets/terminal-ready.png" alt="voxize-tui — the same dictation in a terminal" width="420"></td>
+</tr>
+</table>
 
-I built Voxize because I spend most of my day talking to AI — writing prompts for Claude Code, describing bugs, explaining architecture decisions. Typing all of that was the bottleneck. With Voxize, I press a hotkey, speak naturally, and get clean text in my clipboard 2x faster than I could type it.
+I built Voxize because I spend most of my day talking to AI — writing prompts for Claude Code, describing bugs, explaining architecture decisions. Typing all of that was the bottleneck. With Voxize, I press a hotkey (or run `voxize-tui` in a terminal pane), speak naturally, and get clean text in my clipboard 2x faster than I could type it.
 
 What you're reading right now was dictated, not typed.
 
 ## How it works
 
-Press your global hotkey and a translucent overlay appears on top of whatever you're working on. Start speaking — your words stream in live:
+Press your global hotkey and a translucent overlay appears on top of whatever you're working on — or run `voxize-tui` and the same card fills your terminal. Start speaking — your words stream in live:
 
-<img src="assets/dictation-recording.png" alt="Live transcription streaming as you speak" width="520">
+<table>
+<tr>
+<td><img src="assets/dictation-recording.png" alt="Live transcription streaming as you speak" width="420"></td>
+<td><img src="assets/terminal-recording.png" alt="The same live transcription in the terminal client" width="420"></td>
+</tr>
+</table>
 
-When you're done, hit **Stop**. Voxize runs the full audio through OpenAI's batch transcription for maximum accuracy, then cleans up filler words and punctuation with a lightweight AI pass. The result goes straight to your clipboard — paste and move on.
+When you're done, hit **Stop** (Enter in the terminal). Voxize runs the full audio through OpenAI's batch transcription for maximum accuracy, then cleans up filler words and punctuation with a lightweight AI pass. The result goes straight to your clipboard — paste and move on.
 
 Three phases, one hotkey:
 
@@ -92,11 +102,29 @@ nix develop /path/to/voxize --command bash -c "cd /path/to/voxize && uv run pyth
 uv run voxize-tui
 ```
 
-The same dictation in your terminal, full screen: Enter stops, Enter again
-copies and exits, Esc cancels (asking first once recording has
-started). The transcript goes to the clipboard
-(`wl-copy`, `xclip` or `xsel`, else OSC 52) and is printed on exit, so
-`voxize-tui | tmux load-buffer -` hands it to tmux.
+The same dictation, full screen in whatever terminal, tmux pane or popup it
+runs in (capped at 88×24 and centred on big screens). Both clients drive the
+same headless backend, so the three phases, vocabulary, costs and session logs
+are identical.
+
+| Key | Does |
+|---|---|
+| Enter | Stop recording; at Ready, copy and exit |
+| Esc | Cancel (asks first once recording has started); at Ready, exit |
+| Ctrl+C | Copy again, at Ready |
+| `$` | Session cost breakdown, at Ready |
+| `v` | The vocabulary in use (`WHISPER.txt`, glossaries) |
+| `q` | Exit, at Ready or Error |
+
+The transcript goes to the clipboard (`wl-copy`, `xclip` or `xsel`, else
+OSC 52) and is printed to stdout on exit — without a trailing newline when
+piped — so other tools can take it from there:
+
+```sh
+voxize-tui | tmux load-buffer -    # then paste into any pane
+```
+
+Vocabulary comes from the `WHISPER.txt` in the directory you launch it from.
 
 ## Meeting recorder
 
@@ -128,7 +156,7 @@ Voxize reads `$XDG_CONFIG_HOME/voxize/voxize.toml` on startup. A commented templ
 Key settings:
 
 - **Volume ducking** — automatically quiets Chrome, Firefox, and Brave while recording
-- **Auto-close** — overlay closes after 30s of inactivity in the ready state. Override with `VOXIZE_AUTOCLOSE=0` to disable
+- **Auto-close** — the desktop overlay closes after 30s of inactivity in the ready state. Override with `VOXIZE_AUTOCLOSE=0` to disable
 - **Session retention** — 500 sessions / 14 days by default, configurable per-app (dictation and meetings prune independently)
 
 Session data lives in `~/.local/state/voxize/` — audio, transcripts, costs, and debug logs for each session.
