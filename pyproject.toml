@@ -1,6 +1,6 @@
 [project]
 name = "voxize"
-version = "0.1.0"
+version = "0.2.0"
 description = "Voice-to-text tool for Linux (Wayland/GNOME)"
 requires-python = ">=3.11"
 dependencies = [
