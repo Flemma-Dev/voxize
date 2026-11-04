@@ -1,6 +1,7 @@
 """Opt-in startup phase tracing. Enable with VOXIZE_TRACE=1.
 
-Prints ``[voxize-trace] t+<total>ms (+<delta>ms) <label>`` to stderr.
+Prints ``[voxize-trace] t+<total>ms (+<delta>ms) <label>`` to stderr (or to
+a sink, see ``set_sink``).
 
 ``t`` is measured from interpreter start by default. If the shell sets
 ``VOXIZE_TRACE_T0=$EPOCHREALTIME`` (bash built-in, seconds.microseconds)
@@ -14,6 +15,7 @@ from __future__ import annotations
 import os
 import sys
 import time
+from collections.abc import Callable
 
 _ENABLED = bool(os.environ.get("VOXIZE_TRACE"))
 
@@ -31,6 +33,7 @@ else:
 
 _PREV = _T0
 _TAG = ""
+_SINK: Callable[[str], None] | None = None
 
 
 def set_tag(tag: str) -> None:
@@ -44,6 +47,16 @@ def export_origin() -> None:
     os.environ["VOXIZE_TRACE_T0"] = repr(time.time() - (time.monotonic() - _T0))
 
 
+def set_sink(sink: Callable[[str], None] | None) -> None:
+    """Send trace lines to ``sink`` instead of stderr (None: back to stderr).
+
+    The terminal client sets one once Textual owns the terminal: stderr is
+    then the screen, and a trace line would draw over it.
+    """
+    global _SINK
+    _SINK = sink
+
+
 def trace(label: str) -> None:
     global _PREV
     if not _ENABLED:
@@ -52,8 +65,8 @@ def trace(label: str) -> None:
     total_ms = (now - _T0) * 1000
     delta_ms = (now - _PREV) * 1000
     _PREV = now
-    print(
-        f"[voxize-trace] {_TAG}t+{total_ms:8.1f}ms  (+{delta_ms:7.1f}ms)  {label}",
-        file=sys.stderr,
-        flush=True,
-    )
+    line = f"[voxize-trace] {_TAG}t+{total_ms:8.1f}ms  (+{delta_ms:7.1f}ms)  {label}"
+    if _SINK is not None:
+        _SINK(line)
+    else:
+        print(line, file=sys.stderr, flush=True)
