@@ -30,13 +30,29 @@ def modules_after(statement: str) -> set[str]:
     return set(json.loads(out.stdout.strip().splitlines()[-1]))
 
 
+def _gi(mods: set[str]) -> list[str]:
+    return sorted(m for m in mods if m == "gi" or m.startswith("gi."))
+
+
+def _backend(mods: set[str]) -> list[str]:
+    return sorted(
+        m for m in mods if m in BACKEND_MODULES or m.startswith("voxize.backend")
+    )
+
+
 def test_gui_imports_no_backend_module():
     mods = modules_after("import voxize.gui.app")
     assert "gi.repository.Gtk" in mods  # sanity: it really is the GTK app
-    leaked = sorted(
-        m for m in mods if m in BACKEND_MODULES or m.startswith("voxize.backend")
+    assert _backend(mods) == []
+
+
+def test_frontend_core_imports_no_gi_and_no_backend_module():
+    mods = modules_after(
+        "import voxize.frontend.client, voxize.frontend.pipe, "
+        "voxize.frontend.session_log, voxize.frontend.state"
     )
-    assert leaked == []
+    assert _gi(mods) == []
+    assert _backend(mods) == []
 
 
 def test_old_in_process_modules_are_gone():

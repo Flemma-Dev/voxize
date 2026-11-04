@@ -1,11 +1,11 @@
 """VoxizeApp's event dispatch, driven without a display, a window or a backend.
 
 The app is constructed but never run, so do_activate (and with it GTK init,
-the window and the BackendClient) never happens. A fake client records what
-the app sends; a fake window records which methods the dispatch calls.
+the window and the BackendClient) never happens. A fake transport records
+what the app sends; a fake window records which methods the dispatch calls.
+The client rules themselves are tested in tests/test_frontend_client.py;
+these check the GUI is wired to them.
 """
-
-import logging
 
 import pytest
 
@@ -39,15 +39,11 @@ class FakeUi:
 
 @pytest.fixture
 def app():
-    root = logging.getLogger("voxize")
-    level = root.level
     a = VoxizeApp(backend=None)
-    a._client = FakeClient()
+    a._core.transport = FakeClient()
     a._ui = FakeUi()
-    a._state.on_change(a._on_state_change)  # as do_activate wires it
     yield a
-    a._detach_log()
-    root.setLevel(level)
+    a._log.detach()
 
 
 def state(name):
@@ -61,13 +57,13 @@ def test_protocol_mismatch_error_is_not_overwritten_by_queued_events(app):
     app._on_event(state("WARMING"))
     app._on_event(state("CANCELLED"))
 
-    assert app._state.state == State.ERROR
-    assert app._state.error_message == (
+    assert app._core.state.state == State.ERROR
+    assert app._core.state.error_message == (
         f"Backend speaks protocol 0, this window expects {PROTOCOL_VERSION}"
     )
     assert app._ui.calls == []  # the queued context never reached the window
-    assert app._client.sent == ["close"]
-    assert app._client.finished and app._client.stdin_closed
+    assert app._core.transport.sent == ["close"]
+    assert app._core.transport.finished and app._core.transport.stdin_closed
 
 
 def test_hello_timeout_error_is_not_overwritten_by_a_late_backend(app):
@@ -76,27 +72,31 @@ def test_hello_timeout_error_is_not_overwritten_by_a_late_backend(app):
     app._on_event(state("WARMING"))
     app._on_event(state("CANCELLED"))
 
-    assert app._state.state == State.ERROR
-    assert app._state.error_message == "Backend did not start"
+    assert app._core.state.state == State.ERROR
+    assert app._core.state.error_message == "Backend did not start"
 
 
 def test_normal_flow_reaches_ready_and_stays_there(app):
     app._on_event({"type": "hello", "protocol": PROTOCOL_VERSION})
     for name in ("WARMING", "RECORDING", "TRANSCRIBING", "CLEANING", "READY"):
         app._on_event(state(name))
-    assert app._state.state == State.READY
-    assert app._client.finished  # EOF from here on is not "backend lost"
-    assert app._client.sent == []  # READY -> close needs nothing more
+    assert app._core.state.state == State.READY
+    assert app._core.transport.finished  # EOF from here on is not "backend lost"
+    assert app._core.transport.sent == []  # READY -> close needs nothing more
 
     app._on_event(state("CANCELLED"))
-    assert app._state.state == State.READY
+    assert app._core.state.state == State.READY
 
 
-def test_log_buffer_keeps_only_the_newest_records_without_a_target(app):
-    app._log_buffer.capacity = 5
-    log = logging.getLogger("voxize.test")
-    for i in range(50):
-        log.debug("line %d", i)
-    kept = [r.getMessage() for r in app._log_buffer.buffer]
-    assert len(kept) <= 6
-    assert kept[-1] == "line 49"
+def test_events_reach_the_window(app):
+    app._on_event({"type": "hello", "protocol": PROTOCOL_VERSION})
+    app._on_event({"type": "level", "dbfs": -20.0})
+    app._on_event({"type": "text", "stage": "live", "op": "replace", "text": "hi"})
+    assert app._ui.calls == ["set_level", "on_text"]
+
+
+def test_close_request_sends_close_once(app):
+    app._trash_if_empty = True
+    app._on_close_request(None)
+    app._on_close_request(None)
+    assert app._core.transport.sent == ["close"]

@@ -14,7 +14,6 @@ Environment variables:
 from __future__ import annotations
 
 import logging
-import logging.handlers
 import os
 import signal
 import subprocess
@@ -30,9 +29,10 @@ gi.require_version("Adw", "1")
 # gi.require_version() above is executable code; all subsequent imports trigger E402.
 from gi.repository import Adw, Gdk, Gio, GLib, Gtk  # noqa: E402
 
-from voxize import clipboard, config, protocol  # noqa: E402
+from voxize import clipboard, config  # noqa: E402
 from voxize._trace import trace as _trace  # noqa: E402
-from voxize.frontend.state import ClientState  # noqa: E402
+from voxize.frontend.client import HELLO_TIMEOUT_S, ClientCore  # noqa: E402
+from voxize.frontend.session_log import SessionLog  # noqa: E402
 from voxize.gui.backend_client import BackendClient  # noqa: E402
 from voxize.gui.context import detect_context  # noqa: E402
 from voxize.gui.ui import OverlayWindow, describe_widget  # noqa: E402
@@ -40,8 +40,6 @@ from voxize.protocol import State  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
-_HELLO_TIMEOUT_S = 5
-_TERMINAL = (State.READY, State.CANCELLED, State.ERROR)
 _IN_FLIGHT = (
     State.INITIALIZING,
     State.WARMING,
@@ -49,24 +47,6 @@ _IN_FLIGHT = (
     State.TRANSCRIBING,
     State.CLEANING,
 )
-_LOG_FORMAT = "%(asctime)s.%(msecs)03d %(threadName)-14s %(name)s %(message)s"
-_LOG_BUFFER_RECORDS = 10_000
-
-
-class _LogBuffer(logging.handlers.MemoryHandler):
-    """Holds GUI log lines until gui.log exists, keeping only the newest.
-
-    A stock MemoryHandler never clears its buffer while it has no target,
-    so a session that never names a folder (mock mode, or an error before
-    the session starts) would grow it without bound.
-    """
-
-    def shouldFlush(self, record: logging.LogRecord) -> bool:
-        if self.target is None:
-            if len(self.buffer) > self.capacity:
-                del self.buffer[0]
-            return False
-        return super().shouldFlush(record)
 
 
 def _autoclose_seconds() -> int:
@@ -87,24 +67,15 @@ class VoxizeApp(Gtk.Application):
             flags=Gio.ApplicationFlags.NON_UNIQUE,
         )
         self._backend = backend
-        self._client: BackendClient | None = None
-        self._state = ClientState()
+        # Client rules (hello, version, sticky failure, terminal states,
+        # close-once) live in ClientCore; its transport arrives in
+        # do_activate.
+        self._core = ClientCore(client_noun="this window")
         self._ui: OverlayWindow | None = None
-        self._hello = False
-        self._closed = False
-        # Set once the GUI has decided the backend is unusable; every later
-        # backend event is dropped so nothing replaces the error card.
-        self._failed = False
         self._trash_if_empty = False
         # GUI log lines wait in memory until the backend names the session
-        # folder, then go to gui.log there (see _attach_log).
-        self._log_buffer = _LogBuffer(
-            capacity=_LOG_BUFFER_RECORDS, flushLevel=logging.CRITICAL + 1
-        )
-        self._log_buffer.setLevel(logging.DEBUG)
-        logging.getLogger("voxize").addHandler(self._log_buffer)
-        logging.getLogger("voxize").setLevel(logging.DEBUG)
-        self._log_handler: logging.Handler | None = None
+        # folder, then go to gui.log there.
+        self._log = SessionLog("gui.log")
 
     def do_activate(self) -> None:
         _trace("do_activate entry")
@@ -121,10 +92,10 @@ class VoxizeApp(Gtk.Application):
             cwd, glossaries = detect_context()
         _trace(f"detect_context done (glossaries={len(glossaries)})")
 
-        self._client = BackendClient(
-            self._backend, on_event=self._on_event, on_lost=self._on_backend_lost
+        self._core.transport = BackendClient(
+            self._backend, on_event=self._on_event, on_lost=self._core.backend_lost
         )
-        self._client.send("start", cwd=cwd, glossaries=glossaries)
+        self._core.send("start", cwd=cwd, glossaries=glossaries)
         _trace("start sent")
 
         # Load CSS theme — dictation.css only. style.css belongs to the
@@ -158,14 +129,13 @@ class VoxizeApp(Gtk.Application):
         ctrl.connect("key-pressed", self._on_key, win)
         win.add_controller(ctrl)
 
-        self._state.on_change(self._on_state_change)
         self._ui = OverlayWindow(
             win,
-            self._state,
+            self._core.state,
             autoclose_seconds=_autoclose_seconds(),
             on_switch_to_meeting=self._switch_to_meeting,
-            on_stop=lambda: self._send("stop"),
-            on_cancel=lambda: self._send("cancel"),
+            on_stop=lambda: self._core.send("stop"),
+            on_cancel=lambda: self._core.send("cancel"),
         )
         _trace("OverlayWindow constructed")
 
@@ -175,35 +145,22 @@ class VoxizeApp(Gtk.Application):
 
         for sig in (signal.SIGTERM, signal.SIGINT):
             GLib.unix_signal_add(GLib.PRIORITY_HIGH, sig, self._on_signal, sig)
-        GLib.timeout_add_seconds(_HELLO_TIMEOUT_S, self._check_hello)
+        GLib.timeout_add_seconds(HELLO_TIMEOUT_S, self._check_hello)
         _trace("do_activate returning")
 
     # ── Backend events ──
 
-    def _send(self, type_: str, **fields) -> None:
-        if self._client is not None:
-            self._client.send(type_, **fields)
-
     def _on_event(self, msg: dict) -> None:
+        msg = self._core.handle(msg)
+        if msg is None:
+            return  # hello/state, or dropped after a GUI-side failure
         kind = msg["type"]
-        if self._failed:
-            logger.debug("_on_event: %s ignored, backend already failed", kind)
-            return
         ui = self._ui
-        if kind == "hello":
-            self._hello = True
-            if msg.get("protocol") != protocol.PROTOCOL_VERSION:
-                self._fail(
-                    f"Backend speaks protocol {msg.get('protocol')}, "
-                    f"this window expects {protocol.PROTOCOL_VERSION}"
-                )
-        elif kind == "context":
+        if kind == "context":
             ui.show_prompt_context(msg["sources"])
         elif kind == "session":
             ui.set_session_dir(msg["dir"])
-            self._attach_log(msg["dir"])
-        elif kind == "state":
-            self._state.apply(State[msg["state"]], msg.get("error") or "")
+            self._log.attach(msg["dir"])
         elif kind == "level":
             ui.set_level(msg["dbfs"])
         elif kind == "text":
@@ -226,53 +183,9 @@ class VoxizeApp(Gtk.Application):
         else:
             logger.debug("_on_event: unknown event type=%s", kind)
 
-    def _on_state_change(self, _state, _old: State, new: State) -> None:
-        if new in _TERMINAL and self._client is not None:
-            # The backend stays up until close; EOF from here is not "lost".
-            self._client.finish()
-
-    def _fail(self, message: str) -> None:
-        """The GUI's one self-decided transition: the backend can't be used."""
-        logger.warning("_fail: %s", message)
-        self._failed = True
-        if self._state.state not in _TERMINAL:
-            self._state.apply(State.ERROR, error=message)
-        if self._client is not None:
-            self._client.finish()
-            self._client.send("close", trash_if_empty=False)
-            self._client.close_stdin()
-
-    def _on_backend_lost(self, last_stderr_line: str) -> None:
-        detail = f": {last_stderr_line}" if last_stderr_line else ""
-        self._fail(f"Backend exited unexpectedly{detail}")
-
     def _check_hello(self) -> bool:
-        if not self._hello and not self._closed:
-            self._fail("Backend did not start")
-        return False
-
-    def _attach_log(self, session_dir: str) -> None:
-        try:
-            fh = logging.FileHandler(os.path.join(session_dir, "gui.log"))
-        except OSError:
-            logger.debug("_attach_log: gui.log failed", exc_info=True)
-            return
-        fh.setLevel(logging.DEBUG)
-        fh.setFormatter(logging.Formatter(_LOG_FORMAT, datefmt="%H:%M:%S"))
-        root = logging.getLogger("voxize")
-        self._log_buffer.setTarget(fh)
-        self._log_buffer.flush()
-        root.removeHandler(self._log_buffer)
-        root.addHandler(fh)
-        self._log_handler = fh
-
-    def _detach_log(self) -> None:
-        root = logging.getLogger("voxize")
-        root.removeHandler(self._log_buffer)
-        if self._log_handler is not None:
-            root.removeHandler(self._log_handler)
-            self._log_handler.close()
-            self._log_handler = None
+        self._core.check_hello()
+        return False  # one-shot
 
     # ── Mode switching ──
 
@@ -282,7 +195,7 @@ class VoxizeApp(Gtk.Application):
         The backend cancels an in-flight dictation on close, and trashes the
         session folder if it never produced any transcript.
         """
-        logger.info("_switch_to_meeting: state=%s", self._state.state.name)
+        logger.info("_switch_to_meeting: state=%s", self._core.state.state.name)
         try:
             subprocess.Popen([sys.executable, "-m", "voxize.meeting"])
         except Exception:
@@ -314,7 +227,7 @@ class VoxizeApp(Gtk.Application):
             logger.debug(
                 "_on_key: %s state=%s focus=%s default=%s",
                 Gdk.keyval_name(keyval),
-                self._state.state.name,
+                self._core.state.state.name,
                 describe_widget(win.get_focus()),
                 describe_widget(win.get_default_widget()),
             )
@@ -325,7 +238,7 @@ class VoxizeApp(Gtk.Application):
         # the cancel dialog: Keep), not "cancel".
         if self._ui is not None and self._ui.overlay_open():
             return False
-        s = self._state.state
+        s = self._core.state.state
         logger.debug("_on_key: Escape pressed, state=%s", s)
         if s in _IN_FLIGHT:
             # Asks first once audio has been recorded; Escape never discards.
@@ -341,25 +254,18 @@ class VoxizeApp(Gtk.Application):
         WAV, releases the mic lock and restores ducked volumes itself.
         """
         logger.info("Signal %s received, shutting down", sig)
-        self._closed = True
-        if self._client is not None:
-            self._client.finish()
-            self._client.close_stdin()
-        self._detach_log()
+        self._core.hang_up()
+        self._log.detach()
         self.quit()
         return GLib.SOURCE_REMOVE
 
     def _on_close_request(self, _win) -> bool:
         logger.debug("_on_close_request: trash_if_empty=%s", self._trash_if_empty)
         clipboard.salvage()
-        if self._client is not None and not self._closed:
-            self._closed = True
-            self._client.finish()
-            self._client.send("close", trash_if_empty=self._trash_if_empty)
-            self._client.close_stdin()
+        self._core.close(trash_if_empty=self._trash_if_empty)
         if self._ui is not None:
             self._ui.destroy()
-        self._detach_log()
+        self._log.detach()
         # Quit even if GLib sources (signal handlers, idle callbacks) are pending.
         self.quit()
         return False  # allow close

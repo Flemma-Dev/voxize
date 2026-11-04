@@ -162,6 +162,7 @@ def test_backend_never_imports_gtk_or_frontends():
         assert banned not in imports
     assert "voxize.gui" not in imports
     assert "voxize.tui" not in imports
+    assert "voxize.frontend" not in imports
 
 
 def test_claim_stdout_diverts_stray_writes():
