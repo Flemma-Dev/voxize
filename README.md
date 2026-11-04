@@ -93,7 +93,8 @@ uv run voxize-tui
 ```
 
 The same dictation in your terminal, full screen: Enter stops, Enter again
-copies and exits, Esc cancels. The transcript goes to the clipboard
+copies and exits, Esc cancels (asking first once recording has
+started). The transcript goes to the clipboard
 (`wl-copy`, `xclip` or `xsel`, else OSC 52) and is printed on exit, so
 `voxize-tui | tmux load-buffer -` hands it to tmux.
 

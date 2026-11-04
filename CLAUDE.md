@@ -17,7 +17,7 @@ nix develop                      # enter dev shell (all system deps)
 uv run python -m voxize          # dictation overlay (bind to a global hotkey)
 uv run voxize-tui                # terminal client (Textual); prints the transcript on exit
 uv run python -m voxize.meeting  # meeting recorder (mic + system → stereo WAV)
-uv run python -m voxize.backend  # headless backend (stdio JSON Lines; spawned by the GUI)
+uv run python -m voxize.backend  # headless backend (stdio JSON Lines; spawned by either frontend)
 ```
 
 OpenAI API key must be in GNOME Keyring: `secret-tool store --label='OpenAI API Key' service openai key api`

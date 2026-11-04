@@ -1476,6 +1476,13 @@ failure still sends the same sequence as before.
   app quits, printing nothing.
 - INITIALIZING uses the idle (hollow) dot with "Starting…", as the GUI does
   for WARMING.
+- Found in the final review, not designed: a signal arriving while the exit
+  copy (Enter at READY) was in flight still printed the transcript, because
+  the suspended `_leave` resumed after `_on_signal` and called `exit(text)`.
+  The signal is now recorded and `_leave` returns without exiting. Also from
+  the review: copy-worker exceptions are logged to `tui.log` instead of being
+  swallowed, and clipboard/stdout text is encoded with `errors="replace"` so a
+  lone surrogate cannot raise mid-write.
 - Found in the smoke run, not designed: with stdout piped, Textual laid the
   card out at 80x24 whatever the terminal was. Details below.
 
@@ -1500,7 +1507,7 @@ failure still sends the same sequence as before.
   no longer reach the pipe.
 
 **Verified, and how:**
-- `uv run pytest -q`: 217 passed on the final code (119 right after the
+- `uv run pytest -q`: 221 passed on the final code (119 right after the
   GUI refactor), ruff and black clean. New tests: `ClientCore`,
   `SessionLog` and `BackendPipe`; the card model; the clipboard chain and
   stdout rules; the Textual app with fakes (`run_test`, headless); the same
@@ -1520,8 +1527,8 @@ failure still sends the same sequence as before.
   `wl-copy`, 100x30 pane, `voxize-tui | cat > out.txt`): exit 0; stdout was
   exactly `Fix the typo in the README.` (27 bytes, no trailing newline); the
   pipe closed 0.32 s after Enter even though the fake `wl-copy` left a 30 s
-  background child, because clipboard tools get stdout `/dev/null`; the fake's
-  stdout was `/dev/null`; killing the tmux session mid-recording left no
+  background child, because clipboard tools get stdout `/dev/null` (the fake
+  `wl-copy` recorded its own fd 1 as `/dev/null`); killing the tmux session mid-recording left no
   backend running. Before the fix the pane showed the 80x24 garbage; after,
   the card was 88 wide and centred in 100x30.
 
@@ -1536,6 +1543,9 @@ failure still sends the same sequence as before.
 **Follow-ups:**
 - nix-meridian needs `textual` and the `voxize-tui` entry point, plus a rev
   bump.
+- The nix-meridian package also needs `wl-clipboard` (and optionally `xclip`)
+  on `voxize-tui`'s runtime PATH, or the clipboard silently falls back to
+  OSC 52.
 - The tmux launcher is the next stage.
 
 **Files changed:** `src/voxize/frontend/` (new: `state.py`, `session_log.py`,
