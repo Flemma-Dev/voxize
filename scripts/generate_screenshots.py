@@ -33,10 +33,10 @@ gi.require_version("Gtk", "4.0")
 from gi.repository import Adw, Gdk, GLib, Graphene, Gsk, Gtk, Pango  # noqa: E402
 
 from voxize import mode_switcher  # noqa: E402
+from voxize.gui.client_state import ClientState  # noqa: E402
+from voxize.gui.ui import OverlayWindow, _format_timer  # noqa: E402
 from voxize.meeting.sessions import list_meeting_sessions  # noqa: E402
-from voxize.prompt import PromptSource  # noqa: E402
-from voxize.state import State, StateMachine  # noqa: E402
-from voxize.ui import OverlayWindow, _format_timer  # noqa: E402
+from voxize.protocol import State  # noqa: E402
 
 ALL_STATES = "--all" in sys.argv
 # --out DIR renders somewhere other than the README's assets/ folder.
@@ -141,27 +141,27 @@ def _capture(window, filename, native=None):
     return True
 
 
-class _Meter:
-    def __init__(self, level_dbfs=-25.0):
-        self.level_dbfs = level_dbfs
-
-
 def _mk(app, level=-25.0):
-    """Build a fresh window + OverlayWindow pair, configured as app.py does."""
+    """Build a fresh window + OverlayWindow pair, configured as the app does."""
     app.use_css("dictation")
     win = Adw.ApplicationWindow(application=app)
-    # Must match app.py: a resizable window keeps whatever size it was
+    # Must match gui/app.py: a resizable window keeps whatever size it was
     # mapped at and ignores the transcript's grown size request.
     win.set_resizable(False)
     win.set_default_size(460, -1)
     win.set_size_request(460, -1)
-    machine = StateMachine()
+    state = ClientState()
     ui = OverlayWindow(
-        win, machine, autoclose_seconds=0, on_switch_to_meeting=lambda: None
+        win,
+        state,
+        autoclose_seconds=0,
+        on_switch_to_meeting=lambda: None,
+        on_stop=lambda: None,
+        on_cancel=lambda: None,
     )
-    ui.set_level_meter(_Meter(level))
     app.ui = ui
-    return win, machine, ui
+    app.level = level
+    return win, state, ui
 
 
 def _freeze_timer(ui, seconds):
@@ -176,23 +176,23 @@ def _show_countdown(ui, seconds):
     ui._update_autoclose_label()
 
 
-def _to_recording(machine, ui, text, seconds):
-    machine.transition(State.WARMING)
-    machine.transition(State.RECORDING)
+def _to_recording(app, state, ui, text, seconds):
+    state.apply(State.WARMING)
+    state.apply(State.RECORDING)
     if text:
-        ui.append_text(text)
-    ui._tick_meter()
+        ui.on_text("live", "replace", text)
+    ui.set_level(app.level)
     _freeze_timer(ui, seconds)
 
 
-def _to_ready(machine, ui, seconds=14):
+def _to_ready(app, state, ui, seconds=14):
     """RECORDING → TRANSCRIBING → CLEANING with the real text handoffs."""
-    _to_recording(machine, ui, _LIVE_TEXT, seconds)
-    machine.transition(State.TRANSCRIBING)
-    ui.start_pipeline(len(_LIVE_TEXT) * 3)
-    ui.append_text(_BATCH_TEXT)
-    machine.transition(State.CLEANING)
-    ui.show_transcript_for_cleanup(_BATCH_TEXT)
+    _to_recording(app, state, ui, _LIVE_TEXT, seconds)
+    state.apply(State.TRANSCRIBING)
+    ui.set_progress(0.0)
+    ui.on_text("batch", "replace", _BATCH_TEXT)
+    state.apply(State.CLEANING)
+    ui.on_text("batch", "replace", _BATCH_TEXT)
 
 
 # ── Screenshot app ──
@@ -221,7 +221,7 @@ class _App(Adw.Application):
             Gtk.StyleContext.remove_provider_for_display(display, provider)
         if name not in self._css:
             css = Gtk.CssProvider()
-            filename = "dictation.css" if name == "dictation" else "style.css"
+            filename = "gui/dictation.css" if name == "dictation" else "style.css"
             css.load_from_string((_ROOT / "src" / "voxize" / filename).read_text())
             providers = [(css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)]
             if name == "meeting":
@@ -321,19 +321,19 @@ class _App(Adw.Application):
     def _initializing(self):
         """What the compositor centres — the window is presented in this
         state, before the mic is up."""
-        win, _machine, _ui = _mk(self, level=-70.0)
+        win, _state, _ui = _mk(self, level=-70.0)
         return win
 
     def _warming(self):
-        win, machine, ui = _mk(self, level=-70.0)
-        machine.transition(State.WARMING)
-        ui._tick_meter()
+        win, state, ui = _mk(self, level=-70.0)
+        state.apply(State.WARMING)
+        ui.set_level(self.level)
         _freeze_timer(ui, 0)
         return win
 
     def _recording(self):
-        win, machine, ui = _mk(self, level=-19.0)
-        _to_recording(machine, ui, _LIVE_TEXT, 8)
+        win, state, ui = _mk(self, level=-19.0)
+        _to_recording(self, state, ui, _LIVE_TEXT, 8)
         return win
 
     def _level_quiet(self):
@@ -349,56 +349,50 @@ class _App(Adw.Application):
         return self._level_at(-1.0, 22)
 
     def _level_at(self, dbfs, seconds):
-        win, machine, ui = _mk(self, level=dbfs)
-        _to_recording(machine, ui, _LIVE_TEXT, seconds)
+        win, state, ui = _mk(self, level=dbfs)
+        _to_recording(self, state, ui, _LIVE_TEXT, seconds)
         return win
 
     def _preview_error(self):
-        win, machine, ui = _mk(self, level=-25.0)
-        _to_recording(machine, ui, _LIVE_TEXT, 31)
+        win, state, ui = _mk(self, level=-25.0)
+        _to_recording(self, state, ui, _LIVE_TEXT, 31)
         ui.show_live_preview_error("WebSocket rejected (HTTP 503)")
         return win
 
     def _working(self):
-        win, machine, ui = _mk(self)
-        _to_recording(machine, ui, _LIVE_TEXT, 14)
-        machine.transition(State.TRANSCRIBING)
-        ui.start_pipeline(len(_LIVE_TEXT) * 3)
-        ui._rail_set(0.31)
+        win, state, ui = _mk(self)
+        _to_recording(self, state, ui, _LIVE_TEXT, 14)
+        state.apply(State.TRANSCRIBING)
+        ui.set_progress(0.31)
         return win
 
     def _working_cleanup(self):
-        win, machine, ui = _mk(self)
-        _to_ready(machine, ui)
-        ui.on_batch_complete(len(_BATCH_TEXT))
-        ui._rail_set(0.78)
+        win, state, ui = _mk(self)
+        _to_ready(self, state, ui)
+        ui.set_progress(0.78)
         return win
 
     def _working_stalled(self):
-        win, machine, ui = _mk(self)
-        _to_recording(machine, ui, _LIVE_TEXT, 14)
-        machine.transition(State.TRANSCRIBING)
-        ui.start_pipeline(len(_LIVE_TEXT) * 3)
-        ui._rail_set(0.52)
-        ui._stop_wait()
-        # Pretend the bar has been flat for longer than the stall window.
-        ui._last_progress_us = GLib.get_monotonic_time() - 10_000_000
-        ui._tick_stall()
+        win, state, ui = _mk(self)
+        _to_recording(self, state, ui, _LIVE_TEXT, 14)
+        state.apply(State.TRANSCRIBING)
+        ui.set_progress(0.52)
+        ui.set_stalled(True)
         return win
 
     def _working_pulse(self):
-        win, machine, ui = _mk(self)
-        _to_recording(machine, ui, "Fix the typo", 3)
-        machine.transition(State.TRANSCRIBING)
-        ui.start_pipeline(len("Fix the typo"))
+        win, state, ui = _mk(self)
+        _to_recording(self, state, ui, "Fix the typo", 3)
+        state.apply(State.TRANSCRIBING)
+        ui.set_progress(None)
         return win
 
     def _ready(self):
-        win, machine, ui = _mk(self)
-        _to_ready(machine, ui)
-        ui.append_text(_CLEANED_TEXT)
-        ui.finish_pipeline()
-        machine.transition(State.READY)
+        win, state, ui = _mk(self)
+        _to_ready(self, state, ui)
+        ui.on_text("cleaned", "replace", _CLEANED_TEXT)
+        ui.set_progress(1.0)
+        state.apply(State.READY)
         ui.show_session_costs(0.0007, 0.0031, 0.0005)
         _show_countdown(ui, 28)
         return win
@@ -409,57 +403,61 @@ class _App(Adw.Application):
         return win
 
     def _no_speech(self):
-        win, machine, ui = _mk(self)
-        _to_recording(machine, ui, "", 4)
-        machine.transition(State.TRANSCRIBING)
+        win, state, ui = _mk(self)
+        _to_recording(self, state, ui, "", 4)
+        state.apply(State.TRANSCRIBING)
         ui.show_no_speech()
-        machine.transition(State.READY)
+        state.apply(State.READY)
         _show_countdown(ui, 28)
         return win
 
     def _batch_failed(self):
-        win, machine, ui = _mk(self)
-        _to_recording(machine, ui, _LIVE_TEXT, 14)
-        machine.transition(State.TRANSCRIBING)
-        ui.show_batch_failed("Batch transcription failed: Connection reset by peer")
-        machine.transition(State.READY)
+        win, state, ui = _mk(self)
+        _to_recording(self, state, ui, _LIVE_TEXT, 14)
+        state.apply(State.TRANSCRIBING)
+        ui.on_text("live", "replace", _LIVE_TEXT)
+        ui.show_failure(
+            "batch", "Batch transcription failed: Connection reset by peer", "live"
+        )
+        state.apply(State.READY)
         _show_countdown(ui, 28)
         return win
 
     def _cleanup_failed(self):
-        win, machine, ui = _mk(self)
-        _to_ready(machine, ui)
-        ui.append_text("Refactor the auth")
-        ui.show_cleanup_failed("Cleanup failed: Request timed out.", _BATCH_TEXT)
-        machine.transition(State.READY)
+        win, state, ui = _mk(self)
+        _to_ready(self, state, ui)
+        ui.on_text("cleaned", "replace", "Refactor the auth")
+        ui.on_text("batch", "replace", _BATCH_TEXT)
+        ui.show_failure("cleanup", "Cleanup failed: Request timed out.", "batch")
+        state.apply(State.READY)
         _show_countdown(ui, 28)
         return win
 
     def _error(self):
-        win, machine, _ui = _mk(self)
-        machine.transition(State.ERROR, error="Another Voxize instance is recording")
+        win, state, _ui = _mk(self)
+        state.apply(State.ERROR, error="Another Voxize instance is recording")
         return win
 
     def _mode_menu(self):
-        win, machine, ui = _mk(self, level=-19.0)
-        _to_recording(machine, ui, _LIVE_TEXT, 8)
+        win, state, ui = _mk(self, level=-19.0)
+        _to_recording(self, state, ui, _LIVE_TEXT, 8)
         self._extra = (ui._mode_btn.get_popover(), "state-16b-mode-menu-popover.png")
         return win
 
     def _guidance(self):
-        win, machine, ui = _mk(self, level=-19.0)
-        _to_recording(machine, ui, _LIVE_TEXT, 8)
+        win, state, ui = _mk(self, level=-19.0)
+        _to_recording(self, state, ui, _LIVE_TEXT, 8)
         ui.show_prompt_context(
             [
-                PromptSource(
-                    path="/home/stan/proj/WHISPER.txt",
-                    content="Supabase, Luup, PyGObject, libadwaita, Wayland, "
+                {
+                    "path": "/home/stan/proj/WHISPER.txt",
+                    "content": "Supabase, Luup, PyGObject, libadwaita, Wayland, "
                     "PipeWire, wpctl",
-                ),
-                PromptSource(
-                    path="/home/stan/proj/slack/#eng-platform",
-                    content="sev-2, Kubo, retro, on-call rota, blameless",
-                ),
+                },
+                {
+                    "path": "/home/stan/proj/slack/#eng-platform",
+                    "content": "sev-2, Kubo, retro, on-call rota, blameless",
+                },
             ]
         )
         # _shoot() pops this once the toplevel is mapped.
@@ -467,11 +465,13 @@ class _App(Adw.Application):
         return win
 
     def _long_text(self):
-        win, machine, ui = _mk(self)
-        _to_ready(machine, ui)
-        ui.append_text(" ".join([_CLEANED_TEXT, _LONG_TEXT, _CLEANED_TEXT]))
-        ui.finish_pipeline()
-        machine.transition(State.READY)
+        win, state, ui = _mk(self)
+        _to_ready(self, state, ui)
+        ui.on_text(
+            "cleaned", "replace", " ".join([_CLEANED_TEXT, _LONG_TEXT, _CLEANED_TEXT])
+        )
+        ui.set_progress(1.0)
+        state.apply(State.READY)
         _show_countdown(ui, 28)
         return win
 

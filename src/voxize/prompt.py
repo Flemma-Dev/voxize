@@ -136,16 +136,6 @@ def _read_glossary(path: str) -> PromptSource | None:
     return PromptSource(path=path, content=content)
 
 
-def detect_prompt() -> list[PromptSource]:
-    """Compatibility shim for app.py until the GUI is a protocol client.
-
-    Deleted in the task that rewires the GUI; nothing else may call it.
-    """
-    from voxize.gui.context import detect_context
-
-    return load_sources(*detect_context())
-
-
 # ── WHISPER.txt ──
 
 

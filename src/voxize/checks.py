@@ -1,7 +1,6 @@
 """Startup dependency checks and API key retrieval."""
 
 import logging
-import sys
 
 import gi
 
@@ -76,18 +75,3 @@ def get_api_key(service: str) -> str:
         )
     logger.debug("get_api_key: retrieved successfully")
     return password
-
-
-def exit_on_failure() -> None:
-    """Run checks and exit with clear error messages if any fail."""
-    logger.debug("exit_on_failure: running checks")
-    errors = check_all()
-    if errors:
-        print("Voxize startup checks failed:\n", file=sys.stderr)
-        for err in errors:
-            print(f"  • {err}", file=sys.stderr)
-        print(
-            "\nEnsure you are running inside the nix dev shell (nix develop).",
-            file=sys.stderr,
-        )
-        sys.exit(1)

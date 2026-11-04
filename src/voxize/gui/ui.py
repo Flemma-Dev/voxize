@@ -25,28 +25,12 @@ gi.require_version("Gtk", "4.0")
 # gi.require_version() above is executable code; all subsequent imports trigger E402.
 from gi.repository import Adw, Gdk, Gio, GLib, Gtk, Pango  # noqa: E402
 
-from voxize.prompt import PromptSource  # noqa: E402
-from voxize.state import State, StateMachine  # noqa: E402
+from voxize.gui.client_state import ClientState  # noqa: E402
+from voxize.protocol import State  # noqa: E402
 
-_BATCH_LIVE_RATIO = 0.9843
-_CLEANUP_BATCH_RATIO = 0.9167
-_MIN_LIVE_LEN = 50
-
-_UPLOAD_MS = 50.0
-_BATCH_TTFB_BASE_MS = 1196.7
-_BATCH_TTFB_SLOPE_MS = 1.3181
-_BATCH_STREAM_MS_PER_CHAR = 1.1337
-_CLEANUP_TTFB_MS = 1264.0
-_CLEANUP_STREAM_MS_PER_CHAR = 1.4499
-_WAIT_TICK_MS = 50
-
-# "Still working…" once progress has been flat this long.
-_STALL_US = 3_000_000
-_STALL_POLL_MS = 250
 # No prediction (L < 50): pulse instead of a fraction.
 _PULSE_MS = 100
 
-_METER_MS = 40
 # Zone boundaries as fractions of the [-60, 0] dBFS range — see _level_zone.
 _ZONE_GOOD = 0.33
 _ZONE_HOT = 0.80
@@ -135,75 +119,40 @@ class OverlayWindow:
     def __init__(
         self,
         window: Adw.ApplicationWindow,
-        machine: StateMachine,
+        machine: ClientState,
         autoclose_seconds: int = 0,
         on_switch_to_meeting: Callable[[], None] | None = None,
+        on_stop: Callable[[], None] | None = None,
+        on_cancel: Callable[[], None] | None = None,
     ) -> None:
         self._window = window
         self._machine = machine
         self._on_switch_to_meeting = on_switch_to_meeting
+        self._on_stop_cb = on_stop or (lambda: None)
+        self._on_cancel_cb = on_cancel or (lambda: None)
         self._timer_seconds = 0
         self._timer_source: int | None = None
         self._scroll_pending = False
-        self._awaiting_cleanup = False
-        self._awaiting_batch = False
         self._destroyed = False
         self._session_dir: str | None = None
         self._had_first_text = False
         # True when the buffer holds transcript text worth copying — not the
         # placeholder, "No speech detected." or an error message.
         self._copyable = False
-        # Everything the live preview showed, so a failed batch can fall back
-        # to it even after batch deltas have replaced it on screen.
-        self._live_text = ""
         self._preview_error: str | None = None
         self._failure: tuple[str, str, str] | None = None
-        self._meter_source: int | None = None
-        self._level_meter = None
-        self._pipeline_active = False
-        self._pipeline_predicted: float = 0.0
-        self._pipeline_chars: int = 0
-        self._pipeline_batch_predicted: float = 0.0
-        self._seg_upload: float = 0.0
-        self._seg_batch_wait: float = 0.0
-        self._seg_batch_stream: float = 0.0
-        self._seg_cleanup_wait: float = 0.0
-        self._seg_cleanup_stream: float = 0.0
-        self._batch_ttfb_ms: float = 0.0
-        self._cleanup_ttfb_ms: float = 0.0
-        self._d_upload: float = 0.0
-        self._d_batch_ttfb: float = 0.0
-        self._d_batch_stream: float = 0.0
-        self._d_cleanup_ttfb: float = 0.0
-        self._d_cleanup_stream: float = 0.0
-        self._pl_start_us: int = 0
-        self._pl_upload_done_us: int = 0
-        self._pl_batch_first_us: int = 0
-        self._pl_batch_done_us: int = 0
-        self._pl_cleanup_first_us: int = 0
-        self._wait_source: int | None = None
-        self._wait_start_us: int = 0
-        self._wait_from: float = 0.0
-        self._wait_to: float = 0.0
-        self._wait_ms: int = 0
         self._pulse_source: int | None = None
-        self._stall_source: int | None = None
-        self._last_progress_us: int = 0
         self._stalled = False
         self._autoclose_total = autoclose_seconds
         self._autoclose_remaining = 0
         self._autoclose_source: int | None = None
-        self._rail_fraction: float = 0.0
         self._resize_pending = False
         self._text_height = 0
         self._height_floor = 0
         self._line_height = 0
         self._max_lines = _MAX_LINES_LIVE
-        self._prompt_sources: list[PromptSource] = []
+        self._prompt_sources: list[dict] = []
         self._cancel_dialog: Adw.AlertDialog | None = None
-        # Upload can finish before start_pipeline() runs (it waits on the WS
-        # teardown); remember when, so the arm can catch the bar up.
-        self._upload_done_early_us: int = 0
         self._mode_btn: Gtk.MenuButton | None = None
         self._mode_caption_shown: bool | None = None
         self._mode_caption_wanted: bool | None = None
@@ -574,7 +523,7 @@ class OverlayWindow:
         if state not in _IN_FLIGHT:
             return
         if state not in _CONFIRM_CANCEL:
-            self._machine.transition(State.CANCELLED)
+            self._on_cancel_cb()
             return
         if self._cancel_dialog is not None:
             return
@@ -606,7 +555,7 @@ class OverlayWindow:
         )
         # The pipeline may have finished while the question was up.
         if response == "discard" and self._machine.state in _CONFIRM_CANCEL:
-            self._machine.transition(State.CANCELLED)
+            self._on_cancel_cb()
 
     def _on_cancel_dialog_closed(self, dialog: Adw.AlertDialog) -> None:
         # A late "closed" from a force-closed dialog must not clear a newer one.
@@ -630,13 +579,13 @@ class OverlayWindow:
 
     # ── Guidance popover ──
 
-    def show_prompt_context(self, prompts: list[PromptSource]) -> None:
+    def show_prompt_context(self, sources: list[dict]) -> None:
         """Populate the guidance popover and show the icon."""
         if self._destroyed:
             return
-        logger.debug("show_prompt_context: sources=%d", len(prompts))
-        self._prompt_sources = prompts
-        if not prompts:
+        logger.debug("show_prompt_context: sources=%d", len(sources))
+        self._prompt_sources = sources
+        if not sources:
             self._guidance_btn.set_visible(False)
             return
         box = self._guidance_box
@@ -651,19 +600,19 @@ class OverlayWindow:
         title.set_xalign(0)
         box.append(title)
 
-        for source in prompts:
+        for source in sources:
             row = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
             # A link label rather than a Gtk.LinkButton: the button's stock
             # padding indents the filename away from the title and preview.
             # The default activate-link handler opens it in the default app.
-            uri = GLib.filename_to_uri(source.path, None)
-            name = os.path.basename(source.path)
+            uri = GLib.filename_to_uri(source["path"], None)
+            name = os.path.basename(source["path"])
             link = Gtk.Label()
             link.set_markup(
                 f'<a href="{GLib.markup_escape_text(uri)}">'
                 f"{GLib.markup_escape_text(name)}</a>"
             )
-            link.set_tooltip_text(source.path)
+            link.set_tooltip_text(source["path"])
             link.set_xalign(0)
             link.set_halign(Gtk.Align.START)
             row.append(link)
@@ -672,7 +621,7 @@ class OverlayWindow:
             preview.add_css_class("dimmed")
             preview.add_css_class("caption")
             preview.set_text(
-                source.content[:80] + ("…" if len(source.content) > 80 else "")
+                source["content"][:80] + ("…" if len(source["content"]) > 80 else "")
             )
             preview.set_xalign(0)
             preview.set_wrap(True)
@@ -726,40 +675,26 @@ class OverlayWindow:
 
     # ── Text operations ──
 
-    def on_speech(self, active: bool) -> None:
-        """VAD speech_started/speech_stopped — logged only.
+    def on_text(self, stage: str, op: str, text: str) -> None:
+        """Transcript text from the backend: live, batch or cleaned.
 
-        The level meter is driven by raw RMS at all times; nothing on screen
-        depends on the server's VAD any more.
+        The first text of a stage replaces what is on screen. Text that is
+        about to be superseded is dimmed: the live preview once the batch
+        pass is running, the batch transcript while cleanup runs.
         """
-        if self._destroyed or self._machine.state != State.RECORDING:
-            return
-        logger.debug("on_speech: active=%s", active)
-
-    def append_text(self, text: str) -> None:
         if self._destroyed:
             return
-        state = self._machine.state
         if not self._had_first_text:
-            logger.debug("append_text: first text arrived, len=%d", len(text))
+            logger.debug("on_text: first text arrived, len=%d", len(text))
             self._had_first_text = True
-            # Drop the "Waiting for audio" placeholder before the real words
-            self._set_dimmed(False)
+        if op == "replace":
+            logger.debug("on_text: replace stage=%s len=%d", stage, len(text))
             self.clear_text()
-        if self._awaiting_batch and state == State.TRANSCRIBING:
-            logger.debug("append_text: first batch delta, swapping live preview")
-            self._awaiting_batch = False
-            self._set_dimmed(False)
-            self.clear_text()
-            self._snap_to_batch_stream()
-        if self._awaiting_cleanup and state == State.CLEANING:
-            logger.debug("append_text: first cleanup token, swapping transcript")
-            self._awaiting_cleanup = False
-            self._set_dimmed(False)
-            self.clear_text()
-            self._snap_to_cleanup_stream()
-        if state == State.RECORDING:
-            self._live_text += text
+        state = self._machine.state
+        superseded = (state == State.TRANSCRIBING and stage == "live") or (
+            state == State.CLEANING and stage == "batch"
+        )
+        self._set_dimmed(superseded)
         self._copyable = True
         buf = self._text_view.get_buffer()
         buf.insert(buf.get_end_iter(), text)
@@ -796,20 +731,11 @@ class OverlayWindow:
         vadj.set_value(vadj.get_upper() - vadj.get_page_size())
         return False
 
-    def show_transcript_for_cleanup(self, transcript: str) -> None:
-        """Show the batch transcript, dimmed, and arm the cleanup swap."""
-        if self._destroyed:
-            return
-        logger.debug("show_transcript_for_cleanup: transcript_len=%d", len(transcript))
-        self._set_text(transcript, copyable=True, dimmed=True)
-        self._awaiting_cleanup = True
-
     def show_no_speech(self) -> None:
         """Batch returned nothing: say so, and leave nothing to copy."""
         if self._destroyed:
             return
         self._had_first_text = True
-        self._awaiting_batch = False
         self._set_text(_NO_SPEECH, copyable=False, dimmed=True)
 
     # ── Inline notice ──
@@ -824,19 +750,12 @@ class OverlayWindow:
             self._set_dimmed(True)
             self._reveal_notice(_NOTICE_PREVIEW_LOST, message)
 
-    def show_batch_failed(self, message: str) -> None:
-        """Arm the READY fallback to the live preview. Call before READY."""
-        logger.debug("show_batch_failed: message=%s", message)
-        self._failure = ("batch", message, "")
-
-    def show_cleanup_failed(self, message: str, transcript: str) -> None:
-        """Arm the READY fallback to the batch transcript. Call before READY."""
+    def show_failure(self, phase: str, message: str, fallback: str | None) -> None:
+        """Arm the READY notice. The fallback text itself arrived as text."""
         logger.debug(
-            "show_cleanup_failed: message=%s transcript_len=%d",
-            message,
-            len(transcript),
+            "show_failure: phase=%s fallback=%s message=%s", phase, fallback, message
         )
-        self._failure = ("cleanup", message, transcript)
+        self._failure = (phase, message, fallback)
 
     def _reveal_notice(self, text: str, detail: str) -> None:
         self._notice_label.set_text(text)
@@ -848,19 +767,19 @@ class OverlayWindow:
         self._notice_revealer.set_reveal_child(False)
 
     def _apply_failure(self) -> None:
-        """On READY: put the fallback text on screen and explain why."""
-        kind, message, transcript = self._failure
-        if kind == "batch":
-            if self._live_text.strip():
-                self._set_text(self._live_text, copyable=True, dimmed=False)
+        """On READY: explain why the fallback text is what's on screen."""
+        phase, message, fallback = self._failure
+        if phase == "batch":
+            if fallback is not None:
+                self._set_dimmed(False)
                 self._reveal_notice(_NOTICE_BATCH_FAILED, message)
             else:
                 self._set_text(_NO_PREVIEW, copyable=False, dimmed=True)
                 self._reveal_notice(_NOTICE_BATCH_FAILED_EMPTY, message)
         else:
-            # The clipboard already holds the full batch transcript, so the
-            # screen shows the same — never a half-streamed cleanup.
-            self._set_text(transcript, copyable=bool(transcript), dimmed=False)
+            # The full batch transcript is on screen — the same text the
+            # clipboard already holds, never a half-streamed cleanup.
+            self._set_dimmed(False)
             self._reveal_notice(_NOTICE_CLEANUP_FAILED, message)
 
     # ── Text area sizing ──
@@ -949,7 +868,7 @@ class OverlayWindow:
         for btn in (self._cancel_btn, self._stop_btn, self._close_btn, self._copy_btn):
             btn.set_visible(btn in visible)
 
-    def _on_state_change(self, machine: StateMachine, old: State, new: State) -> None:
+    def _on_state_change(self, machine: ClientState, old: State, new: State) -> None:
         logger.debug("_on_state_change: %s -> %s", old.name, new.name)
 
         # READY (or ERROR) while the question is up: it no longer applies.
@@ -959,14 +878,12 @@ class OverlayWindow:
             self._close_cancel_dialog()
 
         self._stop_autoclose_countdown()
-        self._awaiting_batch = False
-        self._awaiting_cleanup = False
         self._timer_label.remove_css_class("dimmed")
         self._close_btn.remove_css_class("suggested-action")
         self._close_btn.add_css_class("flat")
         self._update_mode_menu(new)
         if new not in _WORKING:
-            self._stop_stall_watch()
+            self._stalled = False
 
         audio_phase = {State.WARMING, State.RECORDING}
         if old in audio_phase and new not in audio_phase:
@@ -979,7 +896,6 @@ class OverlayWindow:
         if new == State.WARMING:
             self._set_dot("idle")
             self._status_label.set_text("Warming up…")
-            self._live_text = ""
             self._preview_error = None
             self._failure = None
             self._hide_notice()
@@ -991,7 +907,6 @@ class OverlayWindow:
             self._window.set_default_widget(self._stop_btn)
             self._show_waiting_placeholder()
             self._show_level()
-            self._start_meter()
             self._max_lines = _MAX_LINES_LIVE
             self._queue_text_resize()
 
@@ -1000,11 +915,9 @@ class OverlayWindow:
             self._status_label.set_text("Listening")
             if old != State.WARMING:
                 # Mock mode skips WARMING.
-                self._live_text = ""
                 self._failure = None
                 self._timer_seconds = 0
                 self._timer_label.set_text(_format_timer(0))
-                self._start_meter()
             if not self._had_first_text:
                 self._show_waiting_placeholder()
             if self._preview_error is not None:
@@ -1025,15 +938,11 @@ class OverlayWindow:
             self._timer_label.add_css_class("dimmed")
             self._show_buttons(self._cancel_btn)
             self._window.set_default_widget(None)
-            self._awaiting_batch = True
             self._had_first_text = False
             self._set_dimmed(True)
-            self._rail_fraction = 0.0
-            self._upload_done_early_us = 0
             self._progress.set_fraction(0.0)
             self._strip.set_visible_child_name("progress")
             self._strip.set_visible(True)
-            self._start_stall_watch()
 
         elif new == State.CLEANING:
             # Same visual state as TRANSCRIBING, label included — a stall
@@ -1043,7 +952,6 @@ class OverlayWindow:
             self._timer_label.add_css_class("dimmed")
             self._show_buttons(self._cancel_btn)
             self._window.set_default_widget(None)
-            self._start_stall_watch()
 
         elif new == State.READY:
             self._set_dot("ready")
@@ -1118,19 +1026,20 @@ class OverlayWindow:
 
     # ── Level meter ──
 
-    def set_level_meter(self, meter) -> None:
-        """Store a reference to the LevelMeter for polling."""
-        self._level_meter = meter
+    def set_level(self, dbfs: float) -> None:
+        """Raw RMS from the backend, 25 times a second while capturing."""
+        if self._destroyed or self._machine.state not in (
+            State.WARMING,
+            State.RECORDING,
+        ):
+            return
+        frac = _dbfs_to_fraction(dbfs)
+        self._levelbar.set_value(frac)
+        self._set_level_zone(_level_zone(frac))
 
     def _show_level(self) -> None:
         self._strip.set_visible_child_name("level")
         self._strip.set_visible(True)
-
-    def _start_meter(self) -> None:
-        self._stop_meter()
-        if self._level_meter is None:
-            return
-        self._meter_source = GLib.timeout_add(_METER_MS, self._tick_meter)
 
     def _set_level_zone(self, zone: str | None) -> None:
         """Swap the mic-gain zone class on the level bar."""
@@ -1141,298 +1050,34 @@ class OverlayWindow:
             self._levelbar.add_css_class(zone)
 
     def _stop_meter(self) -> None:
-        if self._meter_source is not None:
-            GLib.source_remove(self._meter_source)
-            self._meter_source = None
         self._levelbar.set_value(0.0)
         self._set_level_zone(None)
 
-    def _tick_meter(self) -> bool:
-        """Raw RMS, every tick, never gated on VAD."""
-        meter = self._level_meter
-        if meter is None:
-            return True
-        frac = _dbfs_to_fraction(meter.level_dbfs)
-        self._levelbar.set_value(frac)
-        self._set_level_zone(_level_zone(frac))
-        return True
-
-    # ── Pipeline progress (upload → batch → cleanup) ──
-
-    def start_pipeline(self, live_len: int) -> None:
-        """Arm the progress bar for the full post-recording pipeline."""
-        # Arrives via idle after the WS teardown; a fast empty batch can
-        # already have reached READY, where a pulse would never be stopped.
-        if self._destroyed or self._machine.state not in _WORKING:
-            return
-        self._mark_progress()
-        self._pipeline_active = live_len >= _MIN_LIVE_LEN
-        self._pipeline_predicted = (
-            live_len * _BATCH_LIVE_RATIO if self._pipeline_active else 0.0
-        )
-        self._pipeline_batch_predicted = 0.0
-        self._pipeline_chars = 0
-        if not self._pipeline_active:
-            # No prediction to map events onto — pulse until READY.
-            logger.debug("pipeline_progress: start live_len=%d pulse", live_len)
-            self._start_pulse()
-            return
-        d_upload = _UPLOAD_MS + 0.05 * live_len
-        d_batch_ttfb = _BATCH_TTFB_BASE_MS + _BATCH_TTFB_SLOPE_MS * live_len
-        d_batch_stream = _BATCH_STREAM_MS_PER_CHAR * live_len
-        d_cleanup_ttfb = _CLEANUP_TTFB_MS
-        d_cleanup_stream = _CLEANUP_STREAM_MS_PER_CHAR * live_len
-        total = (
-            d_upload + d_batch_ttfb + d_batch_stream + d_cleanup_ttfb + d_cleanup_stream
-        )
-        self._seg_upload = d_upload / total
-        self._seg_batch_wait = self._seg_upload + d_batch_ttfb / total
-        self._seg_batch_stream = self._seg_batch_wait + d_batch_stream / total
-        self._seg_cleanup_wait = self._seg_batch_stream + d_cleanup_ttfb / total
-        self._seg_cleanup_stream = min(
-            self._seg_cleanup_wait + d_cleanup_stream / total, 0.95
-        )
-        self._batch_ttfb_ms = d_batch_ttfb
-        self._cleanup_ttfb_ms = d_cleanup_ttfb
-        self._d_upload = d_upload
-        self._d_batch_ttfb = d_batch_ttfb
-        self._d_batch_stream = d_batch_stream
-        self._d_cleanup_ttfb = d_cleanup_ttfb
-        self._d_cleanup_stream = d_cleanup_stream
-        self._pl_start_us = GLib.get_monotonic_time()
-        self._pl_upload_done_us = 0
-        self._pl_batch_first_us = 0
-        self._pl_batch_done_us = 0
-        self._pl_cleanup_first_us = 0
-        logger.debug(
-            "pipeline_progress: start live_len=%d "
-            "predicted_ms=[upload=%.0f batch_ttfb=%.0f batch_stream=%.0f "
-            "cleanup_ttfb=%.0f cleanup_stream=%.0f total=%.0f] "
-            "segs=[%.3f %.3f %.3f %.3f %.3f] "
-            "constants=[bl_ratio=%.4f cb_ratio=%.4f bt_base=%.1f bt_slope=%.4f "
-            "bs_rate=%.4f ct_flat=%.1f cs_rate=%.4f]",
-            live_len,
-            d_upload,
-            d_batch_ttfb,
-            d_batch_stream,
-            d_cleanup_ttfb,
-            d_cleanup_stream,
-            total,
-            self._seg_upload,
-            self._seg_batch_wait,
-            self._seg_batch_stream,
-            self._seg_cleanup_wait,
-            self._seg_cleanup_stream,
-            _BATCH_LIVE_RATIO,
-            _CLEANUP_BATCH_RATIO,
-            _BATCH_TTFB_BASE_MS,
-            _BATCH_TTFB_SLOPE_MS,
-            _BATCH_STREAM_MS_PER_CHAR,
-            _CLEANUP_TTFB_MS,
-            _CLEANUP_STREAM_MS_PER_CHAR,
-        )
-        self._rail_fraction = 0.0
-        self._progress.set_fraction(0)
-        if self._upload_done_early_us:
-            # Upload finished before the arm: fill its segment and run the
-            # TTFB wait from when it really ended, so the bar catches up.
-            self._pl_upload_done_us = self._upload_done_early_us
-            self._rail_set(self._seg_upload)
-            self._start_wait(
-                self._seg_upload, self._seg_batch_wait, self._batch_ttfb_ms
-            )
-            self._wait_start_us = self._upload_done_early_us
-
-    def _rail_set(self, fraction: float) -> None:
-        """Drive the progress bar, monotonically.
-
-        Predictions over- and under-shoot, so a raw fraction can move
-        backwards between the model and a real event. The bar is a
-        promise about elapsed progress; it must never retreat.
-        """
-        f = max(self._rail_fraction, min(fraction, 1.0))
-        if f > self._rail_fraction:
-            self._mark_progress()
-        self._rail_fraction = f
-        self._progress.set_fraction(f)
-
-    def set_upload_progress(self, fraction: float) -> None:
-        """Upload byte progress [0, 1] → mapped to [0, seg_upload] of pipeline."""
-        if self._destroyed:
-            return
-        if not self._pipeline_active:
-            self._mark_progress()
-            if fraction >= 1.0 and not self._upload_done_early_us:
-                self._upload_done_early_us = GLib.get_monotonic_time()
-            return
-        frac = min(fraction, 1.0) * self._seg_upload
-        self._rail_set(frac)
-        if fraction >= 1.0:
-            now = GLib.get_monotonic_time()
-            self._pl_upload_done_us = now
-            actual_ms = (now - self._pl_start_us) / 1000
-            logger.debug(
-                "pipeline_progress: upload_done actual_ms=%.0f predicted_ms=%.0f",
-                actual_ms,
-                self._d_upload,
-            )
-            self._start_wait(
-                self._seg_upload, self._seg_batch_wait, self._batch_ttfb_ms
-            )
-
-    def on_batch_complete(self, batch_len: int) -> None:
-        """Batch done — snap to segment boundary, arm cleanup, start wait."""
-        if self._destroyed:
-            return
-        if not self._pipeline_active:
-            self._mark_progress()
-            return
-        self._stop_wait()
-        self._rail_set(self._seg_batch_stream)
-        now = GLib.get_monotonic_time()
-        self._pl_batch_done_us = now
-        ref = self._pl_batch_first_us or self._pl_start_us
-        actual_ms = (now - ref) / 1000
-        logger.debug(
-            "pipeline_progress: batch_done "
-            "actual_stream_ms=%.0f predicted_stream_ms=%.0f "
-            "chars=%d predicted_chars=%.0f batch_len=%d",
-            actual_ms,
-            self._d_batch_stream,
-            self._pipeline_chars,
-            self._pipeline_predicted,
-            batch_len,
-        )
-        self._pipeline_batch_predicted = (
-            batch_len * _CLEANUP_BATCH_RATIO if batch_len >= _MIN_LIVE_LEN else 0.0
-        )
-        self._pipeline_chars = 0
-        if self._pipeline_batch_predicted > 0:
-            self._start_wait(
-                self._seg_batch_stream, self._seg_cleanup_wait, self._cleanup_ttfb_ms
-            )
-
-    def on_pipeline_delta(self, text: str) -> None:
-        """Update pipeline progress with a streaming delta (batch or cleanup)."""
-        if self._destroyed:
-            return
-        if not self._pipeline_active:
-            self._mark_progress()
-            return
-        self._pipeline_chars += len(text)
-        state = self._machine.state
-        if state == State.TRANSCRIBING and self._pipeline_predicted > 0:
-            t = min(self._pipeline_chars / self._pipeline_predicted, 1.0)
-            seg_start = self._seg_batch_wait
-            seg_end = self._seg_batch_stream
-        elif state == State.CLEANING and self._pipeline_batch_predicted > 0:
-            t = min(self._pipeline_chars / self._pipeline_batch_predicted, 1.0)
-            seg_start = self._seg_cleanup_wait
-            seg_end = self._seg_cleanup_stream
-        else:
-            # No prediction for this pass (batch text < 50 chars): the bar
-            # holds, but tokens arriving is still not a stall.
-            self._mark_progress()
-            return
-        frac = seg_start + t * (seg_end - seg_start)
-        self._rail_set(min(frac, seg_end))
-
-    def finish_pipeline(self) -> None:
-        """Snap to 100%."""
-        if self._destroyed or not self._pipeline_active:
-            return
-        self._stop_wait()
-        self._rail_set(1.0)
-        now = GLib.get_monotonic_time()
-        ref = self._pl_cleanup_first_us or self._pl_start_us
-        actual_stream_ms = (now - ref) / 1000
-        total_ms = (now - self._pl_start_us) / 1000
-        logger.debug(
-            "pipeline_progress: done "
-            "cleanup_stream_ms=%.0f predicted_cleanup_stream_ms=%.0f "
-            "cleanup_chars=%d predicted_cleanup_chars=%.0f "
-            "total_ms=%.0f predicted_total_ms=%.0f",
-            actual_stream_ms,
-            self._d_cleanup_stream,
-            self._pipeline_chars,
-            self._pipeline_batch_predicted,
-            total_ms,
-            self._d_upload
-            + self._d_batch_ttfb
-            + self._d_batch_stream
-            + self._d_cleanup_ttfb
-            + self._d_cleanup_stream,
-        )
+    # ── Progress (the backend's estimate) ──
 
     def _reset_progress(self) -> None:
         if self._destroyed:
             return
-        self._stop_wait()
         self._stop_pulse()
-        self._pipeline_active = False
-        self._rail_fraction = 0.0
         self._progress.set_fraction(0)
 
-    # ── Wait animation (TTFB gaps) ──
-
-    def _snap_to_batch_stream(self) -> None:
-        """First batch delta — end the TTFB wait, start char tracking."""
-        if not self._pipeline_active:
+    def set_progress(self, fraction: float | None) -> None:
+        """The backend's estimate; ``None`` means none — pulse instead."""
+        if self._destroyed or self._machine.state not in _WORKING:
             return
-        self._stop_wait()
-        self._pipeline_chars = 0
-        self._rail_set(self._seg_batch_wait)
-        now = GLib.get_monotonic_time()
-        self._pl_batch_first_us = now
-        ref = self._pl_upload_done_us or self._pl_start_us
-        actual_ms = (now - ref) / 1000
-        logger.debug(
-            "pipeline_progress: batch_first_delta "
-            "actual_ttfb_ms=%.0f predicted_ttfb_ms=%.0f",
-            actual_ms,
-            self._d_batch_ttfb,
-        )
-
-    def _snap_to_cleanup_stream(self) -> None:
-        """First cleanup delta — end the TTFB wait, start char tracking."""
-        if not self._pipeline_active:
+        if fraction is None:
+            if self._pulse_source is None:
+                self._start_pulse()
             return
-        self._stop_wait()
-        self._pipeline_chars = 0
-        self._rail_set(self._seg_cleanup_wait)
-        now = GLib.get_monotonic_time()
-        self._pl_cleanup_first_us = now
-        ref = self._pl_batch_done_us or self._pl_start_us
-        actual_ms = (now - ref) / 1000
-        logger.debug(
-            "pipeline_progress: cleanup_first_delta "
-            "actual_ttfb_ms=%.0f predicted_ttfb_ms=%.0f",
-            actual_ms,
-            self._d_cleanup_ttfb,
-        )
+        self._stop_pulse()
+        self._progress.set_fraction(fraction)
 
-    def _start_wait(self, from_frac: float, to_frac: float, expected_ms: int) -> None:
-        self._stop_wait()
-        self._wait_from = from_frac
-        self._wait_to = to_frac
-        self._wait_ms = expected_ms
-        self._wait_start_us = GLib.get_monotonic_time()
-        self._wait_source = GLib.timeout_add(_WAIT_TICK_MS, self._tick_wait)
-
-    def _stop_wait(self) -> None:
-        if self._wait_source is not None:
-            GLib.source_remove(self._wait_source)
-            self._wait_source = None
-
-    def _tick_wait(self) -> bool:
-        elapsed_ms = (GLib.get_monotonic_time() - self._wait_start_us) / 1000
-        t = min(elapsed_ms / self._wait_ms, 1.0)
-        frac = self._wait_from + t * (self._wait_to - self._wait_from)
-        self._rail_set(frac)
-        if t >= 1.0:
-            self._wait_source = None
-            return False
-        return True
+    def set_stalled(self, stalled: bool) -> None:
+        if self._destroyed or self._machine.state not in _WORKING:
+            return
+        if stalled != self._stalled:
+            self._stalled = stalled
+            self._status_label.set_text("Still working…" if stalled else "Working…")
 
     # ── Pulse (no prediction) ──
 
@@ -1450,33 +1095,10 @@ class OverlayWindow:
         self._progress.pulse()
         return True
 
-    # ── Stall detection ──
-
-    def _mark_progress(self) -> None:
-        """Something moved: the bar's fraction, or (pulsing) a real event."""
-        self._last_progress_us = GLib.get_monotonic_time()
-
-    def _start_stall_watch(self) -> None:
-        if self._stall_source is not None:
-            return
-        self._mark_progress()
-        self._stall_source = GLib.timeout_add(_STALL_POLL_MS, self._tick_stall)
-
-    def _stop_stall_watch(self) -> None:
-        if self._stall_source is not None:
-            GLib.source_remove(self._stall_source)
-            self._stall_source = None
-        self._stalled = False
-
-    def _tick_stall(self) -> bool:
-        stalled = GLib.get_monotonic_time() - self._last_progress_us >= _STALL_US
-        if stalled != self._stalled:
-            self._stalled = stalled
-            logger.debug("pipeline_progress: stalled=%s", stalled)
-            self._status_label.set_text("Still working…" if stalled else "Working…")
-        return True
-
     # ── Session directory ──
+
+    def window_active(self) -> bool:
+        return self._window.is_active()
 
     def set_session_dir(self, path: str) -> None:
         """Store the session directory path for the folder button."""
@@ -1537,7 +1159,7 @@ class OverlayWindow:
         s = self._machine.state
         logger.debug("_on_stop: state=%s", s.name)
         if s in (State.WARMING, State.RECORDING):
-            self._machine.transition(State.TRANSCRIBING)
+            self._on_stop_cb()
 
     # ── Timer ──
 
@@ -1591,7 +1213,5 @@ class OverlayWindow:
         self._close_cancel_dialog()
         self._stop_timer()
         self._stop_meter()
-        self._stop_wait()
         self._stop_pulse()
-        self._stop_stall_watch()
         self._stop_autoclose_countdown()

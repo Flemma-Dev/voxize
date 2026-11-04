@@ -6,7 +6,7 @@ directory (diving into tmux and nvim), and finds the per-app and
 per-context glossary files for it. The backend is handed a directory and
 file paths and never learns where they came from. A TUI just passes its cwd.
 
-Moved from prompt.py (detect_prompt and its helpers) with the same
+Moved from prompt.py (its focused-window detection helpers) with the same
 resolution chain:
 1. Focused window metadata via D-Bus (GNOME Shell Windows extension).
 2. Working directory: Ghostty + tmux → nvim /proc/{pid}/cwd, or the tmux
