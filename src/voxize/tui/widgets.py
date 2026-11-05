@@ -4,12 +4,15 @@ from __future__ import annotations
 
 from typing import ClassVar
 
+from rich.color import Color
+from rich.segment import Segment, Segments
 from rich.style import Style
 from rich.text import Text
 from textual.app import ComposeResult
 from textual.containers import Container, Horizontal, Vertical, VerticalScroll
 from textual.reactive import reactive
 from textual.renderables.bar import Bar
+from textual.scrollbar import ScrollBarRender
 from textual.widget import Widget
 from textual.widgets import ProgressBar, Rule, Static
 
@@ -39,6 +42,66 @@ class LevelBar(Widget):
             highlight_style=Style(color=self.rich_style.color),
             background_style=Style(color=track.color),
         )
+
+
+class ThinScrollBarRender(ScrollBarRender):
+    """A vertical scrollbar as a thin line: the strip's line, upright.
+
+    The track is ┃ in scrollbar-background, the thumb ┃ in scrollbar-color,
+    with half-cell ends (╻ ╹) as the strip has (╺ ╸). Cells keep the
+    card's background. Horizontal scrollbars are Textual's own.
+    """
+
+    @classmethod
+    def render_bar(
+        cls,
+        *,  # Textual passes every argument by keyword.
+        size: int,
+        virtual_size: float,
+        window_size: float,
+        position: float,
+        back_color: Color,
+        bar_color: Color,
+        thickness: int = 1,
+        vertical: bool = True,
+    ) -> Segments:
+        if not vertical:
+            return super().render_bar(
+                size=size,
+                virtual_size=virtual_size,
+                window_size=window_size,
+                position=position,
+                thickness=thickness,
+                vertical=vertical,
+                back_color=back_color,
+                bar_color=bar_color,
+            )
+        # The same mouse actions as Textual's: drag the thumb, page on the track.
+        up = Segment("┃", Style(color=back_color, meta={"@mouse.down": "scroll_up"}))
+        down = Segment(
+            "┃", Style(color=back_color, meta={"@mouse.down": "scroll_down"})
+        )
+        thumb = Style(color=bar_color, meta={"@mouse.down": "grab"})
+        if not (window_size and size and virtual_size and size != virtual_size):
+            return Segments([up] * size, new_lines=True)
+        # Thumb size and offset as Textual computes them, in half cells.
+        thumb_size = max(1, window_size / (virtual_size / size))
+        offset = (size - thumb_size) * position / (virtual_size - window_size)
+        start = round(offset * 2)
+        end = min(size * 2, start + round(thumb_size * 2))
+        rows = []
+        for top in range(0, size * 2, 2):
+            if top + 2 <= start:
+                rows.append(up)
+            elif top >= end:
+                rows.append(down)
+            elif top < start:
+                rows.append(Segment("╻", thumb))
+            elif top + 2 > end:
+                rows.append(Segment("╹", thumb))
+            else:
+                rows.append(Segment("┃", thumb))
+        return Segments(rows, new_lines=True)
 
 
 class KeyHints(Widget):

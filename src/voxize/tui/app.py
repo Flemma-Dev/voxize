@@ -25,6 +25,7 @@ from textual.color import Color, ColorParseError
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.css.query import NoMatches
 from textual.screen import ModalScreen, Screen
+from textual.scrollbar import ScrollBar
 from textual.theme import BUILTIN_THEMES, Theme
 from textual.timer import Timer
 from textual.widgets import Button, Static
@@ -34,9 +35,13 @@ from voxize.frontend.session_log import SessionLog
 from voxize.protocol import State
 from voxize.tui.card import CONFIRM_CANCEL, IN_FLIGHT, Card
 from voxize.tui.deliver import Clipboard
-from voxize.tui.widgets import CardView
+from voxize.tui.widgets import CardView, ThinScrollBarRender
 
 logger = logging.getLogger(__name__)
+
+# Textual's hook for custom scrollbars is this class attribute, so it is
+# global; a voxize-tui process runs this one app.
+ScrollBar.renderer = ThinScrollBarRender
 
 # Builds the transport once the app's event loop runs: (on_event, on_lost).
 TransportFactory = Callable[[Callable[[dict], None], Callable[[str], None]], Transport]

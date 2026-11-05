@@ -13,7 +13,7 @@ from tui_fakes import FakeClipboard, FakeTransport
 from voxize.protocol import PROTOCOL_VERSION, State
 from voxize.tui import card as c
 from voxize.tui.app import CardScreen, ConfirmCancel, Costs, Vocabulary, VoxizeTui
-from voxize.tui.widgets import LevelBar
+from voxize.tui.widgets import LevelBar, ThinScrollBarRender
 
 
 def ev(type_, **fields):
@@ -229,6 +229,51 @@ def test_every_level_zone_has_its_own_colour():
 
     run(app, scenario)
     assert len(set(colours.values())) == 4, colours
+
+
+@pytest.mark.parametrize(
+    ("position", "glyphs", "parts"),
+    [
+        # 10 rows showing 10 of 40: a 2.5-row thumb, drawn in half rows.
+        (0, "┃┃╹┃┃┃┃┃┃┃", "TTTvvvvvvv"),
+        (30, "┃┃┃┃┃┃┃╻┃┃", "^^^^^^^TTT"),
+    ],
+)
+def test_thin_scrollbar_draws_the_strips_line_upright(position, glyphs, parts):
+    track, thumb = Color.parse("#3b3b3b"), Color.parse("#a0a0a0")
+    rows = ThinScrollBarRender.render_bar(
+        size=10,
+        virtual_size=40,
+        window_size=10,
+        position=position,
+        back_color=track.rich_color,
+        bar_color=thumb.rich_color,
+    ).segments
+    assert "".join(row.text for row in rows) == glyphs
+    # T: thumb, grabbed to drag; ^ / v: track, clicked to page up / down.
+    meaning = {"grab": "T", "scroll_up": "^", "scroll_down": "v"}
+    assert "".join(meaning[row.style.meta["@mouse.down"]] for row in rows) == parts
+    colour = {"T": thumb.rich_color, "^": track.rich_color, "v": track.rich_color}
+    assert [row.style.color for row in rows] == [colour[p] for p in parts]
+
+
+def test_the_transcript_scrollbar_is_a_thin_line_on_the_strips_track():
+    app, _, _ = make()
+
+    async def scenario(pilot):
+        await feed(app, pilot, *RECORDING, ev("level", dbfs=-30.0))  # good zone
+        track = drawn_line(app.screen.query_one(LevelBar))[1][-1]
+        long = " ".join(["Refactor the middleware to use JWT tokens."] * 60)
+        await feed(app, pilot, ev("text", stage="live", op="replace", text=long))
+        await pilot.pause()
+        bar = app.screen.query_one("#scroll").vertical_scrollbar
+        assert bar.display and bar.size.width == 1
+        cells = [bar.render_line(y) for y in range(bar.size.height)]
+        assert {cell.text for cell in cells} <= {"┃", "╹", "╻"}
+        colours = {seg.style.color.triplet.hex for cell in cells for seg in cell}
+        assert track in colours and len(colours) == 2  # track and thumb
+
+    run(app, scenario)
 
 
 def test_working_dims_and_shows_progress():

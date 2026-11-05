@@ -24,6 +24,18 @@ CardView {
 /* Grey, so the only blue line on the card is the strip. */
 #rule { margin: 0; color: $strip-track; }
 #scroll { height: 1fr; min-height: 1; }
+/* Thin-line scrollbars (ThinScrollBarRender): the track in the strip's
+ * grey, a grey thumb that lights up under the mouse. Not blue: the strip
+ * stays the card's only blue line, and the GUI's scrollbar is grey too. */
+#scroll, Vocabulary > VerticalScroll {
+    scrollbar-size-vertical: 1;
+    scrollbar-background: $strip-track;
+    scrollbar-background-hover: $strip-track;
+    scrollbar-background-active: $strip-track;
+    scrollbar-color: $text-muted;
+    scrollbar-color-hover: $foreground;
+    scrollbar-color-active: $foreground;
+}
 #transcript.-dimmed { color: $text-muted; }
 #notice { height: auto; color: $warning; }
 
