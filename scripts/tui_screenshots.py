@@ -11,15 +11,21 @@ events are scripted the way the backend sends them. Each scene is saved at
 ``terminal-recording.png`` and ``terminal-ready.png`` in assets/ (or DIR) —
 with the same text, timers and costs as the desktop shots from
 scripts/generate_screenshots.py, so the two sit side by side. The PNGs come
-from ``rsvg-convert`` (librsvg, in the dev shell); without it the SVGs stay.
+from a headless Chrome/Chromium when one is on PATH, which draws the SVG as
+a browser does. ``rsvg-convert`` (librsvg, in the dev shell) is the
+fallback: it draws ─ rules a few pixels short of their cells. Without
+either, the SVGs stay.
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
+import math
+import re
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 
 from voxize.protocol import PROTOCOL_VERSION
@@ -169,6 +175,19 @@ class _NullClipboard:
         pass
 
 
+def save_svg(app: VoxizeTui, out: Path, filename: str) -> Path:
+    """The screen as an SVG that librsvg draws right, too.
+
+    Without xml:space="preserve", librsvg (rsvg-convert, GNOME's image
+    viewers) drops a text run's leading space: the bold "Enter" and the
+    muted " Stop" of a key hint draw as "EnterStop". Browsers keep it.
+    """
+    svg = out / filename
+    app.save_screenshot(filename=filename, path=str(out))
+    svg.write_text(svg.read_text().replace("<svg ", '<svg xml:space="preserve" ', 1))
+    return svg
+
+
 async def shoot(out: Path, name: str, events, key, size) -> None:
     app = VoxizeTui(
         lambda on_event, on_lost: _NullTransport(),
@@ -185,7 +204,7 @@ async def shoot(out: Path, name: str, events, key, size) -> None:
         if key:
             await pilot.press(key)
             await pilot.pause()
-        app.save_screenshot(filename=f"{name}-{size[0]}x{size[1]}.svg", path=str(out))
+        save_svg(app, out, f"{name}-{size[0]}x{size[1]}.svg")
     app.session_log.detach()
 
 
@@ -208,21 +227,52 @@ async def shoot_hero(out: Path, name: str, events, seconds: int) -> Path:
         app._render()
         await pilot.pause()
         app.title = "voxize-tui"
-        app.save_screenshot(filename=svg.name, path=str(out))
+        save_svg(app, out, svg.name)
     app.session_log.detach()
     return svg
 
 
+_BROWSERS = ("google-chrome", "google-chrome-stable", "chromium", "chromium-browser")
+
+
+def _chrome_png(browser: str, svg: Path, png: Path) -> None:
+    viewbox = re.search(r'viewBox="0 0 ([\d.]+) ([\d.]+)"', svg.read_text())
+    width, height = (math.ceil(float(n)) for n in viewbox.groups())
+    # A throwaway profile: never the user's own browser profile.
+    with tempfile.TemporaryDirectory() as profile:
+        subprocess.run(
+            [
+                browser,
+                "--headless=new",
+                "--disable-gpu",
+                "--no-first-run",
+                f"--user-data-dir={profile}",
+                "--hide-scrollbars",
+                "--force-device-scale-factor=2",
+                f"--window-size={width},{height}",
+                "--default-background-color=00000000",
+                f"--screenshot={png}",
+                svg.as_uri(),
+            ],
+            check=True,
+            capture_output=True,
+        )
+
+
 def hero(out: Path) -> None:
+    browser = next(filter(None, map(shutil.which, _BROWSERS)), None)
     rsvg = shutil.which("rsvg-convert")
     for name, (events, seconds) in HERO.items():
         svg = asyncio.run(shoot_hero(out, name, events, seconds))
-        if rsvg is None:
-            print(f"{svg} (no rsvg-convert on PATH: PNG skipped)")
-            continue
         png = svg.with_suffix(".png")
         # 2x, so the shots stay sharp at README widths.
-        subprocess.run([rsvg, "-z", "2", "-o", str(png), str(svg)], check=True)
+        if browser is not None:
+            _chrome_png(browser, svg, png)
+        elif rsvg is not None:
+            subprocess.run([rsvg, "-z", "2", "-o", str(png), str(svg)], check=True)
+        else:
+            print(f"{svg} (no Chrome/Chromium or rsvg-convert on PATH: PNG skipped)")
+            continue
         svg.unlink()
         print(png)
 
