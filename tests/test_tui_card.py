@@ -21,7 +21,7 @@ def test_initial_card():
     card = Card()
     assert (card.status, card.tone, card.dot) == ("Starting…", "idle", "○")
     assert card.strip is None and not card.timer_visible
-    assert card.keys == [("esc", "cancel")]
+    assert card.keys == [("Esc", "Cancel")]
     assert card.deliverable is None
 
 
@@ -31,7 +31,7 @@ def test_warming_shows_placeholder_level_and_dim_timer():
     assert card.text == c.PLACEHOLDER and card.dimmed and not card.copyable
     assert card.strip == "level"
     assert card.timer_visible and card.timer_dim and card.timer_seconds == 0
-    assert card.keys == [("enter", "stop"), ("esc", "cancel")]
+    assert card.keys == [("Enter", "Stop"), ("Esc", "Cancel")]
 
 
 def test_recording_listens_with_a_live_timer():
@@ -96,7 +96,7 @@ def test_transcribing_dims_the_live_text_and_shows_progress():
     card.on_state(State.TRANSCRIBING)
     assert (card.status, card.tone) == ("Working…", "working")
     assert card.dimmed and card.strip == "progress" and card.progress == 0.0
-    assert card.keys == [("esc", "cancel")]
+    assert card.keys == [("Esc", "Cancel")]
     card.on_text("live", "replace", "fix the typo")
     assert card.dimmed  # live is about to be superseded
     card.on_text("batch", "replace", "Fix the typo.")
@@ -143,7 +143,7 @@ def test_ready_undims_copyable_text_and_offers_copy_and_exit():
     assert (card.status, card.tone) == ("Ready", "ready")
     assert not card.dimmed and card.strip is None and card.timer_dim
     assert card.deliverable == "Fix it."
-    assert card.keys == [("enter", "copy & exit"), ("^c", "copy"), ("q", "exit")]
+    assert card.keys == [("Enter", "Copy & Exit"), ("C", "Copy"), ("Q", "Exit")]
 
 
 def test_no_speech_leaves_nothing_to_deliver():
@@ -152,7 +152,7 @@ def test_no_speech_leaves_nothing_to_deliver():
     card.on_state(State.READY)
     assert card.text == c.NO_SPEECH and card.dimmed and not card.copyable
     assert card.deliverable is None
-    assert card.keys == [("enter", "exit"), ("q", "exit")]
+    assert card.keys == [("Enter", "Exit"), ("Q", "Exit")]
 
 
 def test_batch_failure_falls_back_to_the_live_preview():
@@ -211,7 +211,7 @@ def test_error_shows_the_message_and_nothing_else():
     assert card.text == "Another Voxize instance is recording"
     assert not card.dimmed and not card.copyable and card.deliverable is None
     assert not card.timer_visible and card.strip is None and not card.vocab_visible
-    assert card.keys == [("enter", "exit"), ("q", "exit")]
+    assert card.keys == [("Enter", "Exit"), ("Q", "Exit")]
 
 
 def test_costs_sum_the_known_parts():
@@ -249,21 +249,21 @@ def test_costs_key_follows_the_ready_keys_and_precedes_vocabulary():
     card.on_text("live", "replace", "Fix it.")
     card.on_context([{"path": "/w/WHISPER.txt", "content": "Luup"}])
     card.on_costs(0.0001, 0.0002, 0.0001)
-    assert ("$", "costs") not in card.keys
+    assert ("$", "Costs") not in card.keys
     walk(card, State.TRANSCRIBING, State.CLEANING, State.READY)
     assert card.keys == [
-        ("enter", "copy & exit"),
-        ("^c", "copy"),
-        ("q", "exit"),
-        ("$", "costs"),
-        ("v", "vocabulary"),
+        ("Enter", "Copy & Exit"),
+        ("C", "Copy"),
+        ("Q", "Exit"),
+        ("$", "Costs"),
+        ("V", "Vocabulary"),
     ]
 
 
 def test_vocabulary_key_is_offered_when_sources_were_loaded():
     card = recording()
     card.on_context([{"path": "/w/WHISPER.txt", "content": "Luup"}])
-    assert card.keys[-1] == ("v", "vocabulary")
+    assert card.keys[-1] == ("V", "Vocabulary")
 
 
 def test_clipboard_unavailable_notice():

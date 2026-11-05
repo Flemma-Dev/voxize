@@ -108,7 +108,8 @@ The same dictation, full screen in whatever terminal, tmux pane or popup it runs
 |---|---|
 | Enter | Stop recording; at Ready, copy and exit |
 | Esc | Cancel (asks first once recording has started); at Ready, exit |
-| Ctrl+C | Copy again, at Ready |
+| `c` | Copy again, at Ready |
+| Ctrl+C | Same as Esc (the terminal's interrupt key, so it never copies) |
 | `$` | Session cost breakdown, at Ready |
 | `v` | The vocabulary in use (`WHISPER.txt`, glossaries) |
 | `q` | Exit, at Ready or Error |

@@ -109,21 +109,22 @@ class Card:
 
     @property
     def keys(self) -> list[tuple[str, str]]:
+        """(key, action) hints, capitalised as the GUI's buttons are."""
         s = self.state
         if s in AUDIO:
-            keys = [("enter", "stop"), ("esc", "cancel")]
+            keys = [("Enter", "Stop"), ("Esc", "Cancel")]
         elif s == State.INITIALIZING or s in WORKING:
-            keys = [("esc", "cancel")]
+            keys = [("Esc", "Cancel")]
         elif s == State.READY and self.deliverable:
-            keys = [("enter", "copy & exit"), ("^c", "copy"), ("q", "exit")]
+            keys = [("Enter", "Copy & Exit"), ("C", "Copy"), ("Q", "Exit")]
         elif s in (State.READY, State.ERROR):
-            keys = [("enter", "exit"), ("q", "exit")]
+            keys = [("Enter", "Exit"), ("Q", "Exit")]
         else:
             keys = []
         if self.costs_visible:
-            keys.append(("$", "costs"))
+            keys.append(("$", "Costs"))
         if self.vocab_visible:
-            keys.append(("v", "vocabulary"))
+            keys.append(("V", "Vocabulary"))
         return keys
 
     # ── State ──

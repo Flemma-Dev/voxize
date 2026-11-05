@@ -6,7 +6,8 @@ process spawned by voxize.tui.__main__ and arrives as protocol events
 (voxize.protocol). The card's rules and strings are in voxize.tui.card.
 
 Differences from the GTK window (voxize/gui/app.py): Enter at READY copies
-and exits, and there is no auto-close, meeting switch or folder key.
+and exits, C copies (Ctrl+C is a terminal's interrupt key, so here it acts
+as Escape), and there is no auto-close, meeting switch or folder key.
 """
 
 from __future__ import annotations
@@ -98,8 +99,8 @@ class Vocabulary(ModalScreen[None]):
 
     BINDINGS: ClassVar[list[BindingType]] = [
         Binding("escape", "close", show=False),
-        Binding("v", "close", show=False),
-        Binding("q", "close", show=False),
+        Binding("v,V", "close", show=False),
+        Binding("q,Q", "close", show=False),
     ]
 
     def __init__(self, sources: list[dict]) -> None:
@@ -125,7 +126,7 @@ class Costs(ModalScreen[None]):
     BINDINGS: ClassVar[list[BindingType]] = [
         Binding("escape", "close", show=False),
         Binding("dollar_sign", "close", show=False),
-        Binding("q", "close", show=False),
+        Binding("q,Q", "close", show=False),
     ]
 
     def __init__(self, parts: list[tuple[str, float]]) -> None:
@@ -147,13 +148,15 @@ class Costs(ModalScreen[None]):
 
 class CardScreen(Screen):
     # On the card, not the app: a modal on top shadows these, so Enter on a
-    # modal's button presses the button.
+    # modal's button presses the button. The hints show letters capitalised
+    # (keycap style), so Shift or Caps Lock must not stop them working.
     BINDINGS: ClassVar[list[BindingType]] = [
         Binding("enter", "app.primary", show=False),
         Binding("escape", "app.cancel_or_exit", show=False),
-        Binding("q", "app.exit_if_done", show=False),
+        Binding("c,C", "app.copy", show=False),
+        Binding("q,Q", "app.exit_if_done", show=False),
         Binding("dollar_sign", "app.costs", show=False),
-        Binding("v", "app.vocabulary", show=False),
+        Binding("v,V", "app.vocabulary", show=False),
     ]
 
     def __init__(self, card: Card) -> None:
@@ -171,9 +174,8 @@ class VoxizeTui(App[str | None]):
     ENABLE_COMMAND_PALETTE = False
     BINDINGS: ClassVar[list[BindingType]] = [
         # Textual's own ctrl+q quits and its ctrl+c only nags. Neither may
-        # skip the cancel confirm, and ctrl+c copies, as in the GUI.
-        Binding("ctrl+q", "ctrl_q", show=False, priority=True),
-        Binding("ctrl+c", "copy", show=False, priority=True, system=True),
+        # skip the cancel confirm: both act as Escape on the card.
+        Binding("ctrl+q,ctrl+c", "interrupt", show=False, priority=True, system=True),
     ]
 
     def __init__(
@@ -345,8 +347,8 @@ class VoxizeTui(App[str | None]):
         if self.core.state.state in _DONE:
             await self._leave()
 
-    async def action_ctrl_q(self) -> None:
-        """Ctrl+Q behaves as Escape on the card; inside a modal it does nothing."""
+    async def action_interrupt(self) -> None:
+        """Ctrl+Q or Ctrl+C: Escape on the card; inside a modal, nothing."""
         if isinstance(self.screen, ModalScreen):
             return
         await self.action_cancel_or_exit()

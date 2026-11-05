@@ -1,5 +1,10 @@
 /* Voxize terminal card. Full screen; capped and centred on big terminals. */
 
+/* The strips' unfilled track. Blended over the background, so a
+ * VOXIZE_TUI_BACKGROUND tint shows through, and dark enough that the
+ * quiet zone's grey fill stays visible on it. */
+$strip-track: $foreground 20%;
+
 Screen {
     align: center middle;
 }
@@ -13,31 +18,45 @@ CardView {
 }
 
 #header { height: 1; }
+#title { width: 1fr; text-style: bold; }
+#vocab { width: auto; margin-left: 2; color: $text-muted; }
+
+/* Grey, so the only blue line on the card is the strip. */
+#rule { margin: 0; color: $strip-track; }
+#scroll { height: 1fr; min-height: 1; }
+#transcript.-dimmed { color: $text-muted; }
+#notice { height: auto; color: $warning; }
+
+#statusbar { height: 1; }
 #dot { width: 2; }
 #dot.tone-idle { color: $text-muted; }
 #dot.tone-recording { color: $error; }
 #dot.tone-working { color: $warning; }
 #dot.tone-ready { color: $success; }
 #dot.tone-error { color: $error; }
-#status { width: 1fr; text-style: bold; }
-#vocab, #cost, #timer { width: auto; margin-left: 2; }
-#vocab, #cost { color: $text-muted; }
-#timer.-dim { color: $text-muted; }
+#status { width: auto; text-style: bold; }
+#timer, #cost { width: auto; margin-left: 2; }
+#timer.-dim, #cost { color: $text-muted; }
 
-#rule { margin: 0; }
-#scroll { height: 1fr; min-height: 1; }
-#transcript.-dimmed { color: $text-muted; }
-#notice { height: auto; color: $warning; }
-
+/* Level meter and progress bar draw one line, as in the GUI: the fill in
+ * the strip colour, the rest of the line in $strip-track. */
 LevelBar { height: 1; color: $primary; }  /* good; $accent is the same amber as $warning */
 LevelBar.zone-quiet { color: $text-muted; }
 LevelBar.zone-hot { color: $warning; }
 LevelBar.zone-clip { color: $error; }
+LevelBar > .levelbar--track { color: $strip-track; }
 
+#strip { height: 1; }
 #progress { width: 100%; height: 1; }
+/* Textual's own pulse is red without an estimate and the bar turns green
+ * when complete; neither means anything here. */
 #progress Bar { width: 1fr; }
+#progress Bar > .bar--bar,
+#progress Bar > .bar--indeterminate,
+#progress Bar > .bar--complete { color: $primary; background: $strip-track; }
 
 #keys { height: 1; color: $text-muted; }
+#keys > .keyhints--key { color: $foreground; text-style: bold; }
 
 ConfirmCancel, Vocabulary, Costs { align: center middle; }
 ConfirmCancel > Vertical {

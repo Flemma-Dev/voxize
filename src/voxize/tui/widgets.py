@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+from typing import ClassVar
+
+from rich.style import Style
 from rich.text import Text
 from textual.app import ComposeResult
-from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.containers import Container, Horizontal, Vertical, VerticalScroll
 from textual.reactive import reactive
+from textual.renderables.bar import Bar
 from textual.widget import Widget
 from textual.widgets import ProgressBar, Rule, Static
 
@@ -17,22 +21,49 @@ _ZONES = ("quiet", "good", "hot", "clip")
 
 
 class LevelBar(Widget):
-    """Mic level as filled then hollow parallelograms.
+    """Mic level as a thin line: the line the stock ProgressBar draws.
 
-    The filled part takes the colour of the zone-* class; the hollow track
-    is dimmed.
+    The filled part takes the colour of the zone-* class, the rest is the
+    levelbar--track colour — the progress bar's track, so the two strips
+    look the same, as in the GUI.
     """
+
+    COMPONENT_CLASSES: ClassVar[set[str]] = {"levelbar--track"}
 
     fraction: reactive[float] = reactive(0.0)
 
+    def render(self) -> Bar:
+        track = self.get_component_rich_style("levelbar--track")
+        return Bar(
+            highlight_range=(0, self.size.width * self.fraction),
+            highlight_style=Style(color=self.rich_style.color),
+            background_style=Style(color=track.color),
+        )
+
+
+class KeyHints(Widget):
+    """``Enter Stop · Esc Cancel``: each key in keyhints--key, its action muted."""
+
+    COMPONENT_CLASSES: ClassVar[set[str]] = {"keyhints--key"}
+
+    keys: reactive[tuple[tuple[str, str], ...]] = reactive(())
+
     def render(self) -> Text:
-        width = self.size.width
-        filled = round(self.fraction * width)
-        return Text("▰" * filled) + Text("▱" * (width - filled), style="dim")
+        key_style = self.get_component_rich_style("keyhints--key", partial=True)
+        hints = Text()
+        for i, (key, action) in enumerate(self.keys):
+            if i:
+                hints.append(" · ")
+            hints.append(key, style=key_style)
+            hints.append(f" {action}")
+        return hints
 
 
 class CardView(Vertical):
-    """Header, transcript, notice, level/progress strip and key hints."""
+    """Header, transcript, notice, status row, level/progress strip, key hints.
+
+    As in the GUI: the mode on top, the status at the bottom with the strip.
+    """
 
     def __init__(self, card: Card, **kwargs) -> None:
         super().__init__(**kwargs)
@@ -42,20 +73,27 @@ class CardView(Vertical):
         # markup=False everywhere: transcripts and errors are plain text, and
         # a "[" in them must not be parsed as markup.
         with Horizontal(id="header"):
-            yield Static(id="dot", markup=False)
-            yield Static(id="status", markup=False)
+            yield Static("Dictation", id="title", markup=False)
             yield Static(id="vocab", markup=False)
-            yield Static(id="cost", markup=False)
-            yield Static(id="timer", markup=False)
         yield Rule(id="rule")
         with VerticalScroll(id="scroll"):
             yield Static(id="transcript", markup=False)
         yield Static(id="notice", markup=False)
-        yield LevelBar(id="level")
-        yield ProgressBar(
-            id="progress", total=1.0, show_eta=False, show_percentage=False
-        )
-        yield Static(id="keys", markup=False)
+        with Horizontal(id="statusbar"):
+            yield Static(id="dot", markup=False)
+            yield Static(id="status", markup=False)
+            yield Static(id="timer", markup=False)
+            # Here, not in the header: as the GUI's tooltip on the status dot,
+            # and nothing in the header moves when it appears at READY.
+            yield Static(id="cost", markup=False)
+        # One row, kept with or without a strip in it, so the status row and
+        # the keys never move between states.
+        with Container(id="strip"):
+            yield LevelBar(id="level")
+            yield ProgressBar(
+                id="progress", total=1.0, show_eta=False, show_percentage=False
+            )
+        yield KeyHints(id="keys")
 
     def on_mount(self) -> None:
         self.show(self._card)
@@ -105,6 +143,4 @@ class CardView(Vertical):
         else:
             progress.update(total=1.0, progress=card.progress)
 
-        self.query_one("#keys", Static).update(
-            " · ".join(f"{key} {label}" for key, label in card.keys)
-        )
+        self.query_one(KeyHints).keys = tuple(card.keys)
