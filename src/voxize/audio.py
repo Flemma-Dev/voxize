@@ -9,6 +9,11 @@ header at open time with data size set to 0xFFFFFFFF, appends + flushes PCM
 on each write, and fixes the two size fields on finalize. On crash, the file
 has an incorrect header but all PCM data is intact and recoverable.
 
+PipeAudioCapture is AudioCapture's interface fed from a file descriptor
+instead of the microphone: raw PCM in the same format, written by a process
+that records elsewhere (``python -m voxize.backend --audio-fd FD``). It never
+imports sounddevice.
+
 LevelMeter tracks per-chunk RMS for the UI level bar.  Audio is never
 modified — per-chunk gain manipulation was proven to degrade the
 Realtime API's transcription quality.
@@ -21,13 +26,20 @@ import os
 import struct
 import threading
 from collections.abc import Callable
-
-import sounddevice as sd
+from typing import TYPE_CHECKING
 
 from voxize._audio_const import BLOCK_SIZE, CHANNELS, DTYPE, SAMPLE_RATE
 from voxize.opus import OpusEncoder
 
+if TYPE_CHECKING:
+    import sounddevice as sd
+
 logger = logging.getLogger(__name__)
+
+# Bytes in one capture block (16-bit samples).
+BLOCK_BYTES = BLOCK_SIZE * CHANNELS * 2
+# How long PipeAudioCapture.stop() waits for the writer to close its end.
+PIPE_DRAIN_SECONDS = 15.0
 
 
 def rms_dbfs(samples: array.array) -> float:
@@ -206,6 +218,10 @@ class AudioCapture:
         return None
 
     def start(self) -> None:
+        # Imported here, so PipeAudioCapture never loads PortAudio; the
+        # backend preloads it in the background for microphone sessions.
+        import sounddevice as sd
+
         self._wav.open()
         self._opus.start()
         logger.debug(
@@ -242,3 +258,100 @@ class AudioCapture:
         self._opus.stop()
         self._wav.finalize()
         logger.debug("audio stop: complete opus_ok=%s", self._opus.ok)
+
+
+class PipeAudioCapture:
+    """AudioCapture's interface, reading PCM from a file descriptor.
+
+    The writer sends raw PCM in the capture format (``SAMPLE_RATE`` Hz,
+    ``CHANNELS`` channel, 16-bit little-endian) and closes its end when the
+    recording is over, before it sends ``stop``; ``stop()`` waits for that
+    end of file, so the WAV batch transcription reads holds every frame.
+    """
+
+    def __init__(
+        self,
+        session_dir: str,
+        fd: int,
+        on_chunk: Callable[[bytes], None] | None = None,
+    ) -> None:
+        self._session_dir = session_dir
+        self._fd = fd
+        self._wav = WavWriter(os.path.join(session_dir, "audio.wav"))
+        self._opus = OpusEncoder(session_dir)
+        self._on_chunk = on_chunk or _noop_on_chunk
+        self._meter = LevelMeter()
+        self._reader: threading.Thread | None = None
+        self._received = 0
+
+    @property
+    def meter(self) -> LevelMeter:
+        """Access the level meter for UI polling."""
+        return self._meter
+
+    def set_on_chunk(self, on_chunk: Callable[[bytes], None]) -> None:
+        """Swap the per-chunk forwarding callback (see AudioCapture)."""
+        self._on_chunk = on_chunk
+
+    @property
+    def opus_path(self) -> str | None:
+        """Path to the Opus file if encoding succeeded, else None."""
+        if self._opus.ok and os.path.exists(self._opus.path):
+            return self._opus.path
+        return None
+
+    def start(self) -> None:
+        self._wav.open()
+        self._opus.start()
+        self._reader = threading.Thread(
+            target=self._read, daemon=True, name="voxize-audio-pipe"
+        )
+        self._reader.start()
+        logger.debug("pipe audio start: fd=%d block_bytes=%d", self._fd, BLOCK_BYTES)
+
+    def _deliver(self, pcm: bytes) -> None:
+        self._meter.update(pcm)
+        self._wav.write(pcm)
+        self._opus.write(pcm)
+        self._on_chunk(pcm)
+
+    def _read(self) -> None:
+        pending = b""
+        try:
+            while data := os.read(self._fd, 65536):
+                self._received += len(data)
+                pending += data
+                whole = len(pending) - len(pending) % BLOCK_BYTES
+                for offset in range(0, whole, BLOCK_BYTES):
+                    self._deliver(pending[offset : offset + BLOCK_BYTES])
+                pending = pending[whole:]
+            # A short last block; an odd trailing byte would split a sample.
+            pending = pending[: len(pending) - len(pending) % 2]
+            if pending:
+                self._deliver(pending)
+        except Exception:
+            logger.exception("pipe audio: reading failed")
+        finally:
+            os.close(self._fd)
+            logger.debug("pipe audio: end of stream after %d bytes", self._received)
+
+    def finalize_wav(self) -> None:
+        """Finalize the WAV header without waiting; safe from a signal handler."""
+        self._wav.finalize()
+
+    def stop(self) -> None:
+        logger.debug("pipe audio stop")
+        if self._reader is not None:
+            self._reader.join(PIPE_DRAIN_SECONDS)
+            if self._reader.is_alive():
+                logger.warning(
+                    "pipe audio: no end of stream after %.0fs; finalizing",
+                    PIPE_DRAIN_SECONDS,
+                )
+        self._opus.stop()
+        self._wav.finalize()
+        logger.debug(
+            "pipe audio stop: complete bytes=%d opus_ok=%s",
+            self._received,
+            self._opus.ok,
+        )

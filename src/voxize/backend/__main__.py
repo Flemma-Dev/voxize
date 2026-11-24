@@ -1,10 +1,15 @@
 """Voxize backend — one dictation session over stdio (JSON Lines).
 
-    python -m voxize.backend
+    python -m voxize.backend [--audio-fd FD]
 
 No GTK. Spawned by a frontend (voxize.gui, later voxize.tui), which sends
 commands on stdin and reads events from stdout; see voxize.protocol.
 stdout carries protocol lines only, and everything else goes to stderr.
+
+--audio-fd FD reads the recording from an inherited file descriptor instead
+of the microphone: raw PCM, 24 kHz, mono, 16-bit little-endian, written by a
+process that records elsewhere (a phone, say), which closes its end before it
+sends stop. Such a session takes no microphone lock.
 
 Mock mode (env vars):
     VOXIZE_MOCK=1                  Use mock providers (no mic, no API)
@@ -17,6 +22,7 @@ Mock mode (env vars):
     VOXIZE_TRACE=1                 Print startup phase timings to stderr
 """
 
+import argparse
 import os
 import threading
 
@@ -30,9 +36,27 @@ from voxize import _trace  # noqa: E402 — stdout must be claimed first
 _trace.set_tag("backend")
 _trace.trace("__main__ start (after interpreter + site)")
 
+
+def _parse_arguments() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="python -m voxize.backend",
+        description="One Voxize dictation session over stdio (JSON Lines).",
+    )
+    parser.add_argument(
+        "--audio-fd",
+        type=int,
+        metavar="FD",
+        help="read the audio (raw 24 kHz mono s16le PCM) from this inherited "
+        "file descriptor instead of the microphone",
+    )
+    return parser.parse_args()
+
+
+_ARGUMENTS = _parse_arguments()
+
 # Kick off the ~1.9s PortAudio Pa_Initialize() immediately, in a background
-# thread, while the rest of startup proceeds.
-if not os.environ.get("VOXIZE_MOCK"):
+# thread, while the rest of startup proceeds. Piped audio never needs it.
+if not os.environ.get("VOXIZE_MOCK") and _ARGUMENTS.audio_fd is None:
 
     def _preload_sounddevice():
         import sounddevice  # noqa: F401 — triggers Pa_Initialize()
@@ -55,7 +79,7 @@ def main() -> None:
     config.load()
     _trace.trace("config.load() complete")
     mock = MockOptions.from_env()
-    server = Server(in_fd=0, out_fd=_PROTO_FD, mock=mock)
+    server = Server(in_fd=0, out_fd=_PROTO_FD, mock=mock, audio_fd=_ARGUMENTS.audio_fd)
     server.send_hello()
     _trace.trace("hello sent")
     errors: list[str] = []

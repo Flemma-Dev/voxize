@@ -89,7 +89,14 @@ class ProtocolLog:
 
 
 class Server:
-    def __init__(self, in_fd: int, out_fd: int, *, mock: MockOptions | None) -> None:
+    def __init__(
+        self,
+        in_fd: int,
+        out_fd: int,
+        *,
+        mock: MockOptions | None,
+        audio_fd: int | None = None,
+    ) -> None:
         self._in_fd = in_fd
         # backslashreplace: a lone surrogate in an event (valid in a Python
         # str, not in UTF-8) is written as the literal text \udc80, which is a
@@ -103,7 +110,9 @@ class Server:
         self._buf = b""
         self._loop = GLib.MainLoop()
         self._log = ProtocolLog()
-        self.session = Session(self.send, mock=mock, on_exit=self._exit)
+        self.session = Session(
+            self.send, mock=mock, audio_fd=audio_fd, on_exit=self._exit
+        )
 
     def send(self, msg: dict) -> None:
         if msg["type"] == "session":

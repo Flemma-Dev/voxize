@@ -18,6 +18,7 @@ uv run python -m voxize          # dictation overlay (bind to a global hotkey)
 uv run voxize-tui                # terminal client (Textual); prints the transcript on exit
 uv run python -m voxize.meeting  # meeting recorder (mic + system → stereo WAV)
 uv run python -m voxize.backend  # headless backend (stdio JSON Lines; spawned by either frontend)
+                                 # --audio-fd FD: audio from a pipe, not the mic (Voxize Remote)
 ```
 
 OpenAI API key must be in GNOME Keyring: `secret-tool store --label='OpenAI API Key' service openai key api`
@@ -69,7 +70,7 @@ Thread bridge (inside the backend): `GLib.idle_add` (worker -> main loop), `call
 | `tui/deliver.py` | Clipboard chain (wl-copy → xclip/xsel → OSC 52), the stdout write, and `claim_terminal_stdout` / `write_output` (keep Textual's size detection working when stdout is piped) |
 | `state.py` | State machine (pure logic, no GTK) |
 | `_audio_const.py` | Audio format constants (sample rate, channels, WAV header) — no heavy deps |
-| `audio.py` | `AudioCapture` (sounddevice) + `WavWriter` (crash-safe WAV) + `LevelMeter` (passive RMS) |
+| `audio.py` | `AudioCapture` (sounddevice, imported on start) + `PipeAudioCapture` (raw PCM from a file descriptor: `--audio-fd`, no mic lock) + `WavWriter` (crash-safe WAV) + `LevelMeter` (passive RMS) |
 | `transcribe.py` | Live preview: realtime WS client (`gpt-4o-mini-transcribe`, `server_vad`, throwaway) |
 | `batch.py` | Batch transcription: `POST /audio/transcriptions` (`gpt-transcribe`, streaming) |
 | `cleanup.py` | GPT-5.6 Luna text cleanup (Responses API, streaming) |

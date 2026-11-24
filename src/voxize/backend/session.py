@@ -93,10 +93,13 @@ class Session:
         emit: Emit,
         *,
         mock: MockOptions | None = None,
+        audio_fd: int | None = None,
         on_exit: Callable[[], None] = lambda: None,
     ) -> None:
         self._emit = emit
         self._mock = mock
+        # Audio from this descriptor instead of the microphone (PipeAudioCapture).
+        self._audio_fd = audio_fd
         self._on_exit = on_exit
         self._started = False
         self._closed = False
@@ -381,18 +384,22 @@ class Session:
         "voxize-bootstrap" thread.
         """
         _trace("_initialize entry")
-        logger.debug("_initialize: acquiring lock")
-        try:
-            self._lock = MicLock()
-            self._lock.acquire()
-        except MicLockError as e:
-            self._machine.transition(State.ERROR, error=str(e))
-            return
-        except Exception as e:
-            self._machine.transition(State.ERROR, error=f"Lock failed: {e}")
-            return
-        logger.debug("_initialize: lock acquired")
-        _trace("mic lock acquired")
+        if self._audio_fd is None:
+            logger.debug("_initialize: acquiring lock")
+            try:
+                self._lock = MicLock()
+                self._lock.acquire()
+            except MicLockError as e:
+                self._machine.transition(State.ERROR, error=str(e))
+                return
+            except Exception as e:
+                self._machine.transition(State.ERROR, error=f"Lock failed: {e}")
+                return
+            logger.debug("_initialize: lock acquired")
+            _trace("mic lock acquired")
+        else:
+            # Piped audio never opens the microphone, so it needs no mic lock.
+            logger.debug("_initialize: audio from fd %d, no mic lock", self._audio_fd)
 
         try:
             self._session_dir = create_session_dir()
@@ -518,18 +525,23 @@ class Session:
             self._bootstrap_done.set()
             return
 
-        # ── Phase 0: audio (sounddevice + numpy, ~2s cold) ──
+        # ── Phase 0: audio (the microphone's sounddevice + numpy load in start(), ~2s cold) ──
 
-        from voxize.audio import AudioCapture
+        if self._audio_fd is None:
+            from voxize.audio import AudioCapture
 
-        _trace("bootstrap: sounddevice + numpy imported")
+            audio = AudioCapture(self._session_dir)
+        else:
+            from voxize.audio import PipeAudioCapture
+
+            audio = PipeAudioCapture(self._session_dir, self._audio_fd)
+        _trace("bootstrap: audio module imported")
 
         if self._bootstrap_cancelled:
             _trace("bootstrap: cancelled after audio import")
             self._bootstrap_done.set()
             return
 
-        audio = AudioCapture(self._session_dir)
         try:
             audio.start()
         except Exception as e:
@@ -538,7 +550,8 @@ class Session:
             def _audio_error(err=str(e)):
                 self._release_lock()
                 if self._machine and self._machine.state == State.INITIALIZING:
-                    self._machine.transition(State.ERROR, error=f"Microphone: {err}")
+                    source = "Microphone" if self._audio_fd is None else "Audio input"
+                    self._machine.transition(State.ERROR, error=f"{source}: {err}")
                 return False
 
             GLib.idle_add(_audio_error)
