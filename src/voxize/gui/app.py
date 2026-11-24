@@ -251,7 +251,7 @@ class VoxizeApp(Gtk.Application):
         """SIGTERM/SIGINT — hand the backend EOF and quit.
 
         The backend treats stdin EOF as cancel + close: it finalizes the
-        WAV, releases the mic lock and restores ducked volumes itself.
+        WAV and releases the mic lock itself.
         """
         logger.info("Signal %s received, shutting down", sig)
         self._core.hang_up()

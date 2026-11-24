@@ -11,7 +11,6 @@ BACKEND_MODULES = {
     "voxize.mock",
     "voxize.prompt",
     "voxize.recover",
-    "voxize.ducking",
     "voxize.storage",
     "voxize.lock",
     "voxize.checks",

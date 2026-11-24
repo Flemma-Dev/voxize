@@ -31,7 +31,6 @@ from voxize.backend.presenter import Pipeline, Transcript
 from voxize.batch import BatchTranscription
 from voxize.checks import get_api_key
 from voxize.cleanup import Cleanup
-from voxize.ducking import VolumeDucker
 from voxize.lock import MicLock, MicLockError
 from voxize.mock import (
     SHORT_TRANSCRIPT,
@@ -159,10 +158,6 @@ class Session:
         # Only the first ping carries the cleanup prompt; see _warmup_ping.
         self._warmup_primed = False
 
-        # Per-app volume ducking while recording. Disabled in mock mode so
-        # tests don't silence the user's browser tabs.
-        self._ducker = VolumeDucker(apps=[] if mock else None)
-
         self._log_handler = None
         self._trash_session = False
 
@@ -245,12 +240,6 @@ class Session:
         self._stop_pipeline_timers()
         # Tell any in-flight bootstrap to stop.
         self._bootstrap_cancelled = True
-        # Restore ducked volumes synchronously — closing mid-recording would
-        # otherwise leave apps silent forever.
-        try:
-            self._ducker.restore_sync()
-        except Exception:
-            logger.exception("Close: failed to restore ducked volumes")
         self._stop_warmup()
         self._teardown_async()
         if self._mock_transcription:
@@ -300,12 +289,6 @@ class Session:
                 self._lock = None
             except Exception:
                 pass
-        # Restore ducked volumes synchronously — daemon threads die with
-        # the process, so fire-and-forget is not safe here.
-        try:
-            self._ducker.restore_sync()
-        except Exception:
-            logger.exception("Signal handler: failed to restore ducked volumes")
         self._on_exit()
 
     # ── Output helpers ──
@@ -718,12 +701,6 @@ class Session:
 
     def _on_state_change(self, machine: StateMachine, old: State, new: State) -> None:
         logger.debug("_on_state_change: %s -> %s", old.name, new.name)
-
-        # Per-app volume ducking — orthogonal to the phase logic below.
-        if new == State.WARMING:
-            self._ducker.duck()
-        elif old in _CAPTURE and new not in _CAPTURE:
-            self._ducker.restore()
 
         if new == State.WARMING:
             self._live_usage = None

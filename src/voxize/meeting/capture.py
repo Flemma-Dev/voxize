@@ -8,9 +8,8 @@ and appends to the stereo WAV via the shared crash-safe
 :class:`WavWriter`.
 
 Why pw-cat (and not parec, or sounddevice):
-- Voxize is a PipeWire app — ``ducking.py`` already shells out to
-  ``pw-dump`` and ``wpctl`` — so the audio toolchain stays consistent
-  by sourcing capture from the same family.
+- Voxize is a PipeWire app, so the audio toolchain stays consistent by
+  sourcing capture from PipeWire's own tools.
 - For the system side, we pass ``--properties stream.capture.sink=true``
   so PipeWire links the record stream to the target sink's monitor
   port. (pw-cat has no ``--capture-sink`` CLI flag — that's a parec-ism
@@ -23,8 +22,7 @@ Why pw-cat (and not parec, or sounddevice):
   monitor property, one without) keeps the writer loop trivial.
 
 Default-device discovery uses ``wpctl inspect @DEFAULT_AUDIO_SINK@``
-and parses ``node.name`` — the same wpctl binary already required by
-the ducking module.
+and parses ``node.name``.
 
 Drift / sync:
 - PipeWire's graph clock is shared across both sources, so the two

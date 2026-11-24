@@ -13,7 +13,7 @@ Usage::
     from voxize import config
 
     config.load()                     # once, at startup
-    config.CONFIG.ducking.apps        # read anywhere, synchronously
+    config.CONFIG.ui.autoclose_seconds  # read anywhere, synchronously
 """
 
 from __future__ import annotations
@@ -26,19 +26,6 @@ from dataclasses import dataclass, field
 logger = logging.getLogger(__name__)
 
 _CONFIG_FILENAME = "voxize.toml"
-
-
-@dataclass(frozen=True)
-class DuckingConfig:
-    apps: list[str] = field(
-        default_factory=lambda: [
-            "chrome",
-            "chromium",
-            "brave",
-            "firefox",
-        ]
-    )
-    volume: float = 0.2
 
 
 @dataclass(frozen=True)
@@ -75,7 +62,6 @@ class StorageConfig:
 
 @dataclass(frozen=True)
 class Config:
-    ducking: DuckingConfig = field(default_factory=DuckingConfig)
     ui: UIConfig = field(default_factory=UIConfig)
     storage: StorageConfig = field(default_factory=StorageConfig)
 
@@ -92,17 +78,6 @@ CONFIG: Config = Config()
 _TEMPLATE = """\
 # Voxize configuration. Uncomment and edit any line to override the default.
 # Delete this file to regenerate it with current defaults.
-
-[ducking]
-# Apps whose playback is silenced while Voxize is recording. Compared
-# case-insensitively as a full match (not substring) against
-# application.process.binary, application.process.name, application.name,
-# application.id, and node.name from pw-dump. Inspect `pw-dump` while an
-# app is playing to find the exact value it advertises.
-# apps = ["chrome", "chromium", "brave", "firefox"]
-
-# Target volume during ducking. 0.0 = silent, 1.0 = 100%.
-# volume = 0.2
 
 [ui]
 # Seconds of focused READY state before the overlay auto-closes.
@@ -162,16 +137,6 @@ def _parse(data: dict) -> Config:
     """Build a Config from raw TOML data, per-field fallback to defaults."""
     defaults = Config()
 
-    ducking_raw = data.get("ducking")
-    if ducking_raw is not None and not isinstance(ducking_raw, dict):
-        logger.debug(
-            "config: [ducking] is not a table (got %s), using defaults",
-            type(ducking_raw).__name__,
-        )
-        ducking_raw = {}
-    elif ducking_raw is None:
-        ducking_raw = {}
-
     ui_raw = data.get("ui")
     if ui_raw is not None and not isinstance(ui_raw, dict):
         logger.debug(
@@ -191,28 +156,6 @@ def _parse(data: dict) -> Config:
         storage_raw = {}
     elif storage_raw is None:
         storage_raw = {}
-
-    apps_raw = ducking_raw.get("apps")
-    if apps_raw is None:
-        apps = defaults.ducking.apps
-    elif isinstance(apps_raw, list):
-        apps = [str(x) for x in apps_raw]
-    else:
-        logger.debug(
-            "config: ducking.apps is not a list (got %s), using default",
-            type(apps_raw).__name__,
-        )
-        apps = defaults.ducking.apps
-
-    volume = ducking_raw.get("volume")
-    if volume is None:
-        volume = defaults.ducking.volume
-    elif not isinstance(volume, int | float) or isinstance(volume, bool):
-        logger.debug(
-            "config: ducking.volume is not numeric (got %r), using default",
-            volume,
-        )
-        volume = defaults.ducking.volume
 
     autoclose = ui_raw.get("autoclose_seconds")
     if autoclose is None:
@@ -261,7 +204,6 @@ def _parse(data: dict) -> Config:
         )
 
     return Config(
-        ducking=DuckingConfig(apps=apps, volume=float(volume)),
         ui=UIConfig(autoclose_seconds=int(autoclose)),
         storage=StorageConfig(
             max_sessions=max_sessions,
@@ -312,12 +254,9 @@ def load() -> None:
 
     CONFIG = _parse(data)
     logger.debug(
-        "config: loaded from %s (ducking.apps=%s, ducking.volume=%s, "
-        "ui.autoclose_seconds=%s, storage.max_sessions=%s, "
-        "storage.max_age_days=%s, storage.buckets=%s)",
+        "config: loaded from %s (ui.autoclose_seconds=%s, "
+        "storage.max_sessions=%s, storage.max_age_days=%s, storage.buckets=%s)",
         path,
-        CONFIG.ducking.apps,
-        CONFIG.ducking.volume,
         CONFIG.ui.autoclose_seconds,
         CONFIG.storage.max_sessions,
         CONFIG.storage.max_age_days,

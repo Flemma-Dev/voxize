@@ -9,7 +9,7 @@ End of life:
 - ``close`` → Session.close → _exit.
 - stdin EOF without ``close`` (the frontend died) → treated as
   ``close {trash_if_empty: false}``, so an orphaned backend never holds the
-  mic or leaves apps ducked.
+  mic.
 - SIGTERM/SIGINT → Session.on_signal → _exit.
 """
 

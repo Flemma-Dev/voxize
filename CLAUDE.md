@@ -78,7 +78,6 @@ Thread bridge (inside the backend): `GLib.idle_add` (worker -> main loop), `call
 | `recover.py` | Generates per-session `recover.sh` for batch re-transcription |
 | `clipboard.py` | Gdk.Clipboard (Wayland-native, best-effort); GUI-side, also imported by the meeting recorder |
 | `mode_switcher.py` | Dictate / Meeting pill toggle, shared by the dictation window and the meeting welcome screen (GTK, frontend-side) |
-| `ducking.py` | Per-app volume ducking via `pw-dump` + `wpctl` (snapshot on RECORD, restore on exit) |
 | `config.py` | User config loaded once from `$XDG_CONFIG_HOME/voxize/voxize.toml` (frozen dataclass, synchronous reads) |
 | `storage.py` | XDG state directory, session retention (configurable count + age) |
 | `lock.py` | Mic lock via `fcntl.flock()` |

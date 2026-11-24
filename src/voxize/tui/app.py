@@ -415,8 +415,8 @@ class VoxizeTui(App[str | None]):
     def _on_signal(self, sig: int) -> None:
         """SIGTERM/SIGHUP/SIGINT: hand the backend EOF and quit, printing nothing.
 
-        The backend treats stdin EOF as cancel + close: it finalizes the WAV,
-        releases the mic lock and restores ducked volumes itself.
+        The backend treats stdin EOF as cancel + close: it finalizes the WAV
+        and releases the mic lock itself.
         """
         logger.info("Signal %s received, shutting down", sig)
         # A copy at exit may still be in flight: its _leave must not then

@@ -117,8 +117,8 @@ class ClientCore:
     def hang_up(self) -> None:
         """Close the backend's stdin without ``close`` (signals).
 
-        The backend treats stdin EOF as cancel + close: it finalizes the WAV,
-        releases the mic lock and restores ducked volumes itself.
+        The backend treats stdin EOF as cancel + close: it finalizes the WAV
+        and releases the mic lock itself.
         """
         self.closed = True
         if self.transport is not None:

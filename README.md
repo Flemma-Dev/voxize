@@ -51,7 +51,7 @@ Voxize detects the focused window's working directory (via the [Window Calls](ht
 Voxize plugs into your desktop environment to work seamlessly. All of these are optional — Voxize degrades gracefully without them — but the experience is much better with them.
 
 - **[Window Calls](https://extensions.gnome.org/extension/4724/window-calls/)** (GNOME Shell extension) — this is how Voxize knows *where* you're working. It detects the focused window's PID, resolves its working directory (even through Ghostty → tmux → nvim chains), and loads your `WHISPER.txt`. Also used for always-on-top in the meeting recorder. Without it, vocabulary guidance is silently skipped.
-- **[PipeWire](https://pipewire.org/)** — the audio backbone. Dictation captures via [PortAudio](https://www.portaudio.com/)/sounddevice, meeting recording via `pw-cat --record` (two streams: mic + system audio). Volume ducking uses `pw-dump` and `wpctl` to silence your browser while recording. Ships with modern GNOME.
+- **[PipeWire](https://pipewire.org/)** — the audio backbone. Dictation captures via [PortAudio](https://www.portaudio.com/)/sounddevice, meeting recording via `pw-cat --record` (two streams: mic + system audio). Ships with modern GNOME.
 - **[FFmpeg](https://ffmpeg.org/)** — the meeting recorder uses `ffmpeg` to compress WAV → Opus after recording and to downmix stereo to mono before transcription. `ffprobe` reads recording duration. Not needed for dictation.
 - **[ElevenLabs Scribe](https://elevenlabs.io/docs/api-reference/speech-to-text/speech-to-text)** — powers the meeting recorder's post-recording transcription with speaker diarization. Not needed for dictation or for recording meetings — only for transcribing them.
 - **[GNOME Keyring](https://wiki.gnome.org/Projects/GnomeKeyring)** — API keys are stored securely via `secret-tool`, not environment variables or config files.
@@ -151,7 +151,6 @@ Voxize reads `$XDG_CONFIG_HOME/voxize/voxize.toml` on startup. A commented templ
 
 Key settings:
 
-- **Volume ducking** — automatically quiets Chrome, Firefox, and Brave while recording
 - **Auto-close** — the desktop overlay closes after 30s of inactivity in the ready state. Override with `VOXIZE_AUTOCLOSE=0` to disable
 - **Session retention** — 500 sessions / 14 days by default, configurable per-app (dictation and meetings prune independently)
 
