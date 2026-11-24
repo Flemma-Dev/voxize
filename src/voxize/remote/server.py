@@ -1166,10 +1166,14 @@ async def serve(arguments: argparse.Namespace) -> None:
                 await asyncio.start_server(voxize_server.serve_client, sock=listener)
             )
             log(f"listening for clients on {listener.getsockname()[:2]} (from systemd)")
+        # The socket file is systemd's: from Python 3.13 asyncio removes a Unix server's
+        # file when the server closes, which would leave the unit listening on nothing
+        # after the first idle exit.
+        keep_file = {"cleanup_socket": False} if sys.version_info >= (3, 13) else {}
         for listener in inherited["control"]:
             listeners.append(
                 await asyncio.start_unix_server(
-                    voxize_server.serve_control, sock=listener
+                    voxize_server.serve_control, sock=listener, **keep_file
                 )
             )
             log(f"control socket {listener.getsockname()} (from systemd)")

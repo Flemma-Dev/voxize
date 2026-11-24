@@ -945,6 +945,11 @@ class OnDemandTest(unittest.TestCase):
             # Nothing connected for 3 seconds: it exits by itself.
             server.wait(20)
             self.assertIn("exiting", pathlib.Path(self.log_path).read_text())
+            # The control socket's file belongs to whoever passed the socket (systemd): it
+            # outlives the server, so the next command still finds it.
+            self.assertTrue(
+                os.path.exists(control), "the server removed the socket's file"
+            )
         finally:
             server.kill()
 
