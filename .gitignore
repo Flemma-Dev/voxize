@@ -6,3 +6,7 @@ spike/
 #   uv run python scripts/generate_screenshots.py --all
 # Only the three README assets are tracked.
 assets/state-*.png
+
+# Voxize Remote's release key (scripts/release-apk.sh makes it) and the signed builds
+android/signing/
+dist/

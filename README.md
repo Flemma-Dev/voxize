@@ -145,6 +145,30 @@ Recording needs no API key. To enable transcription, store your ElevenLabs key i
 secret-tool store --label='ElevenLabs API Key' service elevenlabs key api
 ```
 
+## Voxize Remote
+
+Voxize Remote dictates from an Android phone into a terminal on the machine: tap a floating microphone over [Termux](https://termux.dev/), speak, tap again, and this machine's Voxize transcribes and cleans up the speech and pastes it into the tmux pane Termux is showing, without pressing Enter. The phone only records; everything else is the same backend as the desktop, with the phone's audio in place of the microphone (`python -m voxize.backend --audio-fd FD`). I use it with Claude Code sessions reached over `ssh` from Termux.
+
+The phone talks to the machine over [Tailscale](https://tailscale.com/) only. They pair once: the app shows six digits, and you type them on the machine. Every connection then proves the pairing both ways, the server first, and only a tap on the phone can open its microphone.
+
+The app (`android/`) is built with Nix, without Gradle, and each release carries it signed as `voxize-remote-VERSION.apk` with its `.sha256`. With the phone on a USB cable (or Wireless debugging), this installs it, allows it the microphone, notifications, "Display over other apps" and Usage access, pairs it and checks it connects:
+
+```sh
+voxize-remote setup-client --apk voxize-remote-0.4.1.apk
+```
+
+The server runs as `voxize-remote serve`, best started on demand by systemd from two sockets named `clients` (the port the phone dials, kept to Tailscale's interface by a firewall) and `control` (`$XDG_RUNTIME_DIR/voxize-remote.sock`); `--idle-exit 300` ends it once no phone is connected. On the machine:
+
+```sh
+voxize-remote status          # the connected phone and the dictation in progress (--json for scripts)
+voxize-remote devices         # paired phones
+voxize-remote unpair DEVICE   # forget one
+voxize-remote pair            # pair by hand: tap "Pair with server" in the app, type the code it shows
+voxize-remote cancel          # stop a dictation; the machine can never start one
+```
+
+`ssh` arms the app with `am start -n dev.flemma.voxize.remote/.ArmActivity` (as an ssh `LocalCommand`); the button then shows while Termux has a session open, and while it records. The design, and the reasons behind it, are in [docs/architecture-decision-voxize-remote.md](docs/architecture-decision-voxize-remote.md).
+
 ## Configuration
 
 Voxize reads `$XDG_CONFIG_HOME/voxize/voxize.toml` on startup. A commented template with all defaults is created on first run — uncomment any line to override.

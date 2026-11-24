@@ -87,3 +87,29 @@ def test_voxize_tui_entry_point_is_declared():
         (Path(__file__).resolve().parent.parent / "pyproject.toml").read_text()
     )["project"]
     assert project["scripts"]["voxize-tui"] == "voxize.tui.__main__:main"
+
+
+def test_remote_server_imports_no_gi_no_frontend_and_no_backend_module():
+    # It spawns the backend (python -m voxize.backend --audio-fd) like a frontend does,
+    # and runs as a systemd service: no GTK, no PortAudio. The keyring's gi loads
+    # only when the server first reads its pairings.
+    mods = modules_after(
+        "import voxize.remote.server, voxize.remote.setup_client, "
+        "voxize.remote.fake_client"
+    )
+    assert _gi(mods) == []
+    assert _backend(mods) == []
+    assert not [
+        m for m in mods if m.startswith(("voxize.gui", "voxize.tui", "voxize.frontend"))
+    ]
+    assert "sounddevice" not in mods
+
+
+def test_voxize_remote_entry_point_is_declared():
+    import tomllib
+    from pathlib import Path
+
+    project = tomllib.loads(
+        (Path(__file__).resolve().parent.parent / "pyproject.toml").read_text()
+    )["project"]
+    assert project["scripts"]["voxize-remote"] == "voxize.remote.server:main"

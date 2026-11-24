@@ -21,6 +21,13 @@ let
     wl-clipboard # manual testing (wl-copy)
     dotool # key/mouse simulation
     librsvg # rsvg-convert: scripts/tui_screenshots.py --hero (SVG -> PNG)
+    # Voxize Remote's tests: a private tmux server, a pty for an attached client (script), socket activation
+    # (systemd-socket-activate), and the client's Java against the server's Python (javac)
+    tmux
+    util-linux
+    systemd
+    jdk17_headless
+    android-tools # adb: voxize-remote setup-client by hand
   ];
 in
 

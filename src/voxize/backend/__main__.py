@@ -8,8 +8,8 @@ stdout carries protocol lines only, and everything else goes to stderr.
 
 --audio-fd FD reads the recording from an inherited file descriptor instead
 of the microphone: raw PCM, 24 kHz, mono, 16-bit little-endian, written by a
-process that records elsewhere (a phone, say), which closes its end before it
-sends stop. Such a session takes no microphone lock.
+process that records elsewhere (Voxize Remote's server, for its client), which
+closes its end before it sends stop. Such a session takes no microphone lock.
 
 Mock mode (env vars):
     VOXIZE_MOCK=1                  Use mock providers (no mic, no API)

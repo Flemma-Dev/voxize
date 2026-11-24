@@ -15,6 +15,7 @@ dependencies = [
 voxize = "voxize.gui.__main__:main"
 voxize-tui = "voxize.tui.__main__:main"
 voxize-meet = "voxize.meeting.__main__:main"
+voxize-remote = "voxize.remote.server:main"
 
 [dependency-groups]
 dev = [

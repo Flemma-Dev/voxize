@@ -19,6 +19,8 @@ uv run voxize-tui                # terminal client (Textual); prints the transcr
 uv run python -m voxize.meeting  # meeting recorder (mic + system → stereo WAV)
 uv run python -m voxize.backend  # headless backend (stdio JSON Lines; spawned by either frontend)
                                  # --audio-fd FD: audio from a pipe, not the mic (Voxize Remote)
+uv run voxize-remote serve --mock  # Voxize Remote's server by hand (stop its systemd units first)
+nix build path:.#voxize-remote-apk # Voxize Remote's Android client, unsigned (scripts/release-apk.sh signs it)
 ```
 
 OpenAI API key must be in GNOME Keyring: `secret-tool store --label='OpenAI API Key' service openai key api`
@@ -85,6 +87,11 @@ Thread bridge (inside the backend): `GLib.idle_add` (worker -> main loop), `call
 | `checks.py` | Startup dependency validation |
 | `gui/dictation.css` | The dictation window's only custom CSS (~35 lines); everything else is stock libadwaita |
 | `style.css` | Meeting recorder CSS theme (not loaded by the dictation app — both define `.status-dot`) |
+| `remote/server.py` | Voxize Remote's server and the `voxize-remote` CLI: Tailscale-only connections, pairing window, dictations (one `voxize.backend --audio-fd` each), tmux paste, systemd sockets, control socket |
+| `remote/pairing.py` | Secrets, commitments, proofs and codes (byte for byte what `android/…/Pairing.java` computes), keyring and file stores |
+| `remote/frames.py`, `remote/fake_client.py` | The wire format (kind byte, big-endian length, JSON or PCM); a client for the tests |
+| `remote/setup_client.py` | `voxize-remote setup-client`: the release APK installed (replaced when signed with another key), allowed, paired and checked over adb |
+| `android/` | Voxize Remote's Android client (Java, no Gradle; built by `nix/voxize-remote-apk.nix`); `android/tests/` holds Java mains the Python tests compile |
 | `meeting/` | Meeting recorder package — separate Gtk.Application, dual-stream capture (mic + system) to stereo WAV via two `parec` subprocesses. No API calls. Shares `audio.py`/`lock.py`/`storage.py` with the dictation app and owns `style.css`; entry point `python -m voxize.meeting`. |
 
 ## Key technical decisions
@@ -109,6 +116,7 @@ Thread bridge (inside the backend): `GLib.idle_add` (worker -> main loop), `call
 - `docs/journal.md` — implementation decisions and deviations up to v0.3.0, chronological. **Frozen**: read it for history, don't append.
 - `docs/architecture-decision-layer-shell-and-dual-frontend.md` — why gtk4-layer-shell was dropped.
 - `docs/architecture-decision-headless-backend.md` — why the backend is a headless stdio process and the GUI is a client of it; the dividing rule.
+- `docs/architecture-decision-voxize-remote.md` — the phone as a microphone: pairing, proofs, the capture gate, Tailscale only, the release APK and its key.
 - `docs/debugging-guide.md` — VAD pacing experiments, debug.log format, diagnostic patterns.
 
 ## Conventions
@@ -133,7 +141,7 @@ uv run black --check src/
 uv run pytest
 ```
 
-Presenter unit tests (fake clock); stdio contract tests that spawn `python -m voxize.backend` with `VOXIZE_MOCK=1` (`VOXIZE_MOCK_FAST=1` shrinks the fixed mock delays); in-process `Session` tests that cover each `VOXIZE_MOCK_OUTCOME`; GUI client, app and context tests; Textual TUI tests (`run_test`, headless) with fakes and against a mock backend; and the import-rule tests.
+Presenter unit tests (fake clock); stdio contract tests that spawn `python -m voxize.backend` with `VOXIZE_MOCK=1` (`VOXIZE_MOCK_FAST=1` shrinks the fixed mock delays); in-process `Session` tests that cover each `VOXIZE_MOCK_OUTCOME`; GUI client, app and context tests; Textual TUI tests (`run_test`, headless) with fakes and against a mock backend; Voxize Remote's tests (`test_remote_*`: the server end to end with a fake client, a private tmux server and the mock backend, the real backend offline through `--audio-fd`, `setup-client` with a scripted adb, and the client's Java against the server's Python with the dev shell's `javac`); and the import-rule tests.
 
 ### Running ad-hoc NixOS tools
 
